@@ -45,7 +45,7 @@ namespace core {
         // Update IQ frontend input samplerate and get effective samplerate
         sigpath::iqFrontEnd.setSampleRate(samplerate);
         double effectiveSr  = sigpath::iqFrontEnd.getEffectiveSamplerate();
-        
+
         // Reset zoom
         gui::waterfall.setBandwidth(effectiveSr);
         gui::waterfall.setViewOffset(0);
@@ -54,6 +54,8 @@ namespace core {
 
         // Debug logs
         flog::info("New DSP samplerate: {0} (source samplerate is {1})", effectiveSr, samplerate);
+
+        gui::mainWindow.loadZoomFromConfig();
     }
 };
 
@@ -258,6 +260,8 @@ int sdrpp_main(int argc, char* argv[]) {
     defConfig["vfoOffsets"] = json::object();
 
     defConfig["vfoColors"]["Radio"] = "#FFFFFF";
+    defConfig["bandwidth_slider"] = 0.0f;
+    defConfig["bandwidth_view"] = 0.0f;
 
 #ifdef __ANDROID__
     defConfig["lockMenuOrder"] = true;

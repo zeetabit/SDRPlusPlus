@@ -54,6 +54,8 @@ option(OPT_BUILD_PAGER_DECODER "Build the pager decoder module (no dependencies 
 option(OPT_BUILD_RADIO "Main audio modulation decoder (AM, FM, SSB, etc...)" ON)
 option(OPT_BUILD_RYFI_DECODER "RyFi data link decoder" OFF)
 option(OPT_BUILD_WEATHER_SAT_DECODER "Build the HRPT decoder module (no dependencies required)" OFF)
+option(OPT_BUILD_RADIOSONDE_DECODER "Build the radiosonde decoder module (no dependencies required)" ON)
+option(OPT_BUILD_CW_DECODER "Build the CW decoder module (no dependencies required)" ON)
 
 # Misc
 option(OPT_BUILD_DISCORD_PRESENCE "Build the Discord Rich Presence module" ON)
@@ -288,6 +290,14 @@ endif (OPT_BUILD_RYFI_DECODER)
 if (OPT_BUILD_WEATHER_SAT_DECODER)
 add_subdirectory("decoder_modules/weather_sat_decoder")
 endif (OPT_BUILD_WEATHER_SAT_DECODER)
+
+if (OPT_BUILD_RADIOSONDE_DECODER)
+    add_subdirectory("decoder_modules/sdrpp_radiosonde")
+endif (OPT_BUILD_RADIOSONDE_DECODER)
+
+if (OPT_BUILD_CW_DECODER)
+    add_subdirectory("decoder_modules/cw_decoder")
+endif (OPT_BUILD_CW_DECODER)
 
 
 # Misc
