@@ -83,6 +83,7 @@ void MainWindow::init() {
     // Set default values for waterfall in case no source init's it
     gui::waterfall.setBandwidth(8000000);
     gui::waterfall.setViewBandwidth(8000000);
+    this->loadZoomFromConfig();
 
     fft_in = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * fftSize);
     fft_out = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * fftSize);
@@ -227,6 +228,57 @@ void MainWindow::init() {
     core::moduleManager.doPostInitAll();
 }
 
+ImGui::WaterfallVFO* MainWindow::getSelectedVFO() {
+    ImGui::WaterfallVFO* vfo = NULL;
+
+    if (!gui::waterfall.selectedVFO.empty()) {
+        vfo = gui::waterfall.vfos[gui::waterfall.selectedVFO];
+    }
+
+    return vfo;
+}
+
+void MainWindow::loadZoomFromConfig() {
+    float sliderBw = core::configManager.conf["bandwidth_slider"];
+    float viewBw = core::configManager.conf["bandwidth_view"];
+    if (sliderBw >= 0 && viewBw > 1.0) {
+        flog::info("Loaded DSP samplerate: {0}, sliderValue: {1}", viewBw, sliderBw);
+
+        gui::waterfall.setViewOffset(0);
+        gui::mainWindow.setViewBandwidthSlider(sliderBw);
+
+        this->onZoomChanged(sliderBw, viewBw, false);
+    }
+}
+
+void MainWindow::onZoomChange(float bandwith) {
+    double factor = (double)bandwith * (double)bandwith;
+
+    // Map 0.0 -> 1.0 to 1000.0 -> bandwidth
+    double wfBw = gui::waterfall.getBandwidth();
+    double delta = wfBw - 1000.0;
+    double finalBw = std::min<double>(1000.0 + (factor * delta), wfBw);
+
+    this->onZoomChanged(bandwith, finalBw);
+}
+
+void MainWindow::onZoomChanged(float sliderValue, double viewBandwidthValue, bool saveValues) {
+    gui::waterfall.setViewBandwidth(viewBandwidthValue);
+
+    ImGui::WaterfallVFO* vfo = this->getSelectedVFO();
+    if (vfo != NULL) {
+        gui::waterfall.setViewOffset(vfo->centerOffset); // center vfo on screen
+    }
+
+    if (saveValues) {
+        flog::info("store bandwidth zoom: {0} {1}", sliderValue, viewBandwidthValue);
+        core::configManager.acquire();
+        core::configManager.conf["bandwidth_slider"] = sliderValue;
+        core::configManager.conf["bandwidth_view"] = viewBandwidthValue;
+        core::configManager.release(true);
+    }
+}
+
 float* MainWindow::acquireFFTBuffer(void* ctx) {
     return gui::waterfall.getFFTBuffer();
 }
@@ -261,10 +313,7 @@ void MainWindow::draw() {
     ImGui::Begin("Main", NULL, WINDOW_FLAGS);
     ImVec4 textCol = ImGui::GetStyleColorVec4(ImGuiCol_Text);
 
-    ImGui::WaterfallVFO* vfo = NULL;
-    if (gui::waterfall.selectedVFO != "") {
-        vfo = gui::waterfall.vfos[gui::waterfall.selectedVFO];
-    }
+    ImGui::WaterfallVFO* vfo = this->getSelectedVFO();
 
     // Handle VFO movement
     if (vfo != NULL) {
@@ -617,17 +666,7 @@ void MainWindow::draw() {
     ImGui::SetCursorPosX((ImGui::GetWindowSize().x / 2.0) - 10 * style::uiScale);
     ImVec2 wfSliderSize(20.0 * style::uiScale, 150.0 * style::uiScale);
     if (ImGui::VSliderFloat("##_7_", wfSliderSize, &bw, 1.0, 0.0, "")) {
-        double factor = (double)bw * (double)bw;
-
-        // Map 0.0 -> 1.0 to 1000.0 -> bandwidth
-        double wfBw = gui::waterfall.getBandwidth();
-        double delta = wfBw - 1000.0;
-        double finalBw = std::min<double>(1000.0 + (factor * delta), wfBw);
-
-        gui::waterfall.setViewBandwidth(finalBw);
-        if (vfo != NULL) {
-            gui::waterfall.setViewOffset(vfo->centerOffset); // center vfo on screen
-        }
+        this->onZoomChange(bw);
     }
 
     ImGui::NewLine();

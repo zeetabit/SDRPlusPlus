@@ -15,9 +15,11 @@ option(OPT_BUILD_AUDIO_SOURCE "Build Audio Source Module (Dependencies: rtaudio)
 option(OPT_BUILD_BADGESDR_SOURCE "Build BadgeSDR Source Module (Dependencies: libusb)" OFF)
 option(OPT_BUILD_BLADERF_SOURCE "Build BladeRF Source Module (Dependencies: libbladeRF)" OFF)
 option(OPT_BUILD_FILE_SOURCE "Wav file source" ON)
+option(OPT_BUILD_FOBOSSDR_SOURCE "Build FobosSDR Source Module (Dependencies: libfobos)" OFF)
 option(OPT_BUILD_HACKRF_SOURCE "Build HackRF Source Module (Dependencies: libhackrf)" ON)
 option(OPT_BUILD_HAROGIC_SOURCE "Build Harogic Source Module (Dependencies: htra_api)" OFF)
 option(OPT_BUILD_HERMES_SOURCE "Build Hermes Source Module (no dependencies required)" ON)
+option(OPT_BUILD_KCSDR_SOURCE "Build KCSDR Source Module (Dependencies: libkcsdr)" OFF)
 option(OPT_BUILD_LIMESDR_SOURCE "Build LimeSDR Source Module (Dependencies: liblimesuite)" OFF)
 option(OPT_BUILD_NETWORK_SOURCE "Build Network Source Module (no dependencies required)" ON)
 option(OPT_BUILD_PERSEUS_SOURCE "Build Perseus Source Module (Dependencies: libperseus-sdr)" OFF)
@@ -43,6 +45,7 @@ option(OPT_BUILD_PORTAUDIO_SINK "Build PortAudio Sink Module (Dependencies: port
 
 # Decoders
 option(OPT_BUILD_ATV_DECODER "Build ATV decoder (no dependencies required)" OFF)
+option(OPT_BUILD_DAB_DECODER "Build the DAB/DAB+ decoder (no dependencies required)" OFF)
 option(OPT_BUILD_FALCON9_DECODER "Build the falcon9 live decoder (Dependencies: ffplay)" OFF)
 option(OPT_BUILD_KG_SSTV_DECODER "Build the KG SSTV (KG-STV) decoder module (no dependencies required)" OFF)
 option(OPT_BUILD_M17_DECODER "Build the M17 decoder module (Dependencies: codec2)" OFF)
@@ -51,6 +54,8 @@ option(OPT_BUILD_PAGER_DECODER "Build the pager decoder module (no dependencies 
 option(OPT_BUILD_RADIO "Main audio modulation decoder (AM, FM, SSB, etc...)" ON)
 option(OPT_BUILD_RYFI_DECODER "RyFi data link decoder" OFF)
 option(OPT_BUILD_WEATHER_SAT_DECODER "Build the HRPT decoder module (no dependencies required)" OFF)
+option(OPT_BUILD_RADIOSONDE_DECODER "Build the radiosonde decoder module (no dependencies required)" ON)
+option(OPT_BUILD_CW_DECODER "Build the CW decoder module (no dependencies required)" ON)
 
 # Misc
 option(OPT_BUILD_DISCORD_PRESENCE "Build the Discord Rich Presence module" ON)
@@ -142,6 +147,10 @@ if (OPT_BUILD_FILE_SOURCE)
 add_subdirectory("source_modules/file_source")
 endif (OPT_BUILD_FILE_SOURCE)
 
+if (OPT_BUILD_FOBOSSDR_SOURCE)
+add_subdirectory("source_modules/fobossdr_source")
+endif (OPT_BUILD_FOBOSSDR_SOURCE)
+
 if (OPT_BUILD_HACKRF_SOURCE)
 add_subdirectory("source_modules/hackrf_source")
 endif (OPT_BUILD_HACKRF_SOURCE)
@@ -153,6 +162,10 @@ endif (OPT_BUILD_HAROGIC_SOURCE)
 if (OPT_BUILD_HERMES_SOURCE)
 add_subdirectory("source_modules/hermes_source")
 endif (OPT_BUILD_HERMES_SOURCE)
+
+if (OPT_BUILD_KCSDR_SOURCE)
+add_subdirectory("source_modules/kcsdr_source")
+endif (OPT_BUILD_KCSDR_SOURCE)
 
 if (OPT_BUILD_LIMESDR_SOURCE)
 add_subdirectory("source_modules/limesdr_source")
@@ -242,6 +255,10 @@ if (OPT_BUILD_ATV_DECODER)
 add_subdirectory("decoder_modules/atv_decoder")
 endif (OPT_BUILD_ATV_DECODER)
 
+if (OPT_BUILD_DAB_DECODER)
+add_subdirectory("decoder_modules/dab_decoder")
+endif (OPT_BUILD_DAB_DECODER)
+
 if (OPT_BUILD_FALCON9_DECODER)
 add_subdirectory("decoder_modules/falcon9_decoder")
 endif (OPT_BUILD_FALCON9_DECODER)
@@ -273,6 +290,14 @@ endif (OPT_BUILD_RYFI_DECODER)
 if (OPT_BUILD_WEATHER_SAT_DECODER)
 add_subdirectory("decoder_modules/weather_sat_decoder")
 endif (OPT_BUILD_WEATHER_SAT_DECODER)
+
+if (OPT_BUILD_RADIOSONDE_DECODER)
+    add_subdirectory("decoder_modules/sdrpp_radiosonde")
+endif (OPT_BUILD_RADIOSONDE_DECODER)
+
+if (OPT_BUILD_CW_DECODER)
+    add_subdirectory("decoder_modules/cw_decoder")
+endif (OPT_BUILD_CW_DECODER)
 
 
 # Misc
