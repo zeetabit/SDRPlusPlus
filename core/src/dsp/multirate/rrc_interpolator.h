@@ -1,12 +1,13 @@
 #pragma once
 #include "../multirate/polyphase_resampler.h"
+#include "../engine/scheduled_processor.h"
 #include "../taps/root_raised_cosine.h"
 #include <numeric>
 
 namespace dsp::multirate {
     template <class T>
-    class RRCInterpolator : public Processor<T, T> {
-        using base_type = Processor<T, T>;
+    class RRCInterpolator : public ScheduledProcessor<T, T> {
+        using base_type = ScheduledProcessor<T, T>;
     public:
         RRCInterpolator() {}
 

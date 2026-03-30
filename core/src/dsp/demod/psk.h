@@ -1,4 +1,5 @@
 #pragma once
+#include "../engine/scheduled_processor.h"
 #include "../taps/root_raised_cosine.h"
 #include "../filter/fir.h"
 #include "../loop/fast_agc.h"
@@ -7,8 +8,8 @@
 
 namespace dsp::demod {
     template<int ORDER>
-    class PSK : public Processor<complex_t, complex_t> {
-        using base_type = Processor<complex_t, complex_t>;
+    class PSK : public ScheduledProcessor<complex_t, complex_t> {
+        using base_type = ScheduledProcessor<complex_t, complex_t>;
     public:
         PSK() {}
 

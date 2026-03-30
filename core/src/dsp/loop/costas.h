@@ -1,5 +1,6 @@
 #pragma once
 #include "pll.h"
+#include "../engine/scheduled_processor.h"
 #include "../math/step.h"
 
 namespace dsp::loop {

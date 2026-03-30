@@ -1,11 +1,12 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 
 
 namespace dsp::filter {
     template<class T>
-    class Deemphasis : public Processor<T, T> {
-        using base_type = Processor<T, T>;
+    class Deemphasis : public ScheduledProcessor<T, T> {
+        using base_type = ScheduledProcessor<T, T>;
     public:
         Deemphasis() {}
 

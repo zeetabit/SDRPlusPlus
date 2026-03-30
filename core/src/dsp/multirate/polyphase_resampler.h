@@ -1,12 +1,13 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 #include "../taps/tap.h"
 #include "polyphase_bank.h"
 
 namespace dsp::multirate {
     template<class T>
-    class PolyphaseResampler : public Processor<T, T> {
-        using base_type = Processor<T, T>;
+    class PolyphaseResampler : public ScheduledProcessor<T, T> {
+        using base_type = ScheduledProcessor<T, T>;
     public:
         PolyphaseResampler() {}
 

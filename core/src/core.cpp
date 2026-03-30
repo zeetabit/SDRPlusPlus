@@ -19,6 +19,9 @@
 #include <stb_image_resize.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <utils/event_bus.h>
+#include <utils/events.h>
+#include <dsp/engine/thread_pool.h>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -52,6 +55,8 @@ namespace core {
         gui::waterfall.setViewBandwidth(effectiveSr);
         gui::mainWindow.setViewBandwidthSlider(1.0);
 
+        EventBus::get().publish(events::InputSampleRateChanged{effectiveSr});
+
         // Debug logs
         flog::info("New DSP samplerate: {0} (source samplerate is {1})", effectiveSr, samplerate);
     }
@@ -60,6 +65,9 @@ namespace core {
 // main
 int sdrpp_main(int argc, char* argv[]) {
     flog::info("SDR++ v" VERSION_STR);
+
+    // Store executable path for resource auto-detection
+    std::string argv0 = argv[0];
 
 #ifdef IS_MACOS_BUNDLE
     // If this is a MacOS .app, CD to the correct directory
@@ -368,8 +376,43 @@ int sdrpp_main(int argc, char* argv[]) {
     // Assert that the resource directory is absolute and check existence
     resDir = std::filesystem::absolute(resDir).string();
     if (!std::filesystem::is_directory(resDir)) {
-        flog::error("Resource directory doesn't exist! Please make sure that you've configured it correctly in config.json (check readme for details)");
-        return 1;
+        flog::warn("Configured resource directory '{0}' not found, attempting auto-detection...", resDir);
+
+        // Candidate paths relative to the executable and CWD
+        auto execDir = std::filesystem::absolute(argv0).parent_path().string();
+        std::string candidates[] = {
+            execDir + "/res",
+            execDir + "/../res",
+            execDir + "/../root/res",
+            execDir + "/../root_dev/res",
+            "./res",
+            "./root/res",
+            "./root_dev/res",
+            "../res",
+            "../root/res",
+            "../root_dev/res",
+        };
+
+        std::string detectedDir;
+        for (auto& candidate : candidates) {
+            std::string abs = std::filesystem::absolute(candidate).string();
+            if (std::filesystem::is_directory(abs)) {
+                detectedDir = abs;
+                break;
+            }
+        }
+
+        if (!detectedDir.empty()) {
+            flog::info("Auto-detected resource directory: {0}", detectedDir);
+            resDir = detectedDir;
+            core::configManager.acquire();
+            core::configManager.conf["resourcesDirectory"] = resDir;
+            core::configManager.release(true);
+        }
+        else {
+            flog::error("Resource directory doesn't exist! Please make sure that you've configured it correctly in config.json (check readme for details)");
+            return 1;
+        }
     }
 
     // Initialize backend
@@ -404,7 +447,20 @@ int sdrpp_main(int argc, char* argv[]) {
 
     // On android, none of this shutdown should happen due to the way the UI works
 #ifndef __ANDROID__
-    // Shut down all modules
+    // Stop the IQ frontend first -- it's the data source for the entire DSP graph.
+    // This unblocks all downstream stream::read() calls.
+    sigpath::iqFrontEnd.stop();
+
+    // Delete all module instances (stops their DSP blocks, releases hardware)
+    std::vector<std::string> instNames;
+    for (auto& [name, inst] : core::moduleManager.instances) {
+        instNames.push_back(name);
+    }
+    for (auto& name : instNames) {
+        core::moduleManager.deleteInstance(name);
+    }
+
+    // Shut down all modules (calls _END_ for each loaded module)
     for (auto& [name, mod] : core::moduleManager.modules) {
         mod.end();
     }
@@ -412,7 +468,8 @@ int sdrpp_main(int argc, char* argv[]) {
     // Terminate backend (TODO: CHECK RETURN VALUE)
     backend::end();
 
-    sigpath::iqFrontEnd.stop();
+    // Shut down the DSP thread pool (all workers should be idle by now)
+    dsp::engine::getPool().shutdown();
 
     core::configManager.disableAutoSave();
     core::configManager.save();

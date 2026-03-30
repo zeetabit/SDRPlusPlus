@@ -1,12 +1,13 @@
 #pragma once
 #include "../filter/decimating_fir.h"
+#include "../engine/scheduled_processor.h"
 #include "../taps/from_array.h"
 #include "decim/plans.h"
 
 namespace dsp::multirate {
     template<class T>
-    class PowerDecimator : public Processor<T, T> {
-        using base_type = Processor<T, T>;
+    class PowerDecimator : public ScheduledProcessor<T, T> {
+        using base_type = ScheduledProcessor<T, T>;
     public:
         PowerDecimator() {}
 

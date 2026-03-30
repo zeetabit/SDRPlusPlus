@@ -1,9 +1,10 @@
 #pragma once
 #include "../operator.h"
+#include "../engine/scheduled_processor.h"
 
 namespace dsp::convert {
-    class LRToStereo : public Operator<float, float, stereo_t> {
-        using base_type = Operator<float, float, stereo_t>;
+    class LRToStereo : public ScheduledOperator<float, float, stereo_t> {
+        using base_type = ScheduledOperator<float, float, stereo_t>;
     public:
         LRToStereo() {}
 

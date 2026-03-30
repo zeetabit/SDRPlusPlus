@@ -1,12 +1,13 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 #include "../math/phasor.h"
 #include "../math/normalize_phase.h"
 #include "../math/hz_to_rads.h"
 
 namespace dsp::mod {
-    class Quadrature : public Processor<float, complex_t> {
-        using base_type = Processor<float, complex_t>;
+    class Quadrature : public ScheduledProcessor<float, complex_t> {
+        using base_type = ScheduledProcessor<float, complex_t>;
     public:
         Quadrature() {}
 

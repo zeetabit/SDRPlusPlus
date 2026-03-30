@@ -1,13 +1,14 @@
 #pragma once
 #include "../sink.h"
+#include "../engine/scheduled_processor.h"
 #include "../buffer/ring_buffer.h"
 
 // NOTE: THIS IS COMPLETELY UNTESTED AND PROBABLY BROKEN!!!
 
 namespace dsp::sink {
     template <class T>
-    class RingBuffer : public Sink<T> {
-        using base_type = Sink<T>;
+    class RingBuffer : public ScheduledSink<T> {
+        using base_type = ScheduledSink<T>;
     public:
         RingBuffer() {}
 

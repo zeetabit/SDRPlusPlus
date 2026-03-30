@@ -1,11 +1,12 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 #include "../window/nuttall.h"
 #include <fftw3.h>
 
 namespace dsp::noise_reduction {
-    class FMIF : public Processor<complex_t, complex_t> {
-        using base_type = Processor<complex_t, complex_t>;
+    class FMIF : public ScheduledProcessor<complex_t, complex_t> {
+        using base_type = ScheduledProcessor<complex_t, complex_t>;
     public:
         FMIF() {}
 

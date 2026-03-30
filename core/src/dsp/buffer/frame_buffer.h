@@ -1,8 +1,7 @@
 #pragma once
 #include "../block.h"
+#include "../engine/thread_pool.h"
 #define TEST_BUFFER_SIZE 32
-
-// IMPORTANT: THIS IS TRASH AND MUST BE REWRITTEN IN THE FUTURE
 
 namespace dsp::buffer {
     template <class T>
@@ -101,8 +100,16 @@ namespace dsp::buffer {
 
     private:
         void doStart() {
-            base_type::workerThread = std::thread(&SampleFrameBuffer<T>::workerLoop, this);
-            readWorkerThread = std::thread(&SampleFrameBuffer<T>::worker, this);
+            // Submit both worker loops to the thread pool instead of
+            // spawning dedicated threads.
+            workerFuture = engine::getPool().submit([this]() -> int {
+                workerLoop();
+                return 0;
+            });
+            readWorkerFuture = engine::getPool().submit([this]() -> int {
+                worker();
+                return 0;
+            });
         }
 
         void doStop() {
@@ -111,8 +118,8 @@ namespace dsp::buffer {
             stopWorker = true;
             cnd.notify_all();
 
-            if (base_type::workerThread.joinable()) { base_type::workerThread.join(); }
-            if (readWorkerThread.joinable()) { readWorkerThread.join(); }
+            if (workerFuture.valid()) { workerFuture.get(); }
+            if (readWorkerFuture.valid()) { readWorkerFuture.get(); }
 
             _in->clearReadStop();
             out.clearWriteStop();
@@ -121,7 +128,8 @@ namespace dsp::buffer {
 
         stream<T>* _in;
 
-        std::thread readWorkerThread;
+        std::future<int> workerFuture;
+        std::future<int> readWorkerFuture;
         std::mutex bufMtx;
         std::condition_variable cnd;
         T* buffers[TEST_BUFFER_SIZE];

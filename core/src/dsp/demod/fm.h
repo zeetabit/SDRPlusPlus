@@ -1,5 +1,6 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 #include "quadrature.h"
 #include "../filter/fir.h"
 #include "../taps/low_pass.h"
@@ -9,8 +10,8 @@
 
 namespace dsp::demod {
     template <class T>
-    class FM : public dsp::Processor<dsp::complex_t, T> {
-        using base_type = dsp::Processor<dsp::complex_t, T>;
+    class FM : public dsp::ScheduledProcessor<dsp::complex_t, T> {
+        using base_type = dsp::ScheduledProcessor<dsp::complex_t, T>;
     public:
         FM() {}
 

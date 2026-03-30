@@ -1,10 +1,11 @@
 #pragma once
 #include "../sink.h"
+#include "../engine/scheduled_processor.h"
 
 namespace dsp::bench {
     template<class T>
-    class PeakLevelMeter : public Sink<T> {
-        using base_type = Sink<T>;
+    class PeakLevelMeter : public ScheduledSink<T> {
+        using base_type = ScheduledSink<T>;
     public:
         PeakLevelMeter() {}
 

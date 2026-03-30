@@ -1,14 +1,15 @@
 #pragma once
 #include "../processor.h"
-#include "../channel/frequency_xlator.h" 
+#include "../engine/scheduled_processor.h"
+#include "../channel/frequency_xlator.h"
 #include "../convert/complex_to_real.h"
 #include "../loop/agc.h"
 #include "../convert/mono_to_stereo.h"
 
 namespace dsp::demod {
     template <class T>
-    class SSB : public Processor<complex_t, T> {
-        using base_type = Processor<complex_t, T>;
+    class SSB : public ScheduledProcessor<complex_t, T> {
+        using base_type = ScheduledProcessor<complex_t, T>;
     public:
         enum Mode {
             USB,

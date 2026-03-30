@@ -1,13 +1,14 @@
 #pragma once
 #include "quadrature.h"
+#include "../engine/scheduled_processor.h"
 #include "../taps/root_raised_cosine.h"
 #include "../filter/fir.h"
 #include "../clock_recovery/mm.h"
 
 namespace dsp::demod {
     // Note: I don't like how this demodulator reuses 90% of the code from the PSK demod. Same will be for the PM demod...
-    class GFSK : public Processor<complex_t, float> {
-        using base_type = Processor<complex_t, float>;
+    class GFSK : public ScheduledProcessor<complex_t, float> {
+        using base_type = ScheduledProcessor<complex_t, float>;
     public:
         GFSK() {}
 

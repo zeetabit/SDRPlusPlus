@@ -15,6 +15,8 @@
 #include <core.h>
 #include <stdint.h>
 #include <utils/optionlist.h>
+#include <utils/service_registry.h>
+#include <utils/services.h>
 #include "radio_interface.h"
 #include "demod.h"
 
@@ -35,7 +37,29 @@ std::map<IFNRPreset, double> ifnrTaps = {
     { IFNR_PRESET_BROADCAST, 32 }
 };
 
+class RadioModule;
+
+class RadioControlAdapter : public IRadioControl {
+public:
+    RadioControlAdapter(RadioModule* mod) : mod(mod) {}
+    int getMode() override;
+    void setMode(int mode) override;
+    double getBandwidth() override;
+    void setBandwidth(double bw) override;
+    int getSquelchMode() override;
+    void setSquelchMode(int mode) override;
+    float getSquelchLevel() override;
+    void setSquelchLevel(float level) override;
+    float getCTCSSTone() override;
+    void setCTCSSTone(float tone) override;
+    bool getHighPass() override;
+    void setHighPass(bool enabled) override;
+private:
+    RadioModule* mod;
+};
+
 class RadioModule : public ModuleManager::Instance {
+    friend class RadioControlAdapter;
 public:
     RadioModule(std::string name) {
         this->name = name;
@@ -132,9 +156,15 @@ public:
 
         // Register the module interface
         core::modComManager.registerInterface("radio", name, moduleInterfaceHandler, this);
+
+        // Register typed service (V2)
+        radioControl = new RadioControlAdapter(this);
+        ServiceRegistry::get().provide<IRadioControl>(name, radioControl);
     }
 
     ~RadioModule() {
+        ServiceRegistry::get().remove<IRadioControl>(name);
+        delete radioControl;
         core::modComManager.unregisterInterface(name);
         gui::menu.removeEntry(name);
         stream.stop();
@@ -911,4 +941,30 @@ private:
     const double MAX_SQUELCH = 0.0;
 
     bool enabled = true;
+
+    RadioControlAdapter* radioControl = nullptr;
 };
+
+// IRadioControl adapter — delegates to RadioModule's private methods
+inline int RadioControlAdapter::getMode() { return mod->selectedDemodID; }
+inline void RadioControlAdapter::setMode(int mode) { if (mod->enabled) { mod->selectDemodByID((RadioModule::DemodID)mode); } }
+inline double RadioControlAdapter::getBandwidth() { return mod->bandwidth; }
+inline void RadioControlAdapter::setBandwidth(double bw) { if (mod->enabled && !mod->bandwidthLocked) { mod->setBandwidth(bw); } }
+inline int RadioControlAdapter::getSquelchMode() { return mod->squelchModeId; }
+inline void RadioControlAdapter::setSquelchMode(int mode) {
+    if (mod->enabled && mode >= 0 && mode < (int)mod->squelchModes.size()) {
+        int idx = mode;
+        mod->setSquelchMode(mod->squelchModes[idx]);
+    }
+}
+inline float RadioControlAdapter::getSquelchLevel() { return mod->squelchLevel; }
+inline void RadioControlAdapter::setSquelchLevel(float level) { if (mod->enabled) { mod->setSquelchLevel(level); } }
+inline float RadioControlAdapter::getCTCSSTone() { return (float)mod->ctcssToneId; }
+inline void RadioControlAdapter::setCTCSSTone(float tone) {
+    int idx = (int)tone;
+    if (mod->enabled && idx >= 0 && idx < (int)mod->ctcssTones.size()) {
+        mod->setCTCSSTone(mod->ctcssTones[idx]);
+    }
+}
+inline bool RadioControlAdapter::getHighPass() { return mod->highPass; }
+inline void RadioControlAdapter::setHighPass(bool hp) { if (mod->enabled) { mod->setHighPass(hp); } }

@@ -1,5 +1,6 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 #include "../channel/frequency_xlator.h"
 #include "../convert/complex_to_real.h"
 #include "../loop/agc.h"
@@ -7,8 +8,8 @@
 
 namespace dsp::demod {
     template <class T>
-    class CW : public Processor<complex_t, T> {
-        using base_type = Processor<complex_t, T>;
+    class CW : public ScheduledProcessor<complex_t, T> {
+        using base_type = ScheduledProcessor<complex_t, T>;
     public:
         CW() {}
         

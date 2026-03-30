@@ -1,11 +1,12 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 #include "../taps/tap.h"
 
 namespace dsp::filter {
     template <class D, class T>
-    class FIR : public Processor<D, D> {
-        using base_type = Processor<D, D>;
+    class FIR : public ScheduledProcessor<D, D> {
+        using base_type = ScheduledProcessor<D, D>;
     public:
         FIR() {}
 

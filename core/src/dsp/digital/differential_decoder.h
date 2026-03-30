@@ -1,9 +1,10 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 
 namespace dsp::digital {
-    class DifferentialDecoder : public Processor<uint8_t, uint8_t> {
-        using base_type = Processor<uint8_t, uint8_t>;
+    class DifferentialDecoder : public ScheduledProcessor<uint8_t, uint8_t> {
+        using base_type = ScheduledProcessor<uint8_t, uint8_t>;
     public:
         DifferentialDecoder() {}
 

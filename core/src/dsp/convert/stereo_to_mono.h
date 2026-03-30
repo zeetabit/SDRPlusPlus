@@ -1,9 +1,10 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 
 namespace dsp::convert {
-    class StereoToMono : public Processor<stereo_t, float> {
-        using base_type = Processor<stereo_t, float>;
+    class StereoToMono : public ScheduledProcessor<stereo_t, float> {
+        using base_type = ScheduledProcessor<stereo_t, float>;
     public:
         StereoToMono() {}
 

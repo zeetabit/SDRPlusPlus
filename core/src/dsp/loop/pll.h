@@ -1,12 +1,13 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 #include "../math/normalize_phase.h"
 #include "../math/phasor.h"
 #include "phase_control_loop.h"
 
 namespace dsp::loop {
-    class PLL : public Processor<complex_t, complex_t> {
-        using base_type = Processor<complex_t, complex_t>;
+    class PLL : public ScheduledProcessor<complex_t, complex_t> {
+        using base_type = ScheduledProcessor<complex_t, complex_t>;
     public:
         PLL() {}
 

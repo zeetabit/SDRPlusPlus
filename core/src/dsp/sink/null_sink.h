@@ -1,10 +1,11 @@
 #pragma once
 #include "../sink.h"
+#include "../engine/scheduled_processor.h"
 
 namespace dsp::sink {
     template <class T>
-    class Null : public Sink<T> {
-        using base_type = Sink<T>;
+    class Null : public ScheduledSink<T> {
+        using base_type = ScheduledSink<T>;
     public:
         Null() {}
 

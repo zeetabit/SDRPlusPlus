@@ -1,9 +1,10 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 
 namespace dsp::convert {
-    class ComplexToStereo : public Processor<complex_t, stereo_t> {
-        using base_type = Processor<complex_t, stereo_t>;
+    class ComplexToStereo : public ScheduledProcessor<complex_t, stereo_t> {
+        using base_type = ScheduledProcessor<complex_t, stereo_t>;
     public:
         ComplexToStereo() {}
 

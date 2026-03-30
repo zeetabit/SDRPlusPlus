@@ -5,6 +5,8 @@
 #include <gui/icons.h>
 
 #include <core.h>
+#include <utils/event_bus.h>
+#include <utils/events.h>
 
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
@@ -83,6 +85,7 @@ void SinkManager::Stream::setSampleRate(float sampleRate) {
     std::lock_guard<std::mutex> lck(ctrlMtx);
     _sampleRate = sampleRate;
     srChange.emit(sampleRate);
+    EventBus::get().publish(events::StreamSampleRateChanged{"", sampleRate});
 }
 
 void SinkManager::registerSinkProvider(std::string name, SinkProvider provider) {
@@ -104,6 +107,7 @@ void SinkManager::registerSinkProvider(std::string name, SinkProvider provider) 
     }
 
     onSinkProviderRegistered.emit(name);
+    EventBus::get().publish(events::SinkProviderRegistered{name});
 }
 
 void SinkManager::unregisterSinkProvider(std::string name) {
@@ -133,6 +137,7 @@ void SinkManager::unregisterSinkProvider(std::string name) {
     }
 
     onSinkProviderUnregistered.emit(name);
+    EventBus::get().publish(events::SinkProviderUnregistered{name});
 }
 
 void SinkManager::registerStream(std::string name, SinkManager::Stream* stream) {
@@ -159,6 +164,7 @@ void SinkManager::registerStream(std::string name, SinkManager::Stream* stream) 
     if (available) { loadStreamConfig(name); }
 
     onStreamRegistered.emit(name);
+    EventBus::get().publish(events::StreamRegistered{name});
 }
 
 void SinkManager::unregisterStream(std::string name) {
@@ -173,6 +179,7 @@ void SinkManager::unregisterStream(std::string name) {
     streams.erase(name);
     streamNames.erase(std::remove(streamNames.begin(), streamNames.end(), name), streamNames.end());
     onStreamUnregistered.emit(name);
+    EventBus::get().publish(events::StreamUnregistered{name});
 }
 
 void SinkManager::startStream(std::string name) {

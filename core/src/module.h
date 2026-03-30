@@ -3,6 +3,8 @@
 #include <map>
 #include <json.hpp>
 #include <utils/event.h>
+#include <api_version.h>
+#include <module_manifest.h>
 
 #ifdef _WIN32
 #ifdef SDRPP_IS_CORE
@@ -30,6 +32,7 @@
 
 class ModuleManager {
 public:
+    // V1 module info (kept for backward compatibility)
     struct ModuleInfo_t {
         const char* name;
         const char* description;
@@ -56,10 +59,29 @@ public:
         void* handle;
 #endif
         ModuleManager::ModuleInfo_t* info;
+        ModuleInfoV2* infoV2;  // Non-null if module exports V2 manifest
         void (*init)();
         ModuleManager::Instance* (*createInstance)(std::string name);
         void (*deleteInstance)(ModuleManager::Instance* instance);
         void (*end)();
+
+        bool isV2() const { return infoV2 != nullptr; }
+
+        int apiVersion() const {
+            return isV2() ? infoV2->apiVersion : SDRPP_MAKE_API_VERSION(1, 0, 0);
+        }
+
+        int capabilities() const {
+            return isV2() ? infoV2->capabilities : 0;
+        }
+
+        int dependencyCount() const {
+            return isV2() ? infoV2->dependencyCount : 0;
+        }
+
+        const ModuleDependency* dependencies() const {
+            return isV2() ? infoV2->dependencies : nullptr;
+        }
 
         friend bool operator==(const Module_t& a, const Module_t& b) {
             if (a.handle != b.handle) { return false; }
@@ -75,6 +97,8 @@ public:
     struct Instance_t {
         ModuleManager::Module_t module;
         ModuleManager::Instance* instance;
+        bool faulted = false;
+        std::string faultError;
     };
 
     ModuleManager::Module_t loadModule(std::string path);
@@ -91,6 +115,8 @@ public:
 
     int countModuleInstances(std::string module);
 
+    bool checkDependencies(const Module_t& mod);
+
     void doPostInitAll();
 
     Event<std::string> onInstanceCreated;
@@ -101,4 +127,5 @@ public:
     std::map<std::string, ModuleManager::Instance_t> instances;
 };
 
+// V1 module info macro (still works for all existing modules)
 #define SDRPP_MOD_INFO MOD_EXPORT const ModuleManager::ModuleInfo_t _INFO_

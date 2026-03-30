@@ -1,5 +1,6 @@
 #pragma once
 #include "../block.h"
+#include "../engine/scheduled_block.h"
 #include "ring_buffer.h"
 
 // IMPORTANT: THIS IS TRASH AND MUST BE REWRITTEN IN THE FUTURE
@@ -7,8 +8,8 @@
 namespace dsp::buffer {
     // NOTE: I'm not proud of this, it's BAD and just taken from the previous DSP, but it works...
     template <class T>
-    class Reshaper : public block {
-        using base_type = block;
+    class Reshaper : public scheduled_block {
+        using base_type = scheduled_block;
     public:
         Reshaper() {}
 

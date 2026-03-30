@@ -3,6 +3,8 @@
 #include <utils/flog.h>
 #include <signal_path/signal_path.h>
 #include <core.h>
+#include <utils/event_bus.h>
+#include <utils/events.h>
 
 SourceManager::SourceManager() {
 }
@@ -14,6 +16,7 @@ void SourceManager::registerSource(std::string name, SourceHandler* handler) {
     }
     sources[name] = handler;
     onSourceRegistered.emit(name);
+    EventBus::get().publish(events::SourceRegistered{name});
 }
 
 void SourceManager::unregisterSource(std::string name) {
@@ -31,6 +34,7 @@ void SourceManager::unregisterSource(std::string name) {
     }
     sources.erase(name);
     onSourceUnregistered.emit(name);
+    EventBus::get().publish(events::SourceUnregistered{name});
 }
 
 std::vector<std::string> SourceManager::getSourceNames() {
@@ -87,6 +91,7 @@ void SourceManager::tune(double freq) {
     // TODO: No need to always retune the hardware in Panadapter mode
     selectedHandler->tuneHandler(abs(((tuneMode == TuningMode::NORMAL) ? (freq + tuneOffset) : ifFreq)), selectedHandler->ctx);
     onRetune.emit(freq + tuneOffset);
+    EventBus::get().publish(events::FrequencyChanged{freq + tuneOffset});
     currentFreq = freq;
 }
 

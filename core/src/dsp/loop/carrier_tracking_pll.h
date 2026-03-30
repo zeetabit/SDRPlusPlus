@@ -1,5 +1,6 @@
 #pragma once
 #include "pll.h"
+#include "../engine/scheduled_processor.h"
 
 namespace dsp::loop {
     class CarrierTrackingPLL : public PLL {

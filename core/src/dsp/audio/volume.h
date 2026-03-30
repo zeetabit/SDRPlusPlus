@@ -1,10 +1,11 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 
 // TODO: This block is useless and weird, get rid of it
 namespace dsp::audio {
-    class Volume : public Processor<stereo_t, stereo_t> {
-        using base_type = Processor<stereo_t, stereo_t>;
+    class Volume : public ScheduledProcessor<stereo_t, stereo_t> {
+        using base_type = ScheduledProcessor<stereo_t, stereo_t>;
     public:
         Volume() {}
 

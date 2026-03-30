@@ -1,9 +1,10 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 
 namespace dsp::math {
-    class Conjugate : public Processor<complex_t, complex_t> {
-        using base_type = Processor<complex_t, complex_t>;
+    class Conjugate : public ScheduledProcessor<complex_t, complex_t> {
+        using base_type = ScheduledProcessor<complex_t, complex_t>;
     public:
         Conjugate() {}
 

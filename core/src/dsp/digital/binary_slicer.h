@@ -1,9 +1,10 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 
 namespace dsp::digital {
-    class BinarySlicer : public Processor<float, uint8_t> {
-        using base_type = Processor<float, uint8_t>;
+    class BinarySlicer : public ScheduledProcessor<float, uint8_t> {
+        using base_type = ScheduledProcessor<float, uint8_t>;
     public:
         BinarySlicer() {}
 

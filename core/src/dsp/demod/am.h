@@ -1,5 +1,6 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 #include "../loop/agc.h"
 #include "../correction/dc_blocker.h"
 #include "../convert/mono_to_stereo.h"
@@ -8,8 +9,8 @@
 
 namespace dsp::demod {
     template <class T>
-    class AM : public Processor<dsp::complex_t, T> {
-        using base_type = Processor<dsp::complex_t, T>;
+    class AM : public ScheduledProcessor<dsp::complex_t, T> {
+        using base_type = ScheduledProcessor<dsp::complex_t, T>;
     public:
         enum AGCMode {
             CARRIER,

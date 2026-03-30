@@ -1,10 +1,11 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 #include "pcm_type.h"
 
 namespace dsp::compression {
-    class SampleStreamDecompressor : public Processor<uint8_t, complex_t> {
-        using base_type = Processor<uint8_t, complex_t>;
+    class SampleStreamDecompressor : public ScheduledProcessor<uint8_t, complex_t> {
+        using base_type = ScheduledProcessor<uint8_t, complex_t>;
     public:
         SampleStreamDecompressor() {}
 

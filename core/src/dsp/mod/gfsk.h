@@ -1,10 +1,11 @@
 #pragma once
 #include "../multirate/rrc_interpolator.h"
+#include "../engine/scheduled_processor.h"
 #include "quadrature.h"
 
 namespace dsp::mod {
-    class GFSK : public Processor<float, complex_t> {
-        using base_type = Processor<float, complex_t>;
+    class GFSK : public ScheduledProcessor<float, complex_t> {
+        using base_type = ScheduledProcessor<float, complex_t>;
     public:
         GFSK() {}
 

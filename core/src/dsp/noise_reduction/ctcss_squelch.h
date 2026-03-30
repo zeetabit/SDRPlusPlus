@@ -2,6 +2,7 @@
 #include "../channel/rx_vfo.h"
 #include "../demod/quadrature.h"
 #include "../filter/fir.h"
+#include "../engine/scheduled_processor.h"
 #include "../taps/high_pass.h"
 #include <fftw3.h>
 #include <map>
@@ -134,8 +135,8 @@ namespace dsp::noise_reduction {
         254.1f
     };
 
-    class CTCSSSquelch : public Processor<stereo_t, stereo_t> {
-        using base_type = Processor<stereo_t, stereo_t>;
+    class CTCSSSquelch : public ScheduledProcessor<stereo_t, stereo_t> {
+        using base_type = ScheduledProcessor<stereo_t, stereo_t>;
     public:
         CTCSSSquelch() {}
 

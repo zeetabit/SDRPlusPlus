@@ -2,6 +2,7 @@
 #include <imgui.h>
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
 #include <wavreader.h>
@@ -21,6 +22,18 @@ SDRPP_MOD_INFO{
     /* Author:          */ "Ryzerth",
     /* Version:         */ 0, 1, 1,
     /* Max instances    */ 1
+};
+
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "file_source",
+    /* Description:     */ "Wav file source module for SDR++",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 1, 1,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
 };
 
 ConfigManager config;

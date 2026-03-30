@@ -1,10 +1,11 @@
 #pragma once
 #include "../operator.h"
+#include "../engine/scheduled_processor.h"
 
 namespace dsp::math {
     template <class T>
-    class Multiply : public Operator<T, T, T> {
-        using base_type = Operator<T, T, T>;
+    class Multiply : public ScheduledOperator<T, T, T> {
+        using base_type = ScheduledOperator<T, T, T>;
     public:
         Multiply() {}
 

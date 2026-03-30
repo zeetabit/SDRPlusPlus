@@ -4,6 +4,32 @@
 #include "processor.h"
 
 namespace dsp {
+
+    // Type-erased wrapper for any block that has an output stream<T> and
+    // setInput(stream<T>*). Works with both Processor<T,T> and ScheduledProcessor<T,T>.
+    template<class T>
+    struct ChainLink {
+        block* blk;
+        stream<T>* outStream;
+        void (*setInputFn)(void* blk, stream<T>* in);
+
+        void setInput(stream<T>* in) { setInputFn(blk, in); }
+        void start() { blk->start(); }
+        void stop() { blk->stop(); }
+    };
+
+    // Helper to create a ChainLink from any block type with `out` and `setInput()`.
+    template<class T, class B>
+    ChainLink<T> makeChainLink(B* block) {
+        ChainLink<T> link;
+        link.blk = static_cast<dsp::block*>(block);
+        link.outStream = &block->out;
+        link.setInputFn = [](void* b, stream<T>* in) {
+            static_cast<B*>(b)->setInput(in);
+        };
+        return link;
+    }
+
     template<class T>
     class chain {
     public:
@@ -20,105 +46,90 @@ namespace dsp {
         void setInput(stream<T>* in, Func onOutputChange) {
             _in = in;
             for (auto& ln : links) {
-                if (states[ln]) {
-                    ln->setInput(_in);
+                if (states[ln.blk]) {
+                    ln.setInput(_in);
                     return;
                 }
             }
             out = _in;
             onOutputChange(out);
         }
-        
-        void addBlock(Processor<T, T>* block, bool enabled) {
-            // Check if block is already part of the chain
-            if (blockExists(block)) {
+
+        // Accept any block type with `out` stream and `setInput()`.
+        template<class B>
+        void addBlock(B* block, bool enabled) {
+            auto link = makeChainLink<T>(block);
+            if (blockExists(link.blk)) {
                 throw std::runtime_error("[chain] Tried to add a block that is already part of the chain");
             }
-
-            // Add to the list
-            links.push_back(block);
-            states[block] = false;
-
-            // Enable if needed
+            links.push_back(link);
+            states[link.blk] = false;
             if (enabled) { enableBlock(block, [](stream<T>* out){}); }
         }
 
-        template<typename Func>
-        void removeBlock(Processor<T, T>* block, Func onOutputChange) {
-            // Check if block is part of the chain
-            if (!blockExists(block)) {
+        template<class B, typename Func>
+        void removeBlock(B* block, Func onOutputChange) {
+            auto* blk = static_cast<dsp::block*>(block);
+            if (!blockExists(blk)) {
                 throw std::runtime_error("[chain] Tried to remove a block that is not part of the chain");
             }
-
-            // Disable the block
             disableBlock(block, onOutputChange);
-        
-            // Remove block from the list
-            states.erase(block);
-            links.erase(std::find(links.begin(), links.end(), block));
+            states.erase(blk);
+            links.erase(std::find_if(links.begin(), links.end(),
+                [blk](const ChainLink<T>& l) { return l.blk == blk; }));
         }
 
-        template<typename Func>
-        void enableBlock(Processor<T, T>* block, Func onOutputChange) {
-            // Check that the block is part of the chain
-            if (!blockExists(block)) {
+        template<class B, typename Func>
+        void enableBlock(B* block, Func onOutputChange) {
+            auto* blk = static_cast<dsp::block*>(block);
+            if (!blockExists(blk)) {
                 throw std::runtime_error("[chain] Tried to enable a block that isn't part of the chain");
             }
-            
-            // If already enable, don't do anything
-            if (states[block]) { return; }
+            if (states[blk]) { return; }
 
-            // Gather blocks before and after the block to enable
-            Processor<T, T>* before = blockBefore(block);
-            Processor<T, T>* after = blockAfter(block);
+            ChainLink<T>* before = linkBefore(blk);
+            ChainLink<T>* after = linkAfter(blk);
+            ChainLink<T>* cur = findLink(blk);
 
-            // Update input of next block or output
             if (after) {
-                after->setInput(&block->out);
+                after->setInput(cur->outStream);
             }
             else {
-                out = &block->out;
+                out = cur->outStream;
                 onOutputChange(out);
             }
 
-            // Set input of the new block
-            block->setInput(before ? &before->out : _in);
+            cur->setInput(before ? before->outStream : _in);
 
-            // Start new block
-            if (running) { block->start(); }
-            states[block] = true;
+            if (running) { cur->start(); }
+            states[blk] = true;
         }
 
-        template<typename Func>
-        void disableBlock(Processor<T, T>* block, Func onOutputChange) {
-            // Check that the block is part of the chain
-            if (!blockExists(block)) {
+        template<class B, typename Func>
+        void disableBlock(B* block, Func onOutputChange) {
+            auto* blk = static_cast<dsp::block*>(block);
+            if (!blockExists(blk)) {
                 throw std::runtime_error("[chain] Tried to disable a block that isn't part of the chain");
             }
-            
-            // If already disabled, don't do anything
-            if (!states[block]) { return; }
+            if (!states[blk]) { return; }
 
-            // Stop disabled block
-            block->stop();
-            states[block] = false;
+            findLink(blk)->stop();
+            states[blk] = false;
 
-            // Gather blocks before and after the block to disable
-            Processor<T, T>* before = blockBefore(block);
-            Processor<T, T>* after = blockAfter(block);
+            ChainLink<T>* before = linkBefore(blk);
+            ChainLink<T>* after = linkAfter(blk);
 
-            // Update input of next block or output
             if (after) {
-                after->setInput(before ? &before->out : _in);
+                after->setInput(before ? before->outStream : _in);
             }
             else {
-                out = before ? &before->out : _in;
+                out = before ? before->outStream : _in;
                 onOutputChange(out);
             }
         }
 
-        template<typename Func>
-        void setBlockEnabled(Processor<T, T>* block, bool enabled, Func onOutputChange) {
+        template<class B, typename Func>
+        void setBlockEnabled(B* block, bool enabled, Func onOutputChange) {
             if (enabled) {
                 enableBlock(block, onOutputChange);
             }
@@ -130,22 +141,27 @@ namespace dsp {
         template<typename Func>
         void enableAllBlocks(Func onOutputChange) {
             for (auto& ln : links) {
-                enableBlock(ln, onOutputChange);
+                if (!states[ln.blk]) {
+                    states[ln.blk] = false; // ensure entry exists
+                    enableBlockByLink(&ln, onOutputChange);
+                }
             }
         }
 
         template<typename Func>
         void disableAllBlocks(Func onOutputChange) {
             for (auto& ln : links) {
-                disableBlock(ln, onOutputChange);
+                if (states[ln.blk]) {
+                    disableBlockByLink(&ln, onOutputChange);
+                }
             }
         }
 
         void start() {
             if (running) { return; }
             for (auto& ln : links) {
-                if (!states[ln]) { continue; }
-                ln->start();
+                if (!states[ln.blk]) { continue; }
+                ln.start();
             }
             running = true;
         }
@@ -153,8 +169,8 @@ namespace dsp {
         void stop() {
             if (!running) { return; }
             for (auto& ln : links) {
-                if (!states[ln]) { continue; }
-                ln->stop();
+                if (!states[ln.blk]) { continue; }
+                ln.stop();
             }
             running = false;
         }
@@ -162,34 +178,69 @@ namespace dsp {
         stream<T>* out;
 
     private:
-        Processor<T, T>* blockBefore(Processor<T, T>* block) {
-            Processor<T, T>* prev = NULL;
-            for (auto& ln : links) {
-                if (ln == block) { return prev; }
-                if (states[ln]) { prev = ln; }
+        template<typename Func>
+        void enableBlockByLink(ChainLink<T>* cur, Func onOutputChange) {
+            if (states[cur->blk]) { return; }
+            ChainLink<T>* before = linkBefore(cur->blk);
+            ChainLink<T>* after = linkAfter(cur->blk);
+            if (after) {
+                after->setInput(cur->outStream);
+            } else {
+                out = cur->outStream;
+                onOutputChange(out);
             }
-            return NULL;
+            cur->setInput(before ? before->outStream : _in);
+            if (running) { cur->start(); }
+            states[cur->blk] = true;
         }
 
-        Processor<T, T>* blockAfter(Processor<T, T>* block) {
-            bool blockFound = false;
-            for (auto& ln : links) {
-                if (ln == block) {
-                    blockFound = true;
-                    continue;
-                }
-                if (states[ln] && blockFound) { return ln; }
+        template<typename Func>
+        void disableBlockByLink(ChainLink<T>* cur, Func onOutputChange) {
+            if (!states[cur->blk]) { return; }
+            cur->stop();
+            states[cur->blk] = false;
+            ChainLink<T>* before = linkBefore(cur->blk);
+            ChainLink<T>* after = linkAfter(cur->blk);
+            if (after) {
+                after->setInput(before ? before->outStream : _in);
+            } else {
+                out = before ? before->outStream : _in;
+                onOutputChange(out);
             }
-            return NULL;
         }
 
-        bool blockExists(Processor<T, T>* block) {
-            return states.find(block) != states.end();
+        ChainLink<T>* findLink(block* blk) {
+            for (auto& ln : links) {
+                if (ln.blk == blk) { return &ln; }
+            }
+            return nullptr;
+        }
+
+        ChainLink<T>* linkBefore(block* blk) {
+            ChainLink<T>* prev = nullptr;
+            for (auto& ln : links) {
+                if (ln.blk == blk) { return prev; }
+                if (states[ln.blk]) { prev = &ln; }
+            }
+            return nullptr;
+        }
+
+        ChainLink<T>* linkAfter(block* blk) {
+            bool found = false;
+            for (auto& ln : links) {
+                if (ln.blk == blk) { found = true; continue; }
+                if (states[ln.blk] && found) { return &ln; }
+            }
+            return nullptr;
+        }
+
+        bool blockExists(block* blk) {
+            return states.find(blk) != states.end();
         }
 
         stream<T>* _in;
-        std::vector<Processor<T, T>*> links;
-        std::map<Processor<T, T>*, bool> states;
+        std::vector<ChainLink<T>> links;
+        std::map<block*, bool> states;
         bool running = false;
     };
 }

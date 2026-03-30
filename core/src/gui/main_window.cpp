@@ -27,6 +27,8 @@
 #include <gui/colormaps.h>
 #include <gui/widgets/snr_meter.h>
 #include <gui/tuner.h>
+#include <utils/event_bus.h>
+#include <utils/events.h>
 
 void MainWindow::init() {
     LoadingScreen::show("Initializing UI");
@@ -44,6 +46,47 @@ void MainWindow::init() {
     // Assert that directories are absolute
     modulesDir = std::filesystem::absolute(modulesDir).string();
     resourcesDir = std::filesystem::absolute(resourcesDir).string();
+
+    // Auto-detect modules directory if configured path doesn't exist
+    if (!std::filesystem::is_directory(modulesDir)) {
+        flog::warn("Configured modules directory '{0}' not found, attempting auto-detection...", modulesDir);
+
+        auto execDir = std::filesystem::absolute(core::args["root"].s()).parent_path().string();
+        std::string candidates[] = {
+            ".",                              // Build output (CLion/cmake puts modules alongside executable)
+            "./source_modules",
+            "./decoder_modules",
+            "./sink_modules",
+            "./misc_modules",
+            "../source_modules",
+            "../decoder_modules",
+        };
+
+        // Strategy: scan build directory tree for .dylib/.so module files
+        std::string buildDir = std::filesystem::absolute(".").string();
+        bool foundModules = false;
+        for (auto& entry : std::filesystem::recursive_directory_iterator(buildDir)) {
+            if (!entry.is_regular_file()) continue;
+            auto ext = entry.path().extension().string();
+            if (ext != SDRPP_MOD_EXTENTSION) continue;
+            auto fn = entry.path().filename().string();
+            // Skip core library
+            if (fn.find("sdrpp_core") != std::string::npos || fn.find("libcorrect") != std::string::npos) continue;
+            foundModules = true;
+            break;
+        }
+
+        if (foundModules) {
+            flog::info("Auto-detected modules in build tree: {0}", buildDir);
+            modulesDir = buildDir;
+            core::configManager.acquire();
+            core::configManager.conf["modulesDirectory"] = modulesDir;
+            core::configManager.release(true);
+        }
+        else {
+            flog::warn("No modules found in build tree, continuing without modules");
+        }
+    }
 
     // Load menu elements
     gui::menu.order.clear();
@@ -97,14 +140,17 @@ void MainWindow::init() {
 
     flog::info("Loading modules");
 
-    // Load modules from /module directory
+    // Load modules from module directory (recursive scan to find .dylib/.so in subdirectories)
     if (std::filesystem::is_directory(modulesDir)) {
-        for (const auto& file : std::filesystem::directory_iterator(modulesDir)) {
+        for (const auto& file : std::filesystem::recursive_directory_iterator(modulesDir)) {
             std::string path = file.path().generic_string();
             if (file.path().extension().generic_string() != SDRPP_MOD_EXTENTSION) {
                 continue;
             }
             if (!file.is_regular_file()) { continue; }
+            // Skip core library and libcorrect
+            std::string fn = file.path().filename().string();
+            if (fn.find("sdrpp_core") != std::string::npos || fn.find("libcorrect") != std::string::npos) { continue; }
             flog::info("Loading {0}", path);
             LoadingScreen::show("Loading " + file.path().filename().string());
             core::moduleManager.loadModule(path);
@@ -681,10 +727,12 @@ void MainWindow::setPlayState(bool _playing) {
         sigpath::sourceManager.tune(gui::waterfall.getCenterFrequency());
         playing = true;
         onPlayStateChange.emit(true);
+        EventBus::get().publish(events::PlayStateChanged{true});
     }
     else {
         playing = false;
         onPlayStateChange.emit(false);
+        EventBus::get().publish(events::PlayStateChanged{false});
         sigpath::sourceManager.stop();
         sigpath::iqFrontEnd.flushInputBuffer();
     }

@@ -1,9 +1,10 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 
 namespace dsp::convert {
-    class RealToComplex : public Processor<float, complex_t> {
-        using base_type = Processor<float, complex_t>;
+    class RealToComplex : public ScheduledProcessor<float, complex_t> {
+        using base_type = ScheduledProcessor<float, complex_t>;
     public:
         RealToComplex() {}
 

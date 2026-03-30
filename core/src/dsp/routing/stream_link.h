@@ -1,10 +1,11 @@
 #pragma once
 #include "../sink.h"
+#include "../engine/scheduled_processor.h"
 
 namespace dsp::routing {
     template <class T>
-    class StreamLink : public Sink<T> {
-        using base_type = Sink<T>;
+    class StreamLink : public ScheduledSink<T> {
+        using base_type = ScheduledSink<T>;
     public:
         StreamLink() {}
 

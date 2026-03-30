@@ -2,6 +2,7 @@
 #include <vector>
 #include <numeric>
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 #include "../filter/decimating_fir.h"
 #include "../taps/from_array.h"
 #include "polyphase_resampler.h"
@@ -11,8 +12,8 @@
 
 namespace dsp::multirate {
     template<class T>
-    class RationalResampler : public Processor<T, T> {
-        using base_type = Processor<T, T>;
+    class RationalResampler : public ScheduledProcessor<T, T> {
+        using base_type = ScheduledProcessor<T, T>;
     public:
         RationalResampler() {}
 

@@ -2,6 +2,7 @@
 #include <string.h>
 #include <mutex>
 #include <condition_variable>
+#include <functional>
 #include <volk/volk.h>
 #include "buffer/buffer.h"
 
@@ -19,6 +20,10 @@ namespace dsp {
         virtual void clearWriteStop() {}
         virtual void stopReader() {}
         virtual void clearReadStop() {}
+
+        // Optional callback invoked after swap() makes data available.
+        // Set by the scheduler for pool-based blocks; nullptr by default.
+        std::function<void()>* onDataReady = nullptr;
     };
 
     template <class T>
@@ -63,6 +68,9 @@ namespace dsp {
                 dataReady = true;
             }
             rdyCV.notify_all();
+
+            // Notify scheduler if a callback is installed (for pool-based blocks).
+            if (onDataReady) { (*onDataReady)(); }
 
             return true;
         }

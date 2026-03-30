@@ -1,10 +1,11 @@
 #pragma once
 #include "frequency_xlator.h"
+#include "../engine/scheduled_processor.h"
 #include "../multirate/rational_resampler.h"
 
 namespace dsp::channel {
-    class RxVFO : public Processor<complex_t, complex_t> {
-        using base_type = Processor<complex_t, complex_t>;
+    class RxVFO : public ScheduledProcessor<complex_t, complex_t> {
+        using base_type = ScheduledProcessor<complex_t, complex_t>;
     public:
         RxVFO() {}
 

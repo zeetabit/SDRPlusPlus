@@ -1,0 +1,43 @@
+cmake_minimum_required(VERSION 3.13)
+project(sdrpp_tests)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Catch2 single-header
+add_library(catch2 INTERFACE)
+target_include_directories(catch2 INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/catch2)
+
+# Core include paths
+set(CORE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../core/src")
+
+# Unit tests
+add_executable(sdrpp_unit_tests
+    unit/test_main.cpp
+    unit/test_event_bus.cpp
+    unit/test_service_registry.cpp
+    unit/test_api_version.cpp
+    unit/test_thread_pool.cpp
+    unit/test_shared_buffer.cpp
+    # Integration tests
+    integration/test_scheduled_dsp.cpp
+    # Core sources needed by tests
+    ${CORE_SRC}/utils/flog.cpp
+)
+
+target_include_directories(sdrpp_unit_tests PRIVATE
+    ${CORE_SRC}
+    ${CORE_SRC}/imgui
+)
+
+target_link_libraries(sdrpp_unit_tests PRIVATE catch2)
+
+# Find volk (needed for stream.h / buffer.h)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(VOLK REQUIRED volk)
+target_include_directories(sdrpp_unit_tests PRIVATE ${VOLK_INCLUDE_DIRS})
+target_link_directories(sdrpp_unit_tests PRIVATE ${VOLK_LIBRARY_DIRS})
+target_link_libraries(sdrpp_unit_tests PRIVATE ${VOLK_LIBRARIES})
+
+enable_testing()
+add_test(NAME unit_tests COMMAND sdrpp_unit_tests)

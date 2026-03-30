@@ -1,9 +1,10 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 
 namespace dsp::noise_reduction {
-    class NoiseBlanker : public Processor<complex_t, complex_t> {
-        using base_type = Processor<complex_t, complex_t>;
+    class NoiseBlanker : public ScheduledProcessor<complex_t, complex_t> {
+        using base_type = ScheduledProcessor<complex_t, complex_t>;
     public:
         NoiseBlanker() {}
 

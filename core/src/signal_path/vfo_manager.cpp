@@ -1,6 +1,8 @@
 #include <signal_path/vfo_manager.h>
 #include <signal_path/signal_path.h>
 #include <gui/gui.h>
+#include <utils/event_bus.h>
+#include <utils/events.h>
 
 VFOManager::VFO::VFO(std::string name, int reference, double offset, double bandwidth, double sampleRate, double minBandwidth, double maxBandwidth, bool bandwidthLocked) {
     this->name = name;
@@ -99,6 +101,7 @@ VFOManager::VFO* VFOManager::createVFO(std::string name, int reference, double o
     VFOManager::VFO* vfo = new VFO(name, reference, offset, bandwidth, sampleRate, minBandwidth, maxBandwidth, bandwidthLocked);
     vfos[name] = vfo;
     onVfoCreated.emit(vfo);
+    EventBus::get().publish(events::VFOCreated{name, bandwidth, sampleRate});
     return vfo;
 }
 
@@ -117,6 +120,7 @@ void VFOManager::deleteVFO(VFOManager::VFO* vfo) {
     vfos.erase(name);
     delete vfo;
     onVfoDeleted.emit(name);
+    EventBus::get().publish(events::VFODeleted{name});
 }
 
 void VFOManager::setOffset(std::string name, double offset) {

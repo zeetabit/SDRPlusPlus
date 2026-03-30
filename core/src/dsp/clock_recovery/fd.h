@@ -1,13 +1,14 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 #include "../loop/phase_control_loop.h"
 #include "../taps/windowed_sinc.h"
 #include "../multirate/polyphase_bank.h"
 #include "../math/step.h"
 
 namespace dsp::clock_recovery {
-    class FD : public Processor<float, float> {
-        using base_type = Processor<float, float> ;
+    class FD : public ScheduledProcessor<float, float> {
+        using base_type = ScheduledProcessor<float, float> ;
     public:
         FD() {}
 

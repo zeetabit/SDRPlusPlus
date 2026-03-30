@@ -1,10 +1,11 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 
 namespace dsp::math {
     template<class T>
-    class Delay : public Processor<T, T> {
-        using base_type = Processor<T, T>;
+    class Delay : public ScheduledProcessor<T, T> {
+        using base_type = ScheduledProcessor<T, T>;
     public:
         Delay() {}
 

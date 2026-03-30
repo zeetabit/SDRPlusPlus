@@ -1,10 +1,11 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 
 namespace dsp::loop {
     template <class T>
-    class AGC : public Processor<T, T> {
-        using base_type = Processor<T, T>;
+    class AGC : public ScheduledProcessor<T, T> {
+        using base_type = ScheduledProcessor<T, T>;
     public:
         AGC() {}
 

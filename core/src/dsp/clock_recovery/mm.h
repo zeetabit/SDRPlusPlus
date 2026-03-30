@@ -1,5 +1,6 @@
 #pragma once
 #include "../processor.h"
+#include "../engine/scheduled_processor.h"
 #include "../loop/phase_control_loop.h"
 #include "../taps/windowed_sinc.h"
 #include "../multirate/polyphase_bank.h"
@@ -7,8 +8,8 @@
 
 namespace dsp::clock_recovery {
     template<class T>
-    class MM : public Processor<T, T> {
-        using base_type = Processor<T, T> ;
+    class MM : public ScheduledProcessor<T, T> {
+        using base_type = ScheduledProcessor<T, T> ;
     public:
         MM() {}
 

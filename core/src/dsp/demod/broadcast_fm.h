@@ -1,5 +1,6 @@
 #pragma once
 #include "quadrature.h"
+#include "../engine/scheduled_processor.h"
 #include "../taps/low_pass.h"
 #include "../taps/band_pass.h"
 #include "../filter/fir.h"
@@ -15,8 +16,8 @@
 #include "../multirate/rational_resampler.h"
 
 namespace dsp::demod {
-    class BroadcastFM : public Processor<complex_t, stereo_t> {
-        using base_type = Processor<complex_t, stereo_t>;
+    class BroadcastFM : public ScheduledProcessor<complex_t, stereo_t> {
+        using base_type = ScheduledProcessor<complex_t, stereo_t>;
     public:
         BroadcastFM() {}
 
