@@ -106,15 +106,15 @@ private:
         // Load config
         devId = devices.keyId(mac);
         selectedMac = mac;
-        config.acquire();
-        if (config.conf["devices"][selectedMac].contains("samplerate")) {
-            int sr = config.conf["devices"][selectedMac]["samplerate"];
-            if (samplerates.keyExists(sr)) { srId = samplerates.keyId(sr); }
-        }
-        if (config.conf["devices"][selectedMac].contains("gain")) {
-            gain = config.conf["devices"][selectedMac]["gain"];
-        }
-        config.release();
+        config.readConfig([&](const json& conf) {
+            if (conf["devices"][selectedMac].contains("samplerate")) {
+                int sr = conf["devices"][selectedMac]["samplerate"];
+                if (samplerates.keyExists(sr)) { srId = samplerates.keyId(sr); }
+            }
+            if (conf["devices"][selectedMac].contains("gain")) {
+                gain = conf["devices"][selectedMac]["gain"];
+            }
+        });
 
         // Update host samplerate
         sampleRate = samplerates.key(srId);
@@ -130,9 +130,7 @@ private:
             _this->refresh();
 
             // Select device
-            config.acquire();
-            _this->selectedMac = config.conf["device"];
-            config.release();
+            config.readConfig([&](const json& conf) { _this->selectedMac = conf["device"]; });
             _this->selectMac(_this->selectedMac);
         }
 
@@ -200,9 +198,7 @@ private:
             _this->selectMac(_this->devices.key(_this->devId));
             core::setInputSampleRate(_this->sampleRate);
             if (!_this->selectedMac.empty()) {
-                config.acquire();
-                config.conf["device"] = _this->devices.key(_this->devId);
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["device"] = _this->devices.key(_this->devId); });
             }
         }
 
@@ -210,9 +206,7 @@ private:
             _this->sampleRate = _this->samplerates.key(_this->srId);
             core::setInputSampleRate(_this->sampleRate);
             if (!_this->selectedMac.empty()) {
-                config.acquire();
-                config.conf["devices"][_this->selectedMac]["samplerate"] = _this->samplerates.key(_this->srId);
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->selectedMac]["samplerate"] = _this->samplerates.key(_this->srId); });
             }
         }
 
@@ -221,9 +215,8 @@ private:
         SmGui::ForceSync();
         if (SmGui::Button(CONCAT("Refresh##_hermes_refr_", _this->name))) {
             _this->refresh();
-            config.acquire();
-            std::string mac = config.conf["device"];
-            config.release();
+            std::string mac;
+            config.readConfig([&](const json& conf) { mac = conf["device"]; });
             _this->selectMac(mac);
             core::setInputSampleRate(_this->sampleRate);
         }
@@ -239,9 +232,7 @@ private:
                 _this->dev->setGain(_this->gain);
             }
             if (!_this->selectedMac.empty()) {
-                config.acquire();
-                config.conf["devices"][_this->selectedMac]["gain"] = _this->gain;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->selectedMac]["gain"] = _this->gain; });
             }
         }
     }

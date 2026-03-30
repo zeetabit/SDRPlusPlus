@@ -47,9 +47,8 @@ public:
         refresh();
 
         // Select device from config
-        config.acquire();
-        std::string devSerial = config.conf["device"];
-        config.release();
+        std::string devSerial;
+        config.readConfig([&](const json& conf) { devSerial = conf["device"]; });
         select(devSerial);
 
         sigpath::sourceManager.registerSource("SDDC", &handler);
@@ -176,28 +175,28 @@ private:
         // vgaGain = 0;
 
         // Load config
-        config.acquire();
-        if (config.conf["devices"][selectedSerial].contains("samplerate")) {
-            int desiredSr = config.conf["devices"][selectedSerial]["samplerate"];
-            if (samplerates.keyExists(desiredSr)) {
-                srId = samplerates.keyId(desiredSr);
-                sampleRate = samplerates[srId];
+        config.readConfig([&](const json& conf) {
+            if (conf["devices"][selectedSerial].contains("samplerate")) {
+                int desiredSr = conf["devices"][selectedSerial]["samplerate"];
+                if (samplerates.keyExists(desiredSr)) {
+                    srId = samplerates.keyId(desiredSr);
+                    sampleRate = samplerates[srId];
+                }
             }
-        }
-        // if (config.conf["devices"][selectedSerial].contains("port")) {
-        //     std::string desiredPort = config.conf["devices"][selectedSerial]["port"];
-        //     if (ports.keyExists(desiredPort)) {
-        //         portId = ports.keyId(desiredPort);
-        //         port = ports[portId];
-        //     }
-        // }
-        // if (config.conf["devices"][selectedSerial].contains("lnaGain")) {
-        //     lnaGain = std::clamp<int>(config.conf["devices"][selectedSerial]["lnaGain"], FOBOS_LNA_GAIN_MIN, FOBOS_LNA_GAIN_MAX);
-        // }
-        // if (config.conf["devices"][selectedSerial].contains("vgaGain")) {
-        //     vgaGain = std::clamp<int>(config.conf["devices"][selectedSerial]["vgaGain"], FOBOS_VGA_GAIN_MIN, FOBOS_VGA_GAIN_MAX);
-        // }
-        config.release();
+            // if (conf["devices"][selectedSerial].contains("port")) {
+            //     std::string desiredPort = conf["devices"][selectedSerial]["port"];
+            //     if (ports.keyExists(desiredPort)) {
+            //         portId = ports.keyId(desiredPort);
+            //         port = ports[portId];
+            //     }
+            // }
+            // if (conf["devices"][selectedSerial].contains("lnaGain")) {
+            //     lnaGain = std::clamp<int>(conf["devices"][selectedSerial]["lnaGain"], FOBOS_LNA_GAIN_MIN, FOBOS_LNA_GAIN_MAX);
+            // }
+            // if (conf["devices"][selectedSerial].contains("vgaGain")) {
+            //     vgaGain = std::clamp<int>(conf["devices"][selectedSerial]["vgaGain"], FOBOS_VGA_GAIN_MIN, FOBOS_VGA_GAIN_MAX);
+            // }
+        });
 
         // Update the samplerate
         core::setInputSampleRate(sampleRate);
@@ -327,18 +326,14 @@ private:
         if (SmGui::Combo(CONCAT("##_sddc_dev_sel_", _this->name), &_this->devId, _this->devices.txt)) {
             _this->select(_this->devices.key(_this->devId));
             core::setInputSampleRate(_this->sampleRate);
-            config.acquire();
-            config.conf["device"] = _this->selectedSerial;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["device"] = _this->selectedSerial; });
         }
 
         if (SmGui::Combo(CONCAT("##_sddc_sr_sel_", _this->name), &_this->srId, _this->samplerates.txt)) {
             _this->sampleRate = _this->samplerates.value(_this->srId);
             core::setInputSampleRate(_this->sampleRate);
             if (!_this->selectedSerial.empty()) {
-                config.acquire();
-                config.conf["devices"][_this->selectedSerial]["samplerate"] = _this->samplerates.key(_this->srId);
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["samplerate"] = _this->samplerates.key(_this->srId); });
             }
         }
 

@@ -36,9 +36,8 @@ public:
         refresh();
 
         // Select default device
-        config.acquire();
-        std::string devName = config.conf["device"];
-        config.release();
+        std::string devName;
+        config.readConfig([&](const json& conf) { devName = conf["device"]; });
         selectDevice(devName);
 
         handler.ctx = this;
@@ -226,58 +225,58 @@ private:
 
         SoapySDR::Device::unmake(dev);
 
-        config.acquire();
-        if (config.conf["devices"].contains(name)) {
-            if (config.conf["devices"][name].contains("antenna")) {
-                uiAntennaId = config.conf["devices"][name]["antenna"];
+        config.readConfig([&](const json& conf) {
+            if (conf["devices"].contains(name)) {
+                if (conf["devices"][name].contains("antenna")) {
+                    uiAntennaId = conf["devices"][name]["antenna"];
+                }
+                else {
+                    uiAntennaId = 0;
+                }
+                int i = 0;
+                for (auto gain : gainList) {
+                    if (conf["devices"][name]["gains"].contains(gain)) {
+                        uiGains[i] = conf["devices"][name]["gains"][gain];
+                    }
+                    else {
+                        uiGains[i] = gainRanges[i].minimum();
+                    }
+                    i++;
+                }
+                if (conf["devices"][name].contains("bandwidth")) {
+                    uiBandwidthId = conf["devices"][name]["bandwidth"];
+                }
+                else if (bandwidthList.size() > 2) {
+                    uiBandwidthId = 0;
+                }
+                if (hasAgc && conf["devices"][name].contains("agc")) {
+                    agc = conf["devices"][name]["agc"];
+                }
+                else {
+                    agc = false;
+                }
+                if (conf["devices"][name].contains("sampleRate")) {
+                    selectSampleRate(conf["devices"][name]["sampleRate"]);
+                }
+                else {
+                    selectSampleRate(sampleRates[0]);
+                }
             }
             else {
                 uiAntennaId = 0;
-            }
-            int i = 0;
-            for (auto gain : gainList) {
-                if (config.conf["devices"][name]["gains"].contains(gain)) {
-                    uiGains[i] = config.conf["devices"][name]["gains"][gain];
-                }
-                else {
+                int i = 0;
+                for (auto gain : gainList) {
                     uiGains[i] = gainRanges[i].minimum();
+                    i++;
                 }
-                i++;
+                if (bandwidthList.size() > 2)
+                    uiBandwidthId = 0;
+                if (hasAgc) {
+                    agc = false;
+                }
+                selectSampleRate(sampleRates[0]); // Select default
             }
-            if (config.conf["devices"][name].contains("bandwidth")) {
-                uiBandwidthId = config.conf["devices"][name]["bandwidth"];
-            }
-            else if (bandwidthList.size() > 2) {
-                uiBandwidthId = 0;
-            }
-            if (hasAgc && config.conf["devices"][name].contains("agc")) {
-                agc = config.conf["devices"][name]["agc"];
-            }
-            else {
-                agc = false;
-            }
-            if (config.conf["devices"][name].contains("sampleRate")) {
-                selectSampleRate(config.conf["devices"][name]["sampleRate"]);
-            }
-            else {
-                selectSampleRate(sampleRates[0]);
-            }
-        }
-        else {
-            uiAntennaId = 0;
-            int i = 0;
-            for (auto gain : gainList) {
-                uiGains[i] = gainRanges[i].minimum();
-                i++;
-            }
-            if (bandwidthList.size() > 2)
-                uiBandwidthId = 0;
-            if (hasAgc) {
-                agc = false;
-            }
-            selectSampleRate(sampleRates[0]); // Select default
-        }
-        config.release();
+        });
     }
 
     void saveCurrent() {
@@ -294,9 +293,7 @@ private:
         if (hasAgc) {
             conf["agc"] = agc;
         }
-        config.acquire();
-        config.conf["devices"][devArgs["label"]] = conf;
-        config.release(true);
+        config.withConfig([&](json& cconf) { cconf["devices"][devArgs["label"]] = conf; });
     }
 
     static void menuSelected(void* ctx) {
@@ -391,7 +388,9 @@ private:
             SmGui::ForceSync();
             if (SmGui::Button(CONCAT("Refresh##_dev_select_", _this->name))) {
                 _this->refresh();
-                _this->selectDevice(config.conf["device"]);
+                std::string devName;
+                config.readConfig([&](const json& conf) { devName = conf["device"]; });
+                _this->selectDevice(devName);
             }
             return;
         }
@@ -402,9 +401,7 @@ private:
         SmGui::ForceSync();
         if (SmGui::Combo(CONCAT("##_dev_select_", _this->name), &_this->devId, _this->txtDevList.c_str())) {
             _this->selectDevice(_this->devList[_this->devId]["label"]);
-            config.acquire();
-            config.conf["device"] = _this->devList[_this->devId]["label"];
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["device"] = _this->devList[_this->devId]["label"]; });
         }
 
         if (SmGui::Combo(CONCAT("##_sr_select_", _this->name), &_this->srId, _this->txtSrList.c_str())) {
@@ -418,7 +415,9 @@ private:
         SmGui::FillWidth();
         if (SmGui::Button(CONCAT("Refresh##_dev_select_", _this->name))) {
             _this->refresh();
-            _this->selectDevice(config.conf["device"]);
+            std::string devName;
+            config.readConfig([&](const json& conf) { devName = conf["device"]; });
+            _this->selectDevice(devName);
         }
 
         if (_this->running) { SmGui::EndDisabled(); }

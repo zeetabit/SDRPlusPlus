@@ -64,12 +64,12 @@ namespace backend {
 
     int init(std::string resDir) {
         // Load config
-        core::configManager.acquire();
-        winWidth = core::configManager.conf["windowSize"]["w"];
-        winHeight = core::configManager.conf["windowSize"]["h"];
-        maximized = core::configManager.conf["maximized"];
-        fullScreen = core::configManager.conf["fullscreen"];
-        core::configManager.release();
+        core::configManager.readConfig([&](const json& conf) {
+            winWidth = conf["windowSize"]["w"];
+            winHeight = conf["windowSize"]["h"];
+            maximized = conf["maximized"];
+            fullScreen = conf["fullscreen"];
+        });
 
         // Setup window
         glfwSetErrorCallback(glfw_error_callback);
@@ -241,12 +241,12 @@ namespace backend {
             
             if (_maximized != maximized) {
                 _maximized = maximized;
-                core::configManager.acquire();
-                core::configManager.conf["maximized"] = _maximized;
-                if (!maximized) {
-                    glfwSetWindowSize(window, core::configManager.conf["windowSize"]["w"], core::configManager.conf["windowSize"]["h"]);
-                }
-                core::configManager.release(true);
+                core::configManager.withConfig([&](json& conf) {
+                    conf["maximized"] = _maximized;
+                    if (!maximized) {
+                        glfwSetWindowSize(window, conf["windowSize"]["w"], conf["windowSize"]["h"]);
+                    }
+                });
             }
 
             glfwGetWindowSize(window, &_winWidth, &_winHeight);
@@ -260,26 +260,26 @@ namespace backend {
                     glfwGetWindowPos(window, &fsPosX, &fsPosY);
                     const GLFWvidmode* mode = glfwGetVideoMode(glfwGetPrimaryMonitor());
                     glfwSetWindowMonitor(window, monitor, 0, 0, mode->width, mode->height, 0);
-                    core::configManager.acquire();
-                    core::configManager.conf["fullscreen"] = true;
-                    core::configManager.release();
+                    core::configManager.withConfig([&](json& conf) {
+                        conf["fullscreen"] = true;
+                    });
                 }
                 else {
                     flog::info("Fullscreen: OFF");
                     glfwSetWindowMonitor(window, nullptr, fsPosX, fsPosY, fsWidth, fsHeight, 0);
-                    core::configManager.acquire();
-                    core::configManager.conf["fullscreen"] = false;
-                    core::configManager.release();
+                    core::configManager.withConfig([&](json& conf) {
+                        conf["fullscreen"] = false;
+                    });
                 }
             }
 
             if ((_winWidth != winWidth || _winHeight != winHeight) && !maximized && _winWidth > 0 && _winHeight > 0) {
                 winWidth = _winWidth;
                 winHeight = _winHeight;
-                core::configManager.acquire();
-                core::configManager.conf["windowSize"]["w"] = winWidth;
-                core::configManager.conf["windowSize"]["h"] = winHeight;
-                core::configManager.release(true);
+                core::configManager.withConfig([&](json& conf) {
+                    conf["windowSize"]["w"] = winWidth;
+                    conf["windowSize"]["h"] = winHeight;
+                });
             }
 
             if (winWidth > 0 && winHeight > 0) {

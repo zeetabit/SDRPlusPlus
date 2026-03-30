@@ -38,23 +38,24 @@ public:
         _streamName = streamName;
 
         // Load config
-        config.acquire();
-        if (!config.conf.contains(_streamName)) {
-            config.conf[_streamName]["hostname"] = "localhost";
-            config.conf[_streamName]["port"] = 7355;
-            config.conf[_streamName]["protocol"] = SINK_MODE_UDP; // UDP
-            config.conf[_streamName]["sampleRate"] = 48000.0;
-            config.conf[_streamName]["stereo"] = false;
-            config.conf[_streamName]["listening"] = false;
-        }
-        std::string host = config.conf[_streamName]["hostname"];
-        strcpy(hostname, host.c_str());
-        port = config.conf[_streamName]["port"];
-        modeId = config.conf[_streamName]["protocol"];
-        sampleRate = config.conf[_streamName]["sampleRate"];
-        stereo = config.conf[_streamName]["stereo"];
-        bool startNow = config.conf[_streamName]["listening"];
-        config.release(true);
+        bool startNow = false;
+        config.withConfig([&](json& conf) {
+            if (!conf.contains(_streamName)) {
+                conf[_streamName]["hostname"] = "localhost";
+                conf[_streamName]["port"] = 7355;
+                conf[_streamName]["protocol"] = SINK_MODE_UDP; // UDP
+                conf[_streamName]["sampleRate"] = 48000.0;
+                conf[_streamName]["stereo"] = false;
+                conf[_streamName]["listening"] = false;
+            }
+            std::string host = conf[_streamName]["hostname"];
+            strcpy(hostname, host.c_str());
+            port = conf[_streamName]["port"];
+            modeId = conf[_streamName]["protocol"];
+            sampleRate = conf[_streamName]["sampleRate"];
+            stereo = conf[_streamName]["stereo"];
+            startNow = conf[_streamName]["listening"];
+        });
 
         netBuf = new int16_t[STREAM_BUFFER_SIZE];
 
@@ -129,24 +130,24 @@ public:
 
         if (listening) { style::beginDisabled(); }
         if (ImGui::InputText(CONCAT("##_network_sink_host_", _streamName), hostname, 1023)) {
-            config.acquire();
-            config.conf[_streamName]["hostname"] = hostname;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_streamName]["hostname"] = hostname;
+            });
         }
         ImGui::SameLine();
         ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
         if (ImGui::InputInt(CONCAT("##_network_sink_port_", _streamName), &port, 0, 0)) {
-            config.acquire();
-            config.conf[_streamName]["port"] = port;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_streamName]["port"] = port;
+            });
         }
 
         ImGui::LeftLabel("Protocol");
         ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
         if (ImGui::Combo(CONCAT("##_network_sink_mode_", _streamName), &modeId, sinkModesTxt)) {
-            config.acquire();
-            config.conf[_streamName]["protocol"] = modeId;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_streamName]["protocol"] = modeId;
+            });
         }
 
         if (listening) { style::endDisabled(); }
@@ -157,30 +158,30 @@ public:
             sampleRate = sampleRates[srId];
             _stream->setSampleRate(sampleRate);
             packer.setSampleCount(sampleRate / 60);
-            config.acquire();
-            config.conf[_streamName]["sampleRate"] = sampleRate;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_streamName]["sampleRate"] = sampleRate;
+            });
         }
 
         if (ImGui::Checkbox(CONCAT("Stereo##_network_sink_stereo_", _streamName), &stereo)) {
             stop();
             start();
-            config.acquire();
-            config.conf[_streamName]["stereo"] = stereo;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_streamName]["stereo"] = stereo;
+            });
         }
 
         if (listening && ImGui::Button(CONCAT("Stop##_network_sink_stop_", _streamName), ImVec2(menuWidth, 0))) {
             stopServer();
-            config.acquire();
-            config.conf[_streamName]["listening"] = false;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_streamName]["listening"] = false;
+            });
         }
         else if (!listening && ImGui::Button(CONCAT("Start##_network_sink_stop_", _streamName), ImVec2(menuWidth, 0))) {
             startServer();
-            config.acquire();
-            config.conf[_streamName]["listening"] = true;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_streamName]["listening"] = true;
+            });
         }
 
         ImGui::TextUnformatted("Status:");

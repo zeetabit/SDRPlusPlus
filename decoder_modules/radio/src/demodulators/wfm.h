@@ -42,24 +42,23 @@ namespace demod {
             std::string rdsRegionStr = "eu";
 
             // Load config
-            _config->acquire();
-            bool modified = false;
-            if (config->conf[name][getName()].contains("stereo")) {
-                _stereo = config->conf[name][getName()]["stereo"];
-            }
-            if (config->conf[name][getName()].contains("lowPass")) {
-                _lowPass = config->conf[name][getName()]["lowPass"];
-            }
-            if (config->conf[name][getName()].contains("rds")) {
-                _rds = config->conf[name][getName()]["rds"];
-            }
-            if (config->conf[name][getName()].contains("rdsInfo")) {
-                _rdsInfo = config->conf[name][getName()]["rdsInfo"];
-            }
-            if (config->conf[name][getName()].contains("rdsRegion")) {
-                rdsRegionStr = config->conf[name][getName()]["rdsRegion"];
-            }
-            _config->release(modified);
+            _config->readConfig([&](const json& conf) {
+                if (conf[name][getName()].contains("stereo")) {
+                    _stereo = conf[name][getName()]["stereo"];
+                }
+                if (conf[name][getName()].contains("lowPass")) {
+                    _lowPass = conf[name][getName()]["lowPass"];
+                }
+                if (conf[name][getName()].contains("rds")) {
+                    _rds = conf[name][getName()]["rds"];
+                }
+                if (conf[name][getName()].contains("rdsInfo")) {
+                    _rdsInfo = conf[name][getName()]["rdsInfo"];
+                }
+                if (conf[name][getName()].contains("rdsRegion")) {
+                    rdsRegionStr = conf[name][getName()]["rdsRegion"];
+                }
+            });
 
             // Load RDS region
             if (rdsRegions.keyExists(rdsRegionStr)) {
@@ -102,38 +101,28 @@ namespace demod {
         void showMenu() {
             if (ImGui::Checkbox(("Low Pass##_radio_wfm_lowpass_" + name).c_str(), &_lowPass)) {
                 demod.setLowPass(_lowPass);
-                _config->acquire();
-                _config->conf[name][getName()]["lowPass"] = _lowPass;
-                _config->release(true);
+                _config->withConfig([&](json& conf) { conf[name][getName()]["lowPass"] = _lowPass; });
             }
             if (ImGui::Checkbox(("Stereo##_radio_wfm_stereo_" + name).c_str(), &_stereo)) {
                 setStereo(_stereo);
-                _config->acquire();
-                _config->conf[name][getName()]["stereo"] = _stereo;
-                _config->release(true);
+                _config->withConfig([&](json& conf) { conf[name][getName()]["stereo"] = _stereo; });
             }
             if (ImGui::Checkbox(("Decode RDS##_radio_wfm_rds_" + name).c_str(), &_rds)) {
                 demod.setRDSOut(_rds);
-                _config->acquire();
-                _config->conf[name][getName()]["rds"] = _rds;
-                _config->release(true);
+                _config->withConfig([&](json& conf) { conf[name][getName()]["rds"] = _rds; });
             }
 
             // TODO: This might break when the entire radio module is disabled
             if (!_rds) { ImGui::BeginDisabled(); }
             if (ImGui::Checkbox(("Advanced RDS Info##_radio_wfm_rds_info_" + name).c_str(), &_rdsInfo)) {
                 setAdvancedRds(_rdsInfo);
-                _config->acquire();
-                _config->conf[name][getName()]["rdsInfo"] = _rdsInfo;
-                _config->release(true);
+                _config->withConfig([&](json& conf) { conf[name][getName()]["rdsInfo"] = _rdsInfo; });
             }
             ImGui::SameLine();
             ImGui::FillWidth();
             if (ImGui::Combo(("##_radio_wfm_rds_region_" + name).c_str(), &rdsRegionId, rdsRegions.txt)) {
                 rdsRegion = rdsRegions.value(rdsRegionId);
-                _config->acquire();
-                _config->conf[name][getName()]["rdsRegion"] = rdsRegions.key(rdsRegionId);
-                _config->release(true);
+                _config->withConfig([&](json& conf) { conf[name][getName()]["rdsRegion"] = rdsRegions.key(rdsRegionId); });
             }
             if (!_rds) { ImGui::EndDisabled(); }
 

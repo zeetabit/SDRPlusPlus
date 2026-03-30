@@ -11,9 +11,9 @@ namespace thememenu {
     void init(std::string resDir) {
         // TODO: Not hardcode theme directory
         gui::themeManager.loadThemesFromDir(resDir + "/themes/");
-        core::configManager.acquire();
-        std::string selectedThemeName = core::configManager.conf["theme"];
-        core::configManager.release();
+        std::string selectedThemeName = core::configManager.readConfig<std::string>([](const json& conf) {
+            return (std::string)conf["theme"];
+        });
 
         // Select theme by name, if not available, apply Dark theme
         themeNames = gui::themeManager.getThemeNames();
@@ -45,9 +45,7 @@ namespace thememenu {
         ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
         if (ImGui::Combo("##theme_select_combo", &themeId, themeNamesTxt.c_str())) {
             applyTheme();
-            core::configManager.acquire();
-            core::configManager.conf["theme"] = themeNames[themeId];
-            core::configManager.release(true);
+            core::configManager.withConfig([](json& conf) { conf["theme"] = themeNames[themeId]; });
         }
     }
 }

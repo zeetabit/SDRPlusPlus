@@ -48,7 +48,7 @@ namespace core {
         // Update IQ frontend input samplerate and get effective samplerate
         sigpath::iqFrontEnd.setSampleRate(samplerate);
         double effectiveSr  = sigpath::iqFrontEnd.getEffectiveSamplerate();
-        
+
         // Reset zoom
         gui::waterfall.setBandwidth(effectiveSr);
         gui::waterfall.setViewOffset(0);
@@ -59,6 +59,8 @@ namespace core {
 
         // Debug logs
         flog::info("New DSP samplerate: {0} (source samplerate is {1})", effectiveSr, samplerate);
+
+        gui::mainWindow.loadZoomFromConfig();
     }
 };
 
@@ -270,6 +272,8 @@ int sdrpp_main(int argc, char* argv[]) {
     defConfig["vfoOffsets"] = json::object();
 
     defConfig["vfoColors"]["Radio"] = "#FFFFFF";
+    defConfig["bandwidth_slider"] = 0.0f;
+    defConfig["bandwidth_view"] = 0.0f;
 
 #ifdef __ANDROID__
     defConfig["lockMenuOrder"] = true;
@@ -296,82 +300,80 @@ int sdrpp_main(int argc, char* argv[]) {
     core::configManager.setPath(root + "/config.json");
     core::configManager.load(defConfig);
     core::configManager.enableAutoSave();
-    core::configManager.acquire();
-
-    // Android can't load just any .so file. This means we have to hardcode the name of the modules
+    core::configManager.withConfig([&](json& conf) {
+        // Android can't load just any .so file. This means we have to hardcode the name of the modules
 #ifdef __ANDROID__
-    int modCount = 0;
-    core::configManager.conf["modules"] = json::array();
+        int modCount = 0;
+        conf["modules"] = json::array();
 
-    core::configManager.conf["modules"][modCount++] = "airspy_source.so";
-    core::configManager.conf["modules"][modCount++] = "airspyhf_source.so";
-    core::configManager.conf["modules"][modCount++] = "hackrf_source.so";
-    core::configManager.conf["modules"][modCount++] = "hermes_source.so";
-    core::configManager.conf["modules"][modCount++] = "hydrasdr_source.so";
-    core::configManager.conf["modules"][modCount++] = "plutosdr_source.so";
-    core::configManager.conf["modules"][modCount++] = "rfspace_source.so";
-    core::configManager.conf["modules"][modCount++] = "rtl_sdr_source.so";
-    core::configManager.conf["modules"][modCount++] = "rtl_tcp_source.so";
-    core::configManager.conf["modules"][modCount++] = "sdrpp_server_source.so";
-    core::configManager.conf["modules"][modCount++] = "spyserver_source.so";
+        conf["modules"][modCount++] = "airspy_source.so";
+        conf["modules"][modCount++] = "airspyhf_source.so";
+        conf["modules"][modCount++] = "hackrf_source.so";
+        conf["modules"][modCount++] = "hermes_source.so";
+        conf["modules"][modCount++] = "hydrasdr_source.so";
+        conf["modules"][modCount++] = "plutosdr_source.so";
+        conf["modules"][modCount++] = "rfspace_source.so";
+        conf["modules"][modCount++] = "rtl_sdr_source.so";
+        conf["modules"][modCount++] = "rtl_tcp_source.so";
+        conf["modules"][modCount++] = "sdrpp_server_source.so";
+        conf["modules"][modCount++] = "spyserver_source.so";
 
-    core::configManager.conf["modules"][modCount++] = "network_sink.so";
-    core::configManager.conf["modules"][modCount++] = "audio_sink.so";
+        conf["modules"][modCount++] = "network_sink.so";
+        conf["modules"][modCount++] = "audio_sink.so";
 
-    core::configManager.conf["modules"][modCount++] = "m17_decoder.so";
-    core::configManager.conf["modules"][modCount++] = "meteor_demodulator.so";
-    core::configManager.conf["modules"][modCount++] = "radio.so";
+        conf["modules"][modCount++] = "m17_decoder.so";
+        conf["modules"][modCount++] = "meteor_demodulator.so";
+        conf["modules"][modCount++] = "radio.so";
 
-    core::configManager.conf["modules"][modCount++] = "frequency_manager.so";
-    core::configManager.conf["modules"][modCount++] = "recorder.so";
-    core::configManager.conf["modules"][modCount++] = "rigctl_server.so";
-    core::configManager.conf["modules"][modCount++] = "scanner.so";
+        conf["modules"][modCount++] = "frequency_manager.so";
+        conf["modules"][modCount++] = "recorder.so";
+        conf["modules"][modCount++] = "rigctl_server.so";
+        conf["modules"][modCount++] = "scanner.so";
 #endif
 
-    // Fix missing elements in config
-    for (auto const& item : defConfig.items()) {
-        if (!core::configManager.conf.contains(item.key())) {
-            flog::info("Missing key in config {0}, repairing", item.key());
-            core::configManager.conf[item.key()] = defConfig[item.key()];
+        // Fix missing elements in config
+        for (auto const& item : defConfig.items()) {
+            if (!conf.contains(item.key())) {
+                flog::info("Missing key in config {0}, repairing", item.key());
+                conf[item.key()] = defConfig[item.key()];
+            }
         }
-    }
 
-    // Remove unused elements
-    auto items = core::configManager.conf.items();
-    auto newConf = core::configManager.conf;
-    bool configCorrected = false;
-    for (auto const& item : items) {
-        if (!defConfig.contains(item.key())) {
-            flog::info("Unused key in config {0}, repairing", item.key());
-            newConf.erase(item.key());
-            configCorrected = true;
+        // Remove unused elements
+        auto items = conf.items();
+        auto newConf = conf;
+        bool configCorrected = false;
+        for (auto const& item : items) {
+            if (!defConfig.contains(item.key())) {
+                flog::info("Unused key in config {0}, repairing", item.key());
+                newConf.erase(item.key());
+                configCorrected = true;
+            }
         }
-    }
-    if (configCorrected) {
-        core::configManager.conf = newConf;
-    }
+        if (configCorrected) { conf = newConf; }
 
-    // Update to new module representation in config if needed
-    for (auto [_name, inst] : core::configManager.conf["moduleInstances"].items()) {
-        if (!inst.is_string()) { continue; }
-        std::string mod = inst;
-        json newMod;
-        newMod["module"] = mod;
-        newMod["enabled"] = true;
-        core::configManager.conf["moduleInstances"][_name] = newMod;
-    }
+        // Update to new module representation in config if needed
+        for (auto [_name, inst] : conf["moduleInstances"].items()) {
+            if (!inst.is_string()) { continue; }
+            std::string mod = inst;
+            json newMod;
+            newMod["module"] = mod;
+            newMod["enabled"] = true;
+            conf["moduleInstances"][_name] = newMod;
+        }
 
-    // Load UI scaling
-    style::uiScale = core::configManager.conf["uiScale"];
-
-    core::configManager.release(true);
+        // Load UI scaling
+        style::uiScale = conf["uiScale"];
+    });
 
     if (serverMode) { return server::main(); }
 
-    core::configManager.acquire();
-    std::string resDir = core::configManager.conf["resourcesDirectory"];
-    json bandColors = core::configManager.conf["bandColors"];
-    core::configManager.release();
+    std::string resDir;
+    json bandColors;
+    core::configManager.readConfig([&](const json& conf) {
+        resDir = conf["resourcesDirectory"];
+        bandColors = conf["bandColors"];
+    });
 
     // Assert that the resource directory is absolute and check existence
     resDir = std::filesystem::absolute(resDir).string();
@@ -405,9 +407,7 @@ int sdrpp_main(int argc, char* argv[]) {
         if (!detectedDir.empty()) {
             flog::info("Auto-detected resource directory: {0}", detectedDir);
             resDir = detectedDir;
-            core::configManager.acquire();
-            core::configManager.conf["resourcesDirectory"] = resDir;
-            core::configManager.release(true);
+            core::configManager.withConfig([&](json& conf) { conf["resourcesDirectory"] = resDir; });
         }
         else {
             flog::error("Resource directory doesn't exist! Please make sure that you've configured it correctly in config.json (check readme for details)");

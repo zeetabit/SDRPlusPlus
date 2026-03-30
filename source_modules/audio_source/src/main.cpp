@@ -55,11 +55,11 @@ public:
 
         // Select device
         std::string device = "";
-        config.acquire();
-        if (config.conf.contains("device")) {
-            device = config.conf["device"];
-        }
-        config.release();
+        config.readConfig([&](const json& conf) {
+            if (conf.contains("device")) {
+                device = conf["device"];
+            }
+        });
         select(device);
         
         sigpath::sourceManager.registerSource("Audio", &handler);
@@ -141,14 +141,14 @@ public:
         }
 
         // Load samplerate from config
-        config.acquire();
-        if (config.conf["devices"][selectedDevice].contains("sampleRate")) {
-            sampleRate = config.conf["devices"][selectedDevice]["sampleRate"];
-            if (sampleRates.keyExists(sampleRate)) {
-                srId = sampleRates.keyId(sampleRate);
+        config.readConfig([&](const json& conf) {
+            if (conf["devices"][selectedDevice].contains("sampleRate")) {
+                sampleRate = conf["devices"][selectedDevice]["sampleRate"];
+                if (sampleRates.keyExists(sampleRate)) {
+                    srId = sampleRates.keyId(sampleRate);
+                }
             }
-        }
-        config.release();
+        });
 
         // Update samplerate from ID
         sampleRate = sampleRates[srId];
@@ -235,18 +235,14 @@ private:
             std::string dev = _this->devices.key(_this->devId);
             _this->select(dev);
             core::setInputSampleRate(_this->sampleRate);
-            config.acquire();
-            config.conf["device"] = dev;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["device"] = dev; });
         }
 
         if (SmGui::Combo(CONCAT("##_audio_sr_sel_", _this->name), &_this->srId, _this->sampleRates.txt)) {
             _this->sampleRate = _this->sampleRates[_this->srId];
             core::setInputSampleRate(_this->sampleRate);
             if (!_this->selectedDevice.empty()) {
-                config.acquire();
-                config.conf["devices"][_this->selectedDevice]["sampleRate"] = _this->sampleRate;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->selectedDevice]["sampleRate"] = _this->sampleRate; });
             }
         }
 

@@ -18,11 +18,9 @@ namespace demod {
             this->_config = config;
 
             // Load config
-            _config->acquire();
-            if (config->conf[name][getName()].contains("lowPass")) {
-                _lowPass = config->conf[name][getName()]["lowPass"];
-            }
-            _config->release();
+            _config->readConfig([&](const json& conf) {
+                if (conf[name][getName()].contains("lowPass")) { _lowPass = conf[name][getName()]["lowPass"]; }
+            });
 
 
             // Define structure
@@ -36,9 +34,7 @@ namespace demod {
         void showMenu() {
             if (ImGui::Checkbox(("Low Pass##_radio_wfm_lowpass_" + name).c_str(), &_lowPass)) {
                 demod.setLowPass(_lowPass);
-                _config->acquire();
-                _config->conf[name][getName()]["lowPass"] = _lowPass;
-                _config->release(true);
+                _config->withConfig([&](json& conf) { conf[name][getName()]["lowPass"] = _lowPass; });
             }
         }
 

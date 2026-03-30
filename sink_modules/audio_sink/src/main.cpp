@@ -35,16 +35,14 @@ public:
         audio.setErrorCallback(&errorCallback);
 #endif
 
-        bool created = false;
         std::string device = "";
-        config.acquire();
-        if (!config.conf.contains(_streamName)) {
-            created = true;
-            config.conf[_streamName]["device"] = "";
-            config.conf[_streamName]["devices"] = json({});
-        }
-        device = config.conf[_streamName]["device"];
-        config.release(created);
+        config.withConfig([&](json& conf) {
+            if (!conf.contains(_streamName)) {
+                conf[_streamName]["device"] = "";
+                conf[_streamName]["devices"] = json({});
+            }
+            device = conf[_streamName]["device"];
+        });
 
         RtAudio::DeviceInfo info;
 #if RTAUDIO_VERSION_MAJOR >= 6
@@ -103,14 +101,12 @@ public:
 
     void selectById(int id) {
         devId = id;
-        bool created = false;
-        config.acquire();
-        if (!config.conf[_streamName]["devices"].contains(devList[id].name)) {
-            created = true;
-            config.conf[_streamName]["devices"][devList[id].name] = devList[id].preferredSampleRate;
-        }
-        sampleRate = config.conf[_streamName]["devices"][devList[id].name];
-        config.release(created);
+        config.withConfig([&](json& conf) {
+            if (!conf[_streamName]["devices"].contains(devList[id].name)) {
+                conf[_streamName]["devices"][devList[id].name] = devList[id].preferredSampleRate;
+            }
+            sampleRate = conf[_streamName]["devices"][devList[id].name];
+        });
 
         sampleRates = devList[id].sampleRates;
         sampleRatesTxt = "";
@@ -147,9 +143,9 @@ public:
         ImGui::SetNextItemWidth(menuWidth);
         if (ImGui::Combo(("##_audio_sink_dev_" + _streamName).c_str(), &devId, txtDevList.c_str())) {
             selectById(devId);
-            config.acquire();
-            config.conf[_streamName]["device"] = devList[devId].name;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_streamName]["device"] = devList[devId].name;
+            });
         }
 
         ImGui::SetNextItemWidth(menuWidth);
@@ -160,9 +156,9 @@ public:
                 doStop();
                 doStart();
             }
-            config.acquire();
-            config.conf[_streamName]["devices"][devList[devId].name] = sampleRate;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_streamName]["devices"][devList[devId].name] = sampleRate;
+            });
         }
     }
 

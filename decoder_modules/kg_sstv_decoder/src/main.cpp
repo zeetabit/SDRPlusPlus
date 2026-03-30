@@ -42,18 +42,18 @@ public:
         this->name = name;
 
         // Load config
-        config.acquire();
-        if (!config.conf.contains(name)) {
-            config.conf[name]["showLines"] = false;
-        }
-        showLines = config.conf[name]["showLines"];
-        if (showLines) {
-            diag.lines.push_back(-0.75f);
-            diag.lines.push_back(-0.25f);
-            diag.lines.push_back(0.25f);
-            diag.lines.push_back(0.75f);
-        }
-        config.release(true);
+        config.withConfig([&](json& conf) {
+            if (!conf.contains(name)) {
+                conf[name]["showLines"] = false;
+            }
+            showLines = conf[name]["showLines"];
+            if (showLines) {
+                diag.lines.push_back(-0.75f);
+                diag.lines.push_back(-0.25f);
+                diag.lines.push_back(0.25f);
+                diag.lines.push_back(0.75f);
+            }
+        });
 
 
         // Initialize VFO
@@ -142,9 +142,9 @@ private:
             else {
                 _this->diag.lines.clear();
             }
-            config.acquire();
-            config.conf[_this->name]["showLines"] = _this->showLines;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_this->name]["showLines"] = _this->showLines;
+            });
         }
 
         if (!_this->enabled) { style::endDisabled(); }

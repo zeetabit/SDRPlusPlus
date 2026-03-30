@@ -24,56 +24,47 @@ namespace vfo_color_menu {
 
     void init() {
         // Load colors from config
-        bool modified = false;
-        core::configManager.acquire();
-        json conf = core::configManager.conf["vfoColors"];
-        for (auto& [name, val] : conf.items()) {
-            // If not a string, repair with default
-            if (!val.is_string()) {
-                core::configManager.conf["vfoColors"][name] = "#FFFFFF";
-                vfoColors[name] = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
-                modified = true;
-                if (sigpath::vfoManager.vfoExists(name)) {
-                    sigpath::vfoManager.setColor(name, IM_COL32(255, 255, 255, 50));
+        core::configManager.withConfig([](json& conf) {
+            for (auto& [name, val] : conf["vfoColors"].items()) {
+                if (!val.is_string()) {
+                    conf["vfoColors"][name] = "#FFFFFF";
+                    vfoColors[name] = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+                    if (sigpath::vfoManager.vfoExists(name)) {
+                        sigpath::vfoManager.setColor(name, IM_COL32(255, 255, 255, 50));
+                    }
+                    continue;
                 }
-                continue;
-            }
 
-            // If not a valid hex color, repair with default
-            std::string col = val;
-            if (col[0] != '#' || !std::all_of(col.begin() + 1, col.end(), ::isxdigit)) {
-                core::configManager.conf["vfoColors"][name] = "#FFFFFF";
-                vfoColors[name] = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
-                modified = true;
-                if (sigpath::vfoManager.vfoExists(name)) {
-                    sigpath::vfoManager.setColor(name, IM_COL32(255, 255, 255, 50));
+                std::string col = val;
+                if (col[0] != '#' || !std::all_of(col.begin() + 1, col.end(), ::isxdigit)) {
+                    conf["vfoColors"][name] = "#FFFFFF";
+                    vfoColors[name] = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+                    if (sigpath::vfoManager.vfoExists(name)) {
+                        sigpath::vfoManager.setColor(name, IM_COL32(255, 255, 255, 50));
+                    }
+                    continue;
                 }
-                continue;
+
+                float r, g, b;
+                r = std::stoi(col.substr(1, 2), NULL, 16);
+                g = std::stoi(col.substr(3, 2), NULL, 16);
+                b = std::stoi(col.substr(5, 2), NULL, 16);
+                vfoColors[name] = ImVec4(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f);
+                if (sigpath::vfoManager.vfoExists(name)) {
+                    sigpath::vfoManager.setColor(name, IM_COL32((int)roundf(r), (int)roundf(g), (int)roundf(b), 50));
+                }
             }
 
-            // Since the color is valid, decode it and set the vfo's color
-            float r, g, b;
-            r = std::stoi(col.substr(1, 2), NULL, 16);
-            g = std::stoi(col.substr(3, 2), NULL, 16);
-            b = std::stoi(col.substr(5, 2), NULL, 16);
-            vfoColors[name] = ImVec4(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f);
-            if (sigpath::vfoManager.vfoExists(name)) {
-                sigpath::vfoManager.setColor(name, IM_COL32((int)roundf(r), (int)roundf(g), (int)roundf(b), 50));
+            for (auto& [name, vfo] : gui::waterfall.vfos) {
+                if (vfoColors.find(name) == vfoColors.end()) {
+                    vfoColors[name] = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+                    vfo->color = IM_COL32(255, 255, 255, 50);
+                }
             }
-        }
-
-        // Iterate existing VFOs and set their color if in the config, if not set to default
-        for (auto& [name, vfo] : gui::waterfall.vfos) {
-            if (vfoColors.find(name) == vfoColors.end()) {
-                vfoColors[name] = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
-                vfo->color = IM_COL32(255, 255, 255, 50);
-                modified = true;
-            }
-        }
+        });
 
         vfoAddHndl.handler = vfoAddHandler;
         sigpath::vfoManager.onVfoCreated.bindHandler(&vfoAddHndl);
-        core::configManager.release(modified);
     }
 
     void draw(void* ctx) {
@@ -90,11 +81,10 @@ namespace vfo_color_menu {
                 vfoColors[name] = ImVec4(r, g, b, 1.0f);
                 vfo->color = IM_COL32((int)roundf(r * 255), (int)roundf(g * 255), (int)roundf(b * 255), 50);
                 hue += delta;
-                core::configManager.acquire();
                 char buf[16];
                 sprintf(buf, "#%02X%02X%02X", (int)roundf(r * 255), (int)roundf(g * 255), (int)roundf(b * 255));
-                core::configManager.conf["vfoColors"][name] = buf;
-                core::configManager.release(true);
+                std::string colorStr = buf;
+                core::configManager.withConfig([&](json& conf) { conf["vfoColors"][name] = colorStr; });
             }
         }
 
@@ -103,9 +93,7 @@ namespace vfo_color_menu {
             for (auto& [name, vfo] : gui::waterfall.vfos) {
                 vfoColors[name] = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
                 vfo->color = IM_COL32(255, 255, 255, 50);
-                core::configManager.acquire();
-                core::configManager.conf["vfoColors"][name] = "#FFFFFF";
-                core::configManager.release(true);
+                core::configManager.withConfig([&](json& conf) { conf["vfoColors"][name] = "#FFFFFF"; });
             }
         }
 
@@ -122,11 +110,10 @@ namespace vfo_color_menu {
             if (ImGui::ColorEdit3(("##vfo_color_" + name).c_str(), (float*)&col, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel)) {
                 vfoColors[name] = col;
                 vfo->color = IM_COL32((int)roundf(col.x * 255), (int)roundf(col.y * 255), (int)roundf(col.z * 255), 50);
-                core::configManager.acquire();
                 char buf[16];
                 sprintf(buf, "#%02X%02X%02X", (int)roundf(col.x * 255), (int)roundf(col.y * 255), (int)roundf(col.z * 255));
-                core::configManager.conf["vfoColors"][name] = buf;
-                core::configManager.release(true);
+                std::string colorStr = buf;
+                core::configManager.withConfig([&](json& conf) { conf["vfoColors"][name] = colorStr; });
             }
             ImGui::SameLine();
             ImGui::TextUnformatted(name.c_str());

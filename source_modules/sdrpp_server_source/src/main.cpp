@@ -47,11 +47,11 @@ public:
         handler.stream = &stream;
 
         // Load config
-        config.acquire();
-        std::string hostStr = config.conf["hostname"];
-        strcpy(hostname, hostStr.c_str());
-        port = config.conf["port"];
-        config.release();
+        config.readConfig([&](const json& conf) {
+            std::string hostStr = conf["hostname"];
+            strcpy(hostname, hostStr.c_str());
+            port = conf["port"];
+        });
 
         sigpath::sourceManager.registerSource("SDR++ Server", &handler);
     }
@@ -155,16 +155,12 @@ private:
 
         if (connected) { style::beginDisabled(); }
         if (ImGui::InputText(CONCAT("##sdrpp_srv_srv_host_", _this->name), _this->hostname, 1023)) {
-            config.acquire();
-            config.conf["hostname"] = _this->hostname;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["hostname"] = _this->hostname; });
         }
         ImGui::SameLine();
         ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
         if (ImGui::InputInt(CONCAT("##sdrpp_srv_srv_port_", _this->name), &_this->port, 0, 0)) {
-            config.acquire();
-            config.conf["port"] = _this->port;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["port"] = _this->port; });
         }
         if (connected) { style::endDisabled(); }
 
@@ -185,18 +181,14 @@ private:
                 _this->client->setSampleType(_this->sampleTypeList[_this->sampleTypeId]);
 
                 // Save config
-                config.acquire();
-                config.conf["servers"][_this->devConfName]["sampleType"] = _this->sampleTypeList.key(_this->sampleTypeId);
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["servers"][_this->devConfName]["sampleType"] = _this->sampleTypeList.key(_this->sampleTypeId); });
             }
             
             if (ImGui::Checkbox("Compression", &_this->compression)) {
                 _this->client->setCompression(_this->compression);
 
                 // Save config
-                config.acquire();
-                config.conf["servers"][_this->devConfName]["compression"] = _this->compression;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["servers"][_this->devConfName]["compression"] = _this->compression; });
             }
 
             bool dummy = true;
@@ -251,13 +243,15 @@ private:
 
         // Load settings
         sampleTypeId = sampleTypeList.valueId(dsp::compression::PCM_TYPE_I16);
-        if (config.conf["servers"][devConfName].contains("sampleType")) {
-            std::string key = config.conf["servers"][devConfName]["sampleType"];
-            if (sampleTypeList.keyExists(key)) { sampleTypeId = sampleTypeList.keyId(key); }
-        }
-        if (config.conf["servers"][devConfName].contains("compression")) {
-            compression = config.conf["servers"][devConfName]["compression"];
-        }
+        config.readConfig([&](const json& conf) {
+            if (conf["servers"][devConfName].contains("sampleType")) {
+                std::string key = conf["servers"][devConfName]["sampleType"];
+                if (sampleTypeList.keyExists(key)) { sampleTypeId = sampleTypeList.keyId(key); }
+            }
+            if (conf["servers"][devConfName].contains("compression")) {
+                compression = conf["servers"][devConfName]["compression"];
+            }
+        });
 
         // Set settings
         client->setSampleType(sampleTypeList[sampleTypeId]);

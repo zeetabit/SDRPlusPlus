@@ -43,13 +43,14 @@ public:
         _streamName = streamName;
 
         // Create config if it doesn't exist
-        config.acquire();
-        if (!config.conf.contains(_streamName)) {
-            config.conf[_streamName]["device"] = "";
-            config.conf[_streamName]["devices"] = json::object();
-        }
-        std::string selected = config.conf[_streamName]["device"];
-        config.release(true);
+        std::string selected;
+        config.withConfig([&](json& conf) {
+            if (!conf.contains(_streamName)) {
+                conf[_streamName]["device"] = "";
+                conf[_streamName]["devices"] = json::object();
+            }
+            selected = conf[_streamName]["device"];
+        });
 
         // Register the play state handler
         playStateHandler.handler = playStateChangeHandler;
@@ -146,9 +147,9 @@ public:
             stop();
             start();
             if (selectedDevName != "") {
-                config.acquire();
-                config.conf[_streamName]["device"] = selectedDevName;
-                config.release(true);
+                config.withConfig([&](json& conf) {
+                    conf[_streamName]["device"] = selectedDevName;
+                });
             }
         }
 
@@ -158,9 +159,9 @@ public:
             stop();
             start();
             if (selectedDevName != "") {
-                config.acquire();
-                config.conf[_streamName]["devices"][selectedDevName] = selectedDev.sampleRates[srId];
-                config.release(true);
+                config.withConfig([&](json& conf) {
+                    conf[_streamName]["devices"][selectedDevName] = selectedDev.sampleRates[srId];
+                });
             }
         }
     }
@@ -307,15 +308,16 @@ private:
         devId = std::distance(deviceNames.begin(), devIt);
 
         // Load config
-        config.acquire();
-        if (!config.conf[_streamName]["devices"].contains(name)) {
-            config.conf[_streamName]["devices"][name] = selectedDev.sampleRates[selectedDev.defaultSrId];
-        }
-        config.release(true);
+        double selectedSr;
+        config.withConfig([&](json& conf) {
+            if (!conf[_streamName]["devices"].contains(name)) {
+                conf[_streamName]["devices"][name] = selectedDev.sampleRates[selectedDev.defaultSrId];
+            }
+            selectedSr = conf[_streamName]["devices"][name];
+        });
 
         // Find the sample rate ID, if not use default
         bool found = false;
-        double selectedSr = config.conf[_streamName]["devices"][name];
         for (int i = 0; i < selectedDev.sampleRates.size(); i++) {
             if (selectedDev.sampleRates[i] != selectedSr) { continue; }
             srId = i;

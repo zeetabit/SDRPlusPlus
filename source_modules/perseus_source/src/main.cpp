@@ -44,9 +44,8 @@ public:
 
         refresh();
 
-        config.acquire();
-        std::string serial = config.conf["device"];
-        config.release();
+        std::string serial;
+        config.readConfig([&](const json& conf) { serial = conf["device"]; });
         select(serial);
 
         sigpath::sourceManager.registerSource("Perseus", &handler);
@@ -187,26 +186,26 @@ public:
         preamp = false;
         preselector = true;
         atten = 0;
-        config.acquire();
-        if (config.conf["devices"][selectedSerial].contains("samplerate")) {
-            int sr = config.conf["devices"][selectedSerial]["samplerate"];
-            if (srList.keyExists(sr)) {
-                srId = srList.keyId(sr);
+        config.readConfig([&](const json& conf) {
+            if (conf["devices"][selectedSerial].contains("samplerate")) {
+                int sr = conf["devices"][selectedSerial]["samplerate"];
+                if (srList.keyExists(sr)) {
+                    srId = srList.keyId(sr);
+                }
             }
-        }
-        if (config.conf["devices"][selectedSerial].contains("dithering")) {
-            dithering = config.conf["devices"][selectedSerial]["dithering"];
-        }
-        if (config.conf["devices"][selectedSerial].contains("preamp")) {
-            preamp = config.conf["devices"][selectedSerial]["preamp"];
-        }
-        if (config.conf["devices"][selectedSerial].contains("preselector")) {
-            preselector = config.conf["devices"][selectedSerial]["preselector"];
-        }
-        if (config.conf["devices"][selectedSerial].contains("attenuation")) {
-            atten = config.conf["devices"][selectedSerial]["attenuation"];
-        }
-        config.release();
+            if (conf["devices"][selectedSerial].contains("dithering")) {
+                dithering = conf["devices"][selectedSerial]["dithering"];
+            }
+            if (conf["devices"][selectedSerial].contains("preamp")) {
+                preamp = conf["devices"][selectedSerial]["preamp"];
+            }
+            if (conf["devices"][selectedSerial].contains("preselector")) {
+                preselector = conf["devices"][selectedSerial]["preselector"];
+            }
+            if (conf["devices"][selectedSerial].contains("attenuation")) {
+                atten = conf["devices"][selectedSerial]["attenuation"];
+            }
+        });
 
         // Update samplerate
         sampleRate = srList[srId];
@@ -329,18 +328,14 @@ private:
             std::string serial = _this->devList.key(_this->devId);
             _this->select(serial);
             core::setInputSampleRate(_this->sampleRate);
-            config.acquire();
-            config.conf["device"] = serial;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["device"] = serial; });
         }
 
         if (SmGui::Combo(CONCAT("##_airspyhf_sr_sel_", _this->name), &_this->srId, _this->srList.txt)) {
             _this->sampleRate = _this->srList[_this->srId];
             core::setInputSampleRate(_this->sampleRate);
             if (!_this->selectedSerial.empty()) {
-                config.acquire();
-                config.conf["devices"][_this->selectedSerial]["samplerate"] = _this->sampleRate;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["samplerate"] = _this->sampleRate; });
             }
         }
 
@@ -362,9 +357,7 @@ private:
                 perseus_set_attenuator_in_db(_this->openDev, _this->atten);
             }
             if (!_this->selectedSerial.empty()) {
-                config.acquire();
-                config.conf["devices"][_this->selectedSerial]["attenuation"] = _this->atten;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["attenuation"] = _this->atten; });
             }
         }
 
@@ -373,9 +366,7 @@ private:
                 perseus_set_adc(_this->openDev, _this->dithering, _this->preamp);
             }
             if (!_this->selectedSerial.empty()) {
-                config.acquire();
-                config.conf["devices"][_this->selectedSerial]["preamp"] = _this->preamp;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["preamp"] = _this->preamp; });
             }
         }
 
@@ -384,9 +375,7 @@ private:
                 perseus_set_adc(_this->openDev, _this->dithering, _this->preamp);
             }
             if (!_this->selectedSerial.empty()) {
-                config.acquire();
-                config.conf["devices"][_this->selectedSerial]["dithering"] = _this->dithering;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["dithering"] = _this->dithering; });
             }
         }
 
@@ -395,9 +384,7 @@ private:
                 perseus_set_ddc_center_freq(_this->openDev, _this->freq, _this->preselector);
             }
             if (!_this->selectedSerial.empty()) {
-                config.acquire();
-                config.conf["devices"][_this->selectedSerial]["preselector"] = _this->preselector;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["preselector"] = _this->preselector; });
             }
         }
     }

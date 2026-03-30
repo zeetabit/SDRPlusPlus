@@ -51,10 +51,11 @@ public:
     SpyServerSourceModule(std::string name) {
         this->name = name;
 
-        config.acquire();
-        std::string host = config.conf["hostname"];
-        port = config.conf["port"];
-        config.release();
+        config.readConfig([&](const json& conf) {
+            std::string host = conf["hostname"];
+            port = conf["port"];
+            strcpy(hostname, host.c_str());
+        });
 
         handler.ctx = this;
         handler.selectHandler = menuSelected;
@@ -64,8 +65,6 @@ public:
         handler.stopHandler = stop;
         handler.tuneHandler = tune;
         handler.stream = &stream;
-
-        strcpy(hostname, host.c_str());
 
         sigpath::sourceManager.registerSource("SpyServer", &handler);
     }
@@ -167,16 +166,12 @@ private:
 
         if (connected) { SmGui::BeginDisabled(); }
         if (SmGui::InputText(CONCAT("##_spyserver_srv_host_", _this->name), _this->hostname, 1023)) {
-            config.acquire();
-            config.conf["hostname"] = _this->hostname;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["hostname"] = _this->hostname; });
         }
         SmGui::SameLine();
         SmGui::FillWidth();
         if (SmGui::InputInt(CONCAT("##_spyserver_srv_port_", _this->name), &_this->port, 0, 0)) {
-            config.acquire();
-            config.conf["port"] = _this->port;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["port"] = _this->port; });
         }
         if (connected) { SmGui::EndDisabled(); }
 
@@ -199,9 +194,7 @@ private:
             if (SmGui::Combo("##spyserver_source_sr", &_this->srId, _this->sampleRatesTxt.c_str())) {
                 _this->sampleRate = _this->sampleRates[_this->srId];
                 core::setInputSampleRate(_this->sampleRate);
-                config.acquire();
-                config.conf["devices"][_this->devRef]["sampleRateId"] = _this->srId;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->devRef]["sampleRateId"] = _this->srId; });
             }
             if (_this->running) { style::endDisabled(); }
 
@@ -212,9 +205,7 @@ private:
                 _this->client->setSetting(SPYSERVER_SETTING_IQ_FORMAT, streamFormats[_this->iqType]);
                 _this->client->setSetting(SPYSERVER_SETTING_IQ_DIGITAL_GAIN, _this->client->computeDigitalGain(srvBits, _this->gain, _this->srId + _this->client->devInfo.MinimumIQDecimation));
 
-                config.acquire();
-                config.conf["devices"][_this->devRef]["sampleBitDepthId"] = _this->iqType;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->devRef]["sampleBitDepthId"] = _this->iqType; });
             }
 
             if (_this->client->devInfo.MaximumGainIndex) {
@@ -223,9 +214,7 @@ private:
                     int srvBits = streamFormatsBitCount[_this->iqType];
                     _this->client->setSetting(SPYSERVER_SETTING_GAIN, _this->gain);
                     _this->client->setSetting(SPYSERVER_SETTING_IQ_DIGITAL_GAIN, _this->client->computeDigitalGain(srvBits, _this->gain, _this->srId + _this->client->devInfo.MinimumIQDecimation));
-                    config.acquire();
-                    config.conf["devices"][_this->devRef]["gainId"] = _this->gain;
-                    config.release(true);
+                    config.withConfig([&](json& conf) { conf["devices"][_this->devRef]["gainId"] = _this->gain; });
                 }
             }
 
@@ -253,16 +242,16 @@ private:
                 sprintf(buf, "%s [%08X]", deviceTypesStr[client->devInfo.DeviceType], client->devInfo.DeviceSerial);
                 devRef = std::string(buf);
 
-                config.acquire();
-                if (!config.conf["devices"].contains(devRef)) {
-                    config.conf["devices"][devRef]["sampleRateId"] = 0;
-                    config.conf["devices"][devRef]["sampleBitDepthId"] = 1;
-                    config.conf["devices"][devRef]["gainId"] = 0;
-                }
-                srId = config.conf["devices"][devRef]["sampleRateId"];
-                iqType = config.conf["devices"][devRef]["sampleBitDepthId"];
-                gain = config.conf["devices"][devRef]["gainId"];
-                config.release(true);
+                config.withConfig([&](json& conf) {
+                    if (!conf["devices"].contains(devRef)) {
+                        conf["devices"][devRef]["sampleRateId"] = 0;
+                        conf["devices"][devRef]["sampleBitDepthId"] = 1;
+                        conf["devices"][devRef]["gainId"] = 0;
+                    }
+                    srId = conf["devices"][devRef]["sampleRateId"];
+                    iqType = conf["devices"][devRef]["sampleBitDepthId"];
+                    gain = conf["devices"][devRef]["gainId"];
+                });
 
                 gain = std::clamp<int>(gain, 0, client->devInfo.MaximumGainIndex);
 
@@ -322,13 +311,11 @@ MOD_EXPORT void _INIT_() {
     config.enableAutoSave();
 
     // Check config in case a user has a very old version
-    config.acquire();
-    bool corrected = false;
-    if (!config.conf.contains("hostname") || !config.conf.contains("port") || !config.conf.contains("devices")) {
-        config.conf = def;
-        corrected = true;
-    }
-    config.release(corrected);
+    config.withConfig([&](json& conf) {
+        if (!conf.contains("hostname") || !conf.contains("port") || !conf.contains("devices")) {
+            conf = def;
+        }
+    });
 }
 
 MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {

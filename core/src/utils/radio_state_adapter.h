@@ -52,7 +52,10 @@ public:
     void releaseLatestFFT() override { gui::waterfall.releaseLatestFFT(); }
 
     // IRadioStateControl (mutations)
-    void setCenterFrequency(double freq) override { gui::waterfall.setCenterFrequency(freq); }
+    void setCenterFrequency(double freq) override {
+        gui::waterfall.setCenterFrequency(freq);
+        gui::waterfall.centerFreqMoved = true;
+    }
     void setCenterFrequencyLocked(bool locked) override { gui::waterfall.centerFrequencyLocked = locked; }
     void setInputHandled(bool handled) override { gui::waterfall.inputHandled = handled; }
 };

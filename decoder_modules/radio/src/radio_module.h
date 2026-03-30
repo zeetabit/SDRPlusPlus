@@ -91,14 +91,12 @@ public:
         ctcssTones.define(-1, "Any", dsp::noise_reduction::CTCSS_TONE_ANY);
 
         // Initialize the config if it doesn't exist
-        bool created = false;
-        config.acquire();
-        if (!config.conf.contains(name)) {
-            config.conf[name]["selectedDemodId"] = 1;
-            created = true;
-        }
-        selectedDemodID = config.conf[name]["selectedDemodId"];
-        config.release(created);
+        config.withConfig([&](json& conf) {
+            if (!conf.contains(name)) {
+                conf[name]["selectedDemodId"] = 1;
+            }
+            selectedDemodID = conf[name]["selectedDemodId"];
+        });
 
         // Initialize the VFO
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, 0, 200000, 200000, 50000, 200000, false);
@@ -271,9 +269,7 @@ private:
         if (ImGui::InputInt(("##_radio_snap_" + _this->name).c_str(), &_this->snapInterval, 1, 100)) {
             if (_this->snapInterval < 1) { _this->snapInterval = 1; }
             _this->vfo->setSnapInterval(_this->snapInterval);
-            config.acquire();
-            config.conf[_this->name][_this->selectedDemod->getName()]["snapInterval"] = _this->snapInterval;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf[_this->name][_this->selectedDemod->getName()]["snapInterval"] = _this->snapInterval; });
         }
 
         // Deemphasis mode
@@ -409,17 +405,14 @@ private:
 
         // Default config
         double bw = demod->getDefaultBandwidth();
-        config.acquire();
-        if (!config.conf[name].contains(demod->getName())) {
-            config.conf[name][demod->getName()]["bandwidth"] = bw;
-            config.conf[name][demod->getName()]["snapInterval"] = demod->getDefaultSnapInterval();
-            config.conf[name][demod->getName()]["squelchLevel"] = MIN_SQUELCH;
-            config.conf[name][demod->getName()]["squelchEnabled"] = false;
-            config.release(true);
-        }
-        else {
-            config.release();
-        }
+        config.withConfig([&](json& conf) {
+            if (!conf[name].contains(demod->getName())) {
+                conf[name][demod->getName()]["bandwidth"] = bw;
+                conf[name][demod->getName()]["snapInterval"] = demod->getDefaultSnapInterval();
+                conf[name][demod->getName()]["squelchLevel"] = MIN_SQUELCH;
+                conf[name][demod->getName()]["squelchEnabled"] = false;
+            }
+        });
         bw = std::clamp<double>(bw, demod->getMinBandwidth(), demod->getMaxBandwidth());
 
         // Initialize
@@ -439,9 +432,7 @@ private:
         selectDemod(demod);
 
         // Save config
-        config.acquire();
-        config.conf[name]["selectedDemodId"] = id;
-        config.release(true);
+        config.withConfig([&](json& conf) { conf[name]["selectedDemodId"] = id; });
         auto endTime = std::chrono::high_resolution_clock::now();
         flog::warn("Demod switch took {0} us", (int64_t)((std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime)).count()));
     }
@@ -487,59 +478,58 @@ private:
         nbEnabled = false;
         nbLevel = 0.0f;
         double ifSamplerate = selectedDemod->getIFSampleRate();
-        config.acquire();
-        if (config.conf[name][selectedDemod->getName()].contains("bandwidth")) {
-            bandwidth = config.conf[name][selectedDemod->getName()]["bandwidth"];
-            bandwidth = std::clamp<double>(bandwidth, minBandwidth, maxBandwidth);
-        }
-        if (config.conf[name][selectedDemod->getName()].contains("snapInterval")) {
-            snapInterval = config.conf[name][selectedDemod->getName()]["snapInterval"];
-        }
-
-        if (config.conf[name][selectedDemod->getName()].contains("squelchMode")) {
-            std::string squelchModeStr = config.conf[name][selectedDemod->getName()]["squelchMode"];
-            if (squelchModes.keyExists(squelchModeStr)) {
-                squelchModeId = squelchModes.keyId(squelchModeStr);
+        config.withConfig([&](json& conf) {
+            auto& demodConf = conf[name][selectedDemod->getName()];
+            if (demodConf.contains("bandwidth")) {
+                bandwidth = demodConf["bandwidth"];
+                bandwidth = std::clamp<double>(bandwidth, minBandwidth, maxBandwidth);
             }
-        }
-        if (config.conf[name][selectedDemod->getName()].contains("squelchLevel")) {
-            squelchLevel = config.conf[name][selectedDemod->getName()]["squelchLevel"];
-        }
-        if (config.conf[name][selectedDemod->getName()].contains("ctcssTone")) {
-            int ctcssToneX10 = config.conf[name][selectedDemod->getName()]["ctcssTone"];
-            if (ctcssTones.keyExists(ctcssToneX10)) {
-                ctcssToneId = ctcssTones.keyId(ctcssToneX10);
+            if (demodConf.contains("snapInterval")) {
+                snapInterval = demodConf["snapInterval"];
             }
-        }
-        if (config.conf[name][selectedDemod->getName()].contains("highPass")) {
-            highPass = config.conf[name][selectedDemod->getName()]["highPass"];
-        }
-        if (config.conf[name][selectedDemod->getName()].contains("deempMode")) {
-            if (!config.conf[name][selectedDemod->getName()]["deempMode"].is_string()) {
-                config.conf[name][selectedDemod->getName()]["deempMode"] = deempModes.key(deempId);
+            if (demodConf.contains("squelchMode")) {
+                std::string squelchModeStr = demodConf["squelchMode"];
+                if (squelchModes.keyExists(squelchModeStr)) {
+                    squelchModeId = squelchModes.keyId(squelchModeStr);
+                }
             }
-
-            std::string deempOpt = config.conf[name][selectedDemod->getName()]["deempMode"];
-            if (deempModes.keyExists(deempOpt)) {
-                deempId = deempModes.keyId(deempOpt);
+            if (demodConf.contains("squelchLevel")) {
+                squelchLevel = demodConf["squelchLevel"];
             }
-        }
-        if (config.conf[name][selectedDemod->getName()].contains("FMIFNREnabled")) {
-            FMIFNREnabled = config.conf[name][selectedDemod->getName()]["FMIFNREnabled"];
-        }
-        if (config.conf[name][selectedDemod->getName()].contains("fmifnrPreset")) {
-            std::string presetOpt = config.conf[name][selectedDemod->getName()]["fmifnrPreset"];
-            if (ifnrPresets.keyExists(presetOpt)) {
-                fmIFPresetId = ifnrPresets.keyId(presetOpt);
+            if (demodConf.contains("ctcssTone")) {
+                int ctcssToneX10 = demodConf["ctcssTone"];
+                if (ctcssTones.keyExists(ctcssToneX10)) {
+                    ctcssToneId = ctcssTones.keyId(ctcssToneX10);
+                }
             }
-        }
-        if (config.conf[name][selectedDemod->getName()].contains("noiseBlankerEnabled")) {
-            nbEnabled = config.conf[name][selectedDemod->getName()]["noiseBlankerEnabled"];
-        }
-        if (config.conf[name][selectedDemod->getName()].contains("noiseBlankerLevel")) {
-            nbLevel = config.conf[name][selectedDemod->getName()]["noiseBlankerLevel"];
-        }
-        config.release();
+            if (demodConf.contains("highPass")) {
+                highPass = demodConf["highPass"];
+            }
+            if (demodConf.contains("deempMode")) {
+                if (!demodConf["deempMode"].is_string()) {
+                    demodConf["deempMode"] = deempModes.key(deempId);
+                }
+                std::string deempOpt = demodConf["deempMode"];
+                if (deempModes.keyExists(deempOpt)) {
+                    deempId = deempModes.keyId(deempOpt);
+                }
+            }
+            if (demodConf.contains("FMIFNREnabled")) {
+                FMIFNREnabled = demodConf["FMIFNREnabled"];
+            }
+            if (demodConf.contains("fmifnrPreset")) {
+                std::string presetOpt = demodConf["fmifnrPreset"];
+                if (ifnrPresets.keyExists(presetOpt)) {
+                    fmIFPresetId = ifnrPresets.keyId(presetOpt);
+                }
+            }
+            if (demodConf.contains("noiseBlankerEnabled")) {
+                nbEnabled = demodConf["noiseBlankerEnabled"];
+            }
+            if (demodConf.contains("noiseBlankerLevel")) {
+                nbLevel = demodConf["noiseBlankerLevel"];
+            }
+        });
 
         // Configure VFO
         if (vfo) {
@@ -599,9 +589,7 @@ private:
         vfo->setBandwidth(bandwidth);
         selectedDemod->setBandwidth(bandwidth);
 
-        config.acquire();
-        config.conf[name][selectedDemod->getName()]["bandwidth"] = bandwidth;
-        config.release(true);
+        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["bandwidth"] = bandwidth; });
     }
 
     void setAudioSampleRate(double sr) {
@@ -644,9 +632,7 @@ private:
         afChain.setBlockEnabled(&hpf, enabled, [=](dsp::stream<dsp::stereo_t>* out){ stream.setInput(out); });
 
         // Save config
-        config.acquire();
-        config.conf[name][selectedDemod->getName()]["highPass"] = enabled;
-        config.release(true);
+        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["highPass"] = enabled; });
     }
 
     void setDeemphasisMode(DeemphasisMode mode) {
@@ -657,9 +643,7 @@ private:
         afChain.setBlockEnabled(&deemp, deempEnabled, [=](dsp::stream<dsp::stereo_t>* out){ stream.setInput(out); });
 
         // Save config
-        config.acquire();
-        config.conf[name][selectedDemod->getName()]["deempMode"] = deempModes.key(deempId);
-        config.release(true);
+        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["deempMode"] = deempModes.key(deempId); });
     }
 
     void setNBEnabled(bool enable) {
@@ -668,9 +652,7 @@ private:
         ifChain.setBlockEnabled(&nb, nbEnabled, [=](dsp::stream<dsp::complex_t>* out){ selectedDemod->setInput(out); });
 
         // Save config
-        config.acquire();
-        config.conf[name][selectedDemod->getName()]["noiseBlankerEnabled"] = nbEnabled;
-        config.release(true);
+        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["noiseBlankerEnabled"] = nbEnabled; });
     }
 
     void setNBLevel(float level) {
@@ -679,9 +661,7 @@ private:
         if (!selectedDemod) { return; }
 
         // Save config
-        config.acquire();
-        config.conf[name][selectedDemod->getName()]["noiseBlankerLevel"] = nbLevel;
-        config.release(true);
+        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["noiseBlankerLevel"] = nbLevel; });
     }
 
     void setSquelchMode(SquelchMode mode) {
@@ -728,9 +708,7 @@ private:
         }
 
         // Save config
-        config.acquire();
-        config.conf[name][selectedDemod->getName()]["squelchMode"] = squelchModes.key(squelchModeId);
-        config.release(true);
+        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["squelchMode"] = squelchModes.key(squelchModeId); });
     }
 
     void setSquelchLevel(float level) {
@@ -739,9 +717,7 @@ private:
         if (!selectedDemod) { return; }
 
         // Save config
-        config.acquire();
-        config.conf[name][selectedDemod->getName()]["squelchLevel"] = squelchLevel;
-        config.release(true);
+        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["squelchLevel"] = squelchLevel; });
     }
 
     void setCTCSSTone(dsp::noise_reduction::CTCSSTone tone) {
@@ -757,9 +733,7 @@ private:
         if (!selectedDemod) { return; }
 
         // Save config
-        config.acquire();
-        config.conf[name][selectedDemod->getName()]["ctcssTone"] = ctcssTones.key(ctcssToneId);
-        config.release(true);
+        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["ctcssTone"] = ctcssTones.key(ctcssToneId); });
     }
 
     void setFMIFNREnabled(bool enabled) {
@@ -768,9 +742,7 @@ private:
         ifChain.setBlockEnabled(&fmnr, FMIFNREnabled, [=](dsp::stream<dsp::complex_t>* out){ selectedDemod->setInput(out); });
 
         // Save config
-        config.acquire();
-        config.conf[name][selectedDemod->getName()]["FMIFNREnabled"] = FMIFNREnabled;
-        config.release(true);
+        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["FMIFNREnabled"] = FMIFNREnabled; });
     }
 
     void setIFNRPreset(IFNRPreset preset) {
@@ -786,9 +758,7 @@ private:
         fmnr.setBins(ifnrTaps[preset]);
 
         // Save config
-        config.acquire();
-        config.conf[name][selectedDemod->getName()]["fmifnrPreset"] = ifnrPresets.key(fmIFPresetId);
-        config.release(true);
+        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["fmifnrPreset"] = ifnrPresets.key(fmIFPresetId); });
     }
 
     static void vfoUserChangedBandwidthHandler(double newBw, void* ctx) {

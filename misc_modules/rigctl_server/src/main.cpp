@@ -35,25 +35,25 @@ public:
     SigctlServerModule(std::string name) {
         this->name = name;
 
-        config.acquire();
-        if (!config.conf.contains(name)) {
-            config.conf[name]["host"] = "localhost";
-            config.conf[name]["port"] = 4532;
-            config.conf[name]["tuning"] = true;
-            config.conf[name]["recording"] = false;
-            config.conf[name]["autoStart"] = false;
-            config.conf[name]["vfo"] = "";
-            config.conf[name]["recorder"] = "";
-        }
-        std::string host = config.conf[name]["host"];
-        strcpy(hostname, host.c_str());
-        port = config.conf[name]["port"];
-        tuningEnabled = config.conf[name]["tuning"];
-        recordingEnabled = config.conf[name]["recording"];
-        autoStart = config.conf[name]["autoStart"];
-        selectedVfo = config.conf[name]["vfo"];
-        selectedRecorder = config.conf[name]["recorder"];
-        config.release(true);
+        config.withConfig([&](json& conf) {
+            if (!conf.contains(name)) {
+                conf[name]["host"] = "localhost";
+                conf[name]["port"] = 4532;
+                conf[name]["tuning"] = true;
+                conf[name]["recording"] = false;
+                conf[name]["autoStart"] = false;
+                conf[name]["vfo"] = "";
+                conf[name]["recorder"] = "";
+            }
+            std::string host = conf[name]["host"];
+            strcpy(hostname, host.c_str());
+            port = conf[name]["port"];
+            tuningEnabled = conf[name]["tuning"];
+            recordingEnabled = conf[name]["recording"];
+            autoStart = conf[name]["autoStart"];
+            selectedVfo = conf[name]["vfo"];
+            selectedRecorder = conf[name]["recorder"];
+        });
 
         gui::menu.registerEntry(name, menuHandler, this, NULL);
     }
@@ -113,16 +113,16 @@ private:
 
         if (listening) { style::beginDisabled(); }
         if (ImGui::InputText(CONCAT("##_rigctl_srv_host_", _this->name), _this->hostname, 1023)) {
-            config.acquire();
-            config.conf[_this->name]["host"] = std::string(_this->hostname);
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_this->name]["host"] = std::string(_this->hostname);
+            });
         }
         ImGui::SameLine();
         ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
         if (ImGui::InputInt(CONCAT("##_rigctl_srv_port_", _this->name), &_this->port, 0, 0)) {
-            config.acquire();
-            config.conf[_this->name]["port"] = _this->port;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_this->name]["port"] = _this->port;
+            });
         }
         if (listening) { style::endDisabled(); }
 
@@ -133,9 +133,9 @@ private:
             if (ImGui::Combo(CONCAT("##_rigctl_srv_vfo_", _this->name), &_this->vfoId, _this->vfoNamesTxt.c_str())) {
                 _this->selectVfoByName(_this->vfoNames[_this->vfoId], false);
                 if (!_this->selectedVfo.empty()) {
-                    config.acquire();
-                    config.conf[_this->name]["vfo"] = _this->selectedVfo;
-                    config.release(true);
+                    config.withConfig([&](json& conf) {
+                        conf[_this->name]["vfo"] = _this->selectedVfo;
+                    });
                 }
             }
         }
@@ -147,9 +147,9 @@ private:
             if (ImGui::Combo(CONCAT("##_rigctl_srv_rec_", _this->name), &_this->recorderId, _this->recorderNamesTxt.c_str())) {
                 _this->selectRecorderByName(_this->recorderNames[_this->recorderId], false);
                 if (!_this->selectedRecorder.empty()) {
-                    config.acquire();
-                    config.conf[_this->name]["recorder"] = _this->selectedRecorder;
-                    config.release(true);
+                    config.withConfig([&](json& conf) {
+                        conf[_this->name]["recorder"] = _this->selectedRecorder;
+                    });
                 }
             }
         }
@@ -158,22 +158,22 @@ private:
         ImGui::TableNextRow();
         ImGui::TableSetColumnIndex(0);
         if (ImGui::Checkbox(CONCAT("Tuning##_rigctl_srv_tune_ena_", _this->name), &_this->tuningEnabled)) {
-            config.acquire();
-            config.conf[_this->name]["tuning"] = _this->tuningEnabled;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_this->name]["tuning"] = _this->tuningEnabled;
+            });
         }
         ImGui::TableSetColumnIndex(1);
         if (ImGui::Checkbox(CONCAT("Recording##_rigctl_srv_tune_ena_", _this->name), &_this->recordingEnabled)) {
-            config.acquire();
-            config.conf[_this->name]["recording"] = _this->recordingEnabled;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_this->name]["recording"] = _this->recordingEnabled;
+            });
         }
         ImGui::EndTable();
 
         if (ImGui::Checkbox(CONCAT("Listen on startup##_rigctl_srv_auto_lst_", _this->name), &_this->autoStart)) {
-            config.acquire();
-            config.conf[_this->name]["autoStart"] = _this->autoStart;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_this->name]["autoStart"] = _this->autoStart;
+            });
         }
 
         if (listening && ImGui::Button(CONCAT("Stop##_rigctl_srv_stop_", _this->name), ImVec2(menuWidth, 0))) {

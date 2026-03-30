@@ -20,14 +20,10 @@ namespace demod {
             _config = config;
 
             // Load config
-            config->acquire();
-            if (config->conf[name][getName()].contains("agcAttack")) {
-                agcAttack = config->conf[name][getName()]["agcAttack"];
-            }
-            if (config->conf[name][getName()].contains("agcDecay")) {
-                agcDecay = config->conf[name][getName()]["agcDecay"];
-            }
-            config->release();
+            config->readConfig([&](const json& conf) {
+                if (conf[name][getName()].contains("agcAttack")) { agcAttack = conf[name][getName()]["agcAttack"]; }
+                if (conf[name][getName()].contains("agcDecay")) { agcDecay = conf[name][getName()]["agcDecay"]; }
+            });
 
             // Define structure
             demod.init(input, dsp::demod::SSB<dsp::stereo_t>::Mode::LSB, bandwidth, getIFSampleRate(), agcAttack / getIFSampleRate(), agcDecay / getIFSampleRate());
@@ -43,17 +39,13 @@ namespace demod {
             ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
             if (ImGui::SliderFloat(("##_radio_lsb_agc_attack_" + name).c_str(), &agcAttack, 1.0f, 200.0f)) {
                 demod.setAGCAttack(agcAttack / getIFSampleRate());
-                _config->acquire();
-                _config->conf[name][getName()]["agcAttack"] = agcAttack;
-                _config->release(true);
+                _config->withConfig([&](json& conf) { conf[name][getName()]["agcAttack"] = agcAttack; });
             }
             ImGui::LeftLabel("AGC Decay");
             ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
             if (ImGui::SliderFloat(("##_radio_lsb_agc_decay_" + name).c_str(), &agcDecay, 1.0f, 20.0f)) {
                 demod.setAGCDecay(agcDecay / getIFSampleRate());
-                _config->acquire();
-                _config->conf[name][getName()]["agcDecay"] = agcDecay;
-                _config->release(true);
+                _config->withConfig([&](json& conf) { conf[name][getName()]["agcDecay"] = agcDecay; });
             }
         }
 

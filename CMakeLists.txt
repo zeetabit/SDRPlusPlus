@@ -57,6 +57,7 @@ option(OPT_BUILD_RADIO "Main audio modulation decoder (AM, FM, SSB, etc...)" ON)
 option(OPT_BUILD_RYFI_DECODER "RyFi data link decoder" OFF)
 option(OPT_BUILD_VOR_RECEIVER "VOR beacon receiver" OFF)
 option(OPT_BUILD_WEATHER_SAT_DECODER "Build the HRPT decoder module (no dependencies required)" OFF)
+option(OPT_BUILD_CW_DECODER "Build the CW decoder module (no dependencies required)" ON)
 
 # Misc
 option(OPT_BUILD_DISCORD_PRESENCE "Build the Discord Rich Presence module" ON)
@@ -364,6 +365,10 @@ if (OPT_BUILD_WEATHER_SAT_DECODER)
 add_sdrpp_module("decoder_modules/weather_sat_decoder" weather_sat_decoder)
 endif (OPT_BUILD_WEATHER_SAT_DECODER)
 
+if (OPT_BUILD_CW_DECODER)
+add_sdrpp_module("decoder_modules/cw_decoder" cw_decoder)
+endif (OPT_BUILD_CW_DECODER)
+
 
 # Misc
 if (OPT_BUILD_DISCORD_PRESENCE)
@@ -520,6 +525,7 @@ print_module_status("radio"                 OPT_BUILD_RADIO)
 print_module_status("ryfi_decoder"          OPT_BUILD_RYFI_DECODER)
 print_module_status("vor_receiver"          OPT_BUILD_VOR_RECEIVER)
 print_module_status("weather_sat_decoder"   OPT_BUILD_WEATHER_SAT_DECODER)
+print_module_status("cw_decoder"            OPT_BUILD_CW_DECODER)
 # Misc
 print_module_status("discord_integration"   OPT_BUILD_DISCORD_PRESENCE)
 print_module_status("frequency_manager"     OPT_BUILD_FREQUENCY_MANAGER)

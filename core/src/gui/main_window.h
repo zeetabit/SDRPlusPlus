@@ -14,6 +14,10 @@
 class MainWindow {
 public:
     void init();
+    ImGui::WaterfallVFO* getSelectedVFO();
+    void loadZoomFromConfig();
+    void onZoomChange(float bandwith);
+    void onZoomChanged(float sliderValue, double viewBandwidthValue, bool saveValues = true);
     void draw();
     void setViewBandwidthSlider(float bandwidth);
     bool sdrIsRunning();

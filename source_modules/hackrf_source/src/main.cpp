@@ -100,9 +100,8 @@ public:
 
         refresh();
 
-        config.acquire();
-        std::string confSerial = config.conf["device"];
-        config.release();
+        std::string confSerial;
+        config.readConfig([&](const json& conf) { confSerial = conf["device"]; });
         selectBySerial(confSerial);
 
         sigpath::sourceManager.registerSource("HackRF", &handler);
@@ -172,18 +171,6 @@ public:
             return;
         }
 
-        bool created = false;
-        config.acquire();
-        if (!config.conf["devices"].contains(serial)) {
-            config.conf["devices"][serial]["sampleRate"] = 2000000;
-            config.conf["devices"][serial]["biasT"] = false;
-            config.conf["devices"][serial]["amp"] = false;
-            config.conf["devices"][serial]["lnaGain"] = 0;
-            config.conf["devices"][serial]["vgaGain"] = 0;
-            config.conf["devices"][serial]["bandwidth"] = 16;
-        }
-        config.release(created);
-
         // Set default values
         srId = 0;
         sampleRate = 2000000;
@@ -193,32 +180,43 @@ public:
         vga = 0;
         bwId = 16;
 
-        // Load from config if available and validate
-        if (config.conf["devices"][serial].contains("sampleRate")) {
-            int psr = config.conf["devices"][serial]["sampleRate"];
-            for (int i = 0; i < 7; i++) {
-                if (sampleRates[i] == psr) {
-                    sampleRate = psr;
-                    srId = i;
+        config.withConfig([&](json& conf) {
+            if (!conf["devices"].contains(serial)) {
+                conf["devices"][serial]["sampleRate"] = 2000000;
+                conf["devices"][serial]["biasT"] = false;
+                conf["devices"][serial]["amp"] = false;
+                conf["devices"][serial]["lnaGain"] = 0;
+                conf["devices"][serial]["vgaGain"] = 0;
+                conf["devices"][serial]["bandwidth"] = 16;
+            }
+
+            // Load from config if available and validate
+            if (conf["devices"][serial].contains("sampleRate")) {
+                int psr = conf["devices"][serial]["sampleRate"];
+                for (int i = 0; i < 7; i++) {
+                    if (sampleRates[i] == psr) {
+                        sampleRate = psr;
+                        srId = i;
+                    }
                 }
             }
-        }
-        if (config.conf["devices"][serial].contains("biasT")) {
-            biasT = config.conf["devices"][serial]["biasT"];
-        }
-        if (config.conf["devices"][serial].contains("amp")) {
-            amp = config.conf["devices"][serial]["amp"];
-        }
-        if (config.conf["devices"][serial].contains("lnaGain")) {
-            lna = config.conf["devices"][serial]["lnaGain"];
-        }
-        if (config.conf["devices"][serial].contains("vgaGain")) {
-            vga = config.conf["devices"][serial]["vgaGain"];
-        }
-        if (config.conf["devices"][serial].contains("bandwidth")) {
-            bwId = config.conf["devices"][serial]["bandwidth"];
-            bwId = std::clamp<int>(bwId, 0, 16);
-        }
+            if (conf["devices"][serial].contains("biasT")) {
+                biasT = conf["devices"][serial]["biasT"];
+            }
+            if (conf["devices"][serial].contains("amp")) {
+                amp = conf["devices"][serial]["amp"];
+            }
+            if (conf["devices"][serial].contains("lnaGain")) {
+                lna = conf["devices"][serial]["lnaGain"];
+            }
+            if (conf["devices"][serial].contains("vgaGain")) {
+                vga = conf["devices"][serial]["vgaGain"];
+            }
+            if (conf["devices"][serial].contains("bandwidth")) {
+                bwId = conf["devices"][serial]["bandwidth"];
+                bwId = std::clamp<int>(bwId, 0, 16);
+            }
+        });
 
         selectedSerial = serial;
     }
@@ -305,17 +303,13 @@ private:
         if (SmGui::Combo(CONCAT("##_hackrf_dev_sel_", _this->name), &_this->devId, _this->devListTxt.c_str())) {
             _this->selectBySerial(_this->devList[_this->devId]);
             core::setInputSampleRate(_this->sampleRate);
-            config.acquire();
-            config.conf["device"] = _this->selectedSerial;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["device"] = _this->selectedSerial; });
         }
 
         if (SmGui::Combo(CONCAT("##_hackrf_sr_sel_", _this->name), &_this->srId, sampleRatesTxt)) {
             _this->sampleRate = sampleRates[_this->srId];
             core::setInputSampleRate(_this->sampleRate);
-            config.acquire();
-            config.conf["devices"][_this->selectedSerial]["sampleRate"] = _this->sampleRate;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["sampleRate"] = _this->sampleRate; });
         }
 
         SmGui::SameLine();
@@ -335,9 +329,7 @@ private:
             if (_this->running) {
                 hackrf_set_baseband_filter_bandwidth(_this->openDev, _this->bandwidthIdToBw(_this->bwId));
             }
-            config.acquire();
-            config.conf["devices"][_this->selectedSerial]["bandwidth"] = _this->bwId;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["bandwidth"] = _this->bwId; });
         }
 
         SmGui::LeftLabel("LNA Gain");
@@ -346,9 +338,7 @@ private:
             if (_this->running) {
                 hackrf_set_lna_gain(_this->openDev, _this->lna);
             }
-            config.acquire();
-            config.conf["devices"][_this->selectedSerial]["lnaGain"] = (int)_this->lna;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["lnaGain"] = (int)_this->lna; });
         }
 
         SmGui::LeftLabel("VGA Gain");
@@ -357,27 +347,21 @@ private:
             if (_this->running) {
                 hackrf_set_vga_gain(_this->openDev, _this->vga);
             }
-            config.acquire();
-            config.conf["devices"][_this->selectedSerial]["vgaGain"] = (int)_this->vga;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["vgaGain"] = (int)_this->vga; });
         }
 
         if (SmGui::Checkbox(CONCAT("Bias-T##_hackrf_bt_", _this->name), &_this->biasT)) {
             if (_this->running) {
                 hackrf_set_antenna_enable(_this->openDev, _this->biasT);
             }
-            config.acquire();
-            config.conf["devices"][_this->selectedSerial]["biasT"] = _this->biasT;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["biasT"] = _this->biasT; });
         }
 
         if (SmGui::Checkbox(CONCAT("Amp Enabled##_hackrf_amp_", _this->name), &_this->amp)) {
             if (_this->running) {
                 hackrf_set_amp_enable(_this->openDev, _this->amp);
             }
-            config.acquire();
-            config.conf["devices"][_this->selectedSerial]["amp"] = _this->amp;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["amp"] = _this->amp; });
         }
     }
 

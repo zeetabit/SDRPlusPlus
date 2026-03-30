@@ -76,12 +76,16 @@ namespace server {
         cctx = ZSTD_createCCtx();
 
         // Load config
-        core::configManager.acquire();
-        std::string modulesDir = core::configManager.conf["modulesDirectory"];
-        std::vector<std::string> modules = core::configManager.conf["modules"];
-        auto modList = core::configManager.conf["moduleInstances"].items();
-        std::string sourceName = core::configManager.conf["source"];
-        core::configManager.release();
+        std::string modulesDir;
+        std::vector<std::string> modules;
+        json modList;
+        std::string sourceName;
+        core::configManager.readConfig([&](const json& conf) {
+            modulesDir = conf["modulesDirectory"];
+            modules = conf["modules"].get<std::vector<std::string>>();
+            modList = conf["moduleInstances"];
+            sourceName = conf["source"];
+        });
         modulesDir = std::filesystem::absolute(modulesDir).string();
 
         // Initialize SmGui in server mode
@@ -125,7 +129,7 @@ namespace server {
         }
 
         // Create module instances
-        for (auto const& [name, _module] : modList) {
+        for (auto const& [name, _module] : modList.items()) {
             std::string mod = _module["module"];
             bool enabled = _module["enabled"];
             if (core::moduleManager.modules.find(mod) == core::moduleManager.modules.end()) { continue; }
@@ -310,9 +314,9 @@ namespace server {
         SmGui::ForceSync();
         if (SmGui::Combo("##sdrpp_server_src_sel", &sourceId, sourceList.txt)) {
             sigpath::sourceManager.selectSource(sourceList[sourceId]);
-            core::configManager.acquire();
-            core::configManager.conf["source"] = sourceList.key(sourceId);
-            core::configManager.release(true);
+            core::configManager.withConfig([&](json& conf) {
+                conf["source"] = sourceList.key(sourceId);
+            });
         }
         if (running) { SmGui::EndDisabled(); }
 

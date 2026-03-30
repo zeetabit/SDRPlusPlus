@@ -18,17 +18,11 @@ namespace demod {
             _config = config;
 
             // Load config
-            config->acquire();
-            if (config->conf[name][getName()].contains("agcAttack")) {
-                agcAttack = config->conf[name][getName()]["agcAttack"];
-            }
-            if (config->conf[name][getName()].contains("agcDecay")) {
-                agcDecay = config->conf[name][getName()]["agcDecay"];
-            }
-            if (config->conf[name][getName()].contains("carrierAgc")) {
-                carrierAgc = config->conf[name][getName()]["carrierAgc"];
-            }
-            config->release();
+            config->readConfig([&](const json& conf) {
+                if (conf[name][getName()].contains("agcAttack")) { agcAttack = conf[name][getName()]["agcAttack"]; }
+                if (conf[name][getName()].contains("agcDecay")) { agcDecay = conf[name][getName()]["agcDecay"]; }
+                if (conf[name][getName()].contains("carrierAgc")) { carrierAgc = conf[name][getName()]["carrierAgc"]; }
+            });
 
             // Define structure
             demod.init(input, carrierAgc ? dsp::demod::AM<dsp::stereo_t>::AGCMode::CARRIER : dsp::demod::AM<dsp::stereo_t>::AGCMode::AUDIO, bandwidth, agcAttack / getIFSampleRate(), agcDecay / getIFSampleRate(), 100.0 / getIFSampleRate(), getIFSampleRate());
@@ -42,25 +36,19 @@ namespace demod {
             float menuWidth = ImGui::GetContentRegionAvail().x;
             if (ImGui::Checkbox(("Carrier AGC##_radio_am_carrier_agc_" + name).c_str(), &carrierAgc)) {
                 demod.setAGCMode(carrierAgc ? dsp::demod::AM<dsp::stereo_t>::AGCMode::CARRIER : dsp::demod::AM<dsp::stereo_t>::AGCMode::AUDIO);
-                _config->acquire();
-                _config->conf[name][getName()]["carrierAgc"] = carrierAgc;
-                _config->release(true);
+                _config->withConfig([&](json& conf) { conf[name][getName()]["carrierAgc"] = carrierAgc; });
             }
             ImGui::LeftLabel("AGC Attack");
             ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
             if (ImGui::SliderFloat(("##_radio_am_agc_attack_" + name).c_str(), &agcAttack, 1.0f, 200.0f)) {
                 demod.setAGCAttack(agcAttack / getIFSampleRate());
-                _config->acquire();
-                _config->conf[name][getName()]["agcAttack"] = agcAttack;
-                _config->release(true);
+                _config->withConfig([&](json& conf) { conf[name][getName()]["agcAttack"] = agcAttack; });
             }
             ImGui::LeftLabel("AGC Decay");
             ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
             if (ImGui::SliderFloat(("##_radio_am_agc_decay_" + name).c_str(), &agcDecay, 1.0f, 20.0f)) {
                 demod.setAGCDecay(agcDecay / getIFSampleRate());
-                _config->acquire();
-                _config->conf[name][getName()]["agcDecay"] = agcDecay;
-                _config->release(true);
+                _config->withConfig([&](json& conf) { conf[name][getName()]["agcDecay"] = agcDecay; });
             }
         }
 

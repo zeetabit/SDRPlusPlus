@@ -1,11 +1,9 @@
 #include <config.h>
 #include <utils/flog.h>
 #include <fstream>
-
 #include <filesystem>
 
-ConfigManager::ConfigManager() {
-}
+ConfigManager::ConfigManager() {}
 
 ConfigManager::~ConfigManager() {
     disableAutoSave();
@@ -16,23 +14,28 @@ void ConfigManager::setPath(std::string file) {
 }
 
 void ConfigManager::load(json def, bool lock) {
-    if (lock) { mtx.lock(); }
-    if (path == "") {
+    std::unique_lock<std::mutex> lck(mtx, std::defer_lock);
+    if (lock) { lck.lock(); }
+
+    if (path.empty()) {
         flog::error("Config manager tried to load file with no path specified");
         return;
     }
+
     if (!std::filesystem::exists(path)) {
         flog::warn("Config file '{0}' does not exist, creating it", path);
         conf = def;
         save(false);
+        return;
     }
+
     if (!std::filesystem::is_regular_file(path)) {
         flog::error("Config file '{0}' isn't a file", path);
         return;
     }
 
     try {
-        std::ifstream file(path.c_str());
+        std::ifstream file(path);
         file >> conf;
         file.close();
     }
@@ -41,29 +44,37 @@ void ConfigManager::load(json def, bool lock) {
         conf = def;
         save(false);
     }
-    if (lock) { mtx.unlock(); }
 }
 
 void ConfigManager::save(bool lock) {
-    if (lock) { mtx.lock(); }
-    std::ofstream file(path.c_str());
+    std::unique_lock<std::mutex> lck(mtx, std::defer_lock);
+    if (lock) { lck.lock(); }
+
+    std::ofstream file(path);
+    if (!file.is_open()) {
+        flog::error("Failed to open config file for writing: {0}", path);
+        return;
+    }
     file << conf.dump(4);
     file.close();
-    if (lock) { mtx.unlock(); }
+
+    if (file.fail()) {
+        flog::error("Failed to write config file: {0}", path);
+    }
 }
 
 void ConfigManager::enableAutoSave() {
-    if (autoSaveEnabled) { return; }
-    autoSaveEnabled = true;
+    bool expected = false;
+    if (!autoSaveEnabled.compare_exchange_strong(expected, true)) { return; }
     termFlag = false;
     autoSaveThread = std::thread(&ConfigManager::autoSaveWorker, this);
 }
 
 void ConfigManager::disableAutoSave() {
-    if (!autoSaveEnabled) { return; }
+    bool expected = true;
+    if (!autoSaveEnabled.compare_exchange_strong(expected, false)) { return; }
     {
         std::lock_guard<std::mutex> lock(termMtx);
-        autoSaveEnabled = false;
         termFlag = true;
     }
     termCond.notify_one();
@@ -75,8 +86,14 @@ void ConfigManager::acquire() {
 }
 
 void ConfigManager::release(bool modified) {
-    changed |= modified;
+    changed = changed.load() || modified;
     mtx.unlock();
+}
+
+void ConfigManager::withConfig(std::function<void(json&)> fn) {
+    std::lock_guard<std::mutex> lck(mtx);
+    fn(conf);
+    changed = true;
 }
 
 void ConfigManager::autoSaveWorker() {
@@ -86,16 +103,14 @@ void ConfigManager::autoSaveWorker() {
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             continue;
         }
-        if (changed) {
-            changed = false;
+
+        if (changed.exchange(false)) {
             save(false);
         }
+
         mtx.unlock();
 
-        // Sleep but listen for wakeup call
-        {
-            std::unique_lock<std::mutex> lock(termMtx);
-            termCond.wait_for(lock, std::chrono::milliseconds(1000), [this]() { return termFlag; });
-        }
+        std::unique_lock<std::mutex> lock(termMtx);
+        termCond.wait_for(lock, std::chrono::milliseconds(1000), [this]() { return termFlag.load(); });
     }
 }

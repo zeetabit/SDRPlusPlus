@@ -21,17 +21,11 @@ namespace demod {
             this->afbwChangeHandler = afbwChangeHandler;
 
             // Load config
-            config->acquire();
-            if (config->conf[name][getName()].contains("agcAttack")) {
-                agcAttack = config->conf[name][getName()]["agcAttack"];
-            }
-            if (config->conf[name][getName()].contains("agcDecay")) {
-                agcDecay = config->conf[name][getName()]["agcDecay"];
-            }
-            if (config->conf[name][getName()].contains("tone")) {
-                tone = config->conf[name][getName()]["tone"];
-            }
-            config->release();
+            config->readConfig([&](const json& conf) {
+                if (conf[name][getName()].contains("agcAttack")) { agcAttack = conf[name][getName()]["agcAttack"]; }
+                if (conf[name][getName()].contains("agcDecay")) { agcDecay = conf[name][getName()]["agcDecay"]; }
+                if (conf[name][getName()].contains("tone")) { tone = conf[name][getName()]["tone"]; }
+            });
 
             // Define structure
             demod.init(input, tone, agcAttack / getIFSampleRate(), agcDecay / getIFSampleRate(), getIFSampleRate());
@@ -47,26 +41,20 @@ namespace demod {
             ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
             if (ImGui::SliderFloat(("##_radio_cw_agc_attack_" + name).c_str(), &agcAttack, 1.0f, 200.0f)) {
                 demod.setAGCAttack(agcAttack / getIFSampleRate());
-                _config->acquire();
-                _config->conf[name][getName()]["agcAttack"] = agcAttack;
-                _config->release(true);
+                _config->withConfig([&](json& conf) { conf[name][getName()]["agcAttack"] = agcAttack; });
             }
             ImGui::LeftLabel("AGC Decay");
             ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
             if (ImGui::SliderFloat(("##_radio_cw_agc_decay_" + name).c_str(), &agcDecay, 1.0f, 20.0f)) {
                 demod.setAGCDecay(agcDecay / getIFSampleRate());
-                _config->acquire();
-                _config->conf[name][getName()]["agcDecay"] = agcDecay;
-                _config->release(true);
+                _config->withConfig([&](json& conf) { conf[name][getName()]["agcDecay"] = agcDecay; });
             }
             ImGui::LeftLabel("Tone Frequency");
             ImGui::FillWidth();
             if (ImGui::InputInt(("Stereo##_radio_cw_tone_" + name).c_str(), &tone, 10, 100)) {
                 tone = std::clamp<int>(tone, 250, 1250);
                 demod.setTone(tone);
-                _config->acquire();
-                _config->conf[name][getName()]["tone"] = tone;
-                _config->release(true);
+                _config->withConfig([&](json& conf) { conf[name][getName()]["tone"] = tone; });
             }
         }
 

@@ -48,35 +48,35 @@ public:
         srId = samplerates.valueId(2.4e6);
 
         // Load config
-        config.acquire();
-        if (config.conf.contains("host")) {
-            std::string hostStr = config.conf["host"];
-            strcpy(ip, hostStr.c_str());
-        }
-        if (config.conf.contains("port")) {
-            port = config.conf["port"];
-        }
-        if (config.conf.contains("sampleRate")) {
-            double sr = config.conf["sampleRate"];
-            if (samplerates.keyExists(sr)) { srId = samplerates.keyId(sr); }
-        }
-        if (config.conf.contains("directSamplingMode")) {
-            int mode = config.conf["directSamplingMode"];
-            if (directSamplingModes.keyExists(mode)) { directSamplingId = directSamplingModes.keyId(mode); }
-        }
-        if (config.conf.contains("ppm")) {
-            ppm = config.conf["ppm"];
-        }
-        if (config.conf.contains("gainIndex")) {
-            gain = config.conf["gainIndex"];
-        }
-        if (config.conf.contains("biasTee")) {
-            biasTee = config.conf["biasTee"];
-        }
-        if (config.conf.contains("offsetTuning")) {
-            offsetTuning = config.conf["offsetTuning"];
-        }
-        config.release();
+        config.readConfig([&](const json& conf) {
+            if (conf.contains("host")) {
+                std::string hostStr = conf["host"];
+                strcpy(ip, hostStr.c_str());
+            }
+            if (conf.contains("port")) {
+                port = conf["port"];
+            }
+            if (conf.contains("sampleRate")) {
+                double sr = conf["sampleRate"];
+                if (samplerates.keyExists(sr)) { srId = samplerates.keyId(sr); }
+            }
+            if (conf.contains("directSamplingMode")) {
+                int mode = conf["directSamplingMode"];
+                if (directSamplingModes.keyExists(mode)) { directSamplingId = directSamplingModes.keyId(mode); }
+            }
+            if (conf.contains("ppm")) {
+                ppm = conf["ppm"];
+            }
+            if (conf.contains("gainIndex")) {
+                gain = conf["gainIndex"];
+            }
+            if (conf.contains("biasTee")) {
+                biasTee = conf["biasTee"];
+            }
+            if (conf.contains("offsetTuning")) {
+                offsetTuning = conf["offsetTuning"];
+            }
+        });
 
         // Update samplerate
         sampleRate = samplerates[srId];
@@ -180,25 +180,19 @@ private:
         if (_this->running) { SmGui::BeginDisabled(); }
 
         if (SmGui::InputText(CONCAT("##_ip_select_", _this->name), _this->ip, 1024)) {
-            config.acquire();
-            config.conf["host"] = std::string(_this->ip);
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["host"] = std::string(_this->ip); });
         }
         SmGui::SameLine();
         SmGui::FillWidth();
         if (SmGui::InputInt(CONCAT("##_port_select_", _this->name), &_this->port, 0)) {
-            config.acquire();
-            config.conf["port"] = _this->port;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["port"] = _this->port; });
         }
 
         SmGui::FillWidth();
         if (SmGui::Combo(CONCAT("##_rtltcp_sr_", _this->name), &_this->srId, _this->samplerates.txt)) {
             _this->sampleRate = _this->samplerates[_this->srId];
             core::setInputSampleRate(_this->sampleRate);
-            config.acquire();
-            config.conf["sampleRate"] = _this->sampleRate;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["sampleRate"] = _this->sampleRate; });
         }
 
         if (_this->running) { SmGui::EndDisabled(); }
@@ -210,9 +204,7 @@ private:
                 _this->client->setDirectSampling(_this->directSamplingId);
                 _this->client->setGainIndex(_this->gain);
             }
-            config.acquire();
-            config.conf["directSamplingMode"] = _this->directSamplingId;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["directSamplingMode"] = _this->directSamplingId; });
         }
 
         SmGui::LeftLabel("PPM Correction");
@@ -221,9 +213,7 @@ private:
             if (_this->running) {
                 _this->client->setPPM(_this->ppm);
             }
-            config.acquire();
-            config.conf["ppm"] = _this->ppm;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["ppm"] = _this->ppm; });
         }
 
         if (_this->tunerAGC) { SmGui::BeginDisabled(); }
@@ -233,9 +223,7 @@ private:
             if (_this->running) {
                 _this->client->setGainIndex(_this->gain);
             }
-            config.acquire();
-            config.conf["gainIndex"] = _this->gain;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["gainIndex"] = _this->gain; });
         }
         if (_this->tunerAGC) { SmGui::EndDisabled(); }
 
@@ -243,18 +231,14 @@ private:
             if (_this->running) {
                 _this->client->setBiasTee(_this->biasTee);
             }
-            config.acquire();
-            config.conf["biasTee"] = _this->biasTee;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["biasTee"] = _this->biasTee; });
         }
 
         if (SmGui::Checkbox(CONCAT("Offset Tuning##_biast_select_", _this->name), &_this->offsetTuning)) {
             if (_this->running) {
                 _this->client->setOffsetTuning(_this->offsetTuning);
             }
-            config.acquire();
-            config.conf["offsetTuning"] = _this->offsetTuning;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["offsetTuning"] = _this->offsetTuning; });
         }
 
         if (SmGui::Checkbox("RTL AGC", &_this->rtlAGC)) {
@@ -264,9 +248,7 @@ private:
                     _this->client->setGainIndex(_this->gain);
                 }
             }
-            config.acquire();
-            config.conf["rtlAGC"] = _this->rtlAGC;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["rtlAGC"] = _this->rtlAGC; });
         }
 
         SmGui::ForceSync();
@@ -277,9 +259,7 @@ private:
                     _this->client->setGainIndex(_this->gain);
                 }
             }
-            config.acquire();
-            config.conf["tunerAGC"] = _this->tunerAGC;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["tunerAGC"] = _this->tunerAGC; });
         }
     }
 

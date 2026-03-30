@@ -31,19 +31,19 @@ public:
         strcpy(host, "127.0.0.1");
 
         // Load config
-        config.acquire();
-        if (config.conf[name].contains("host")) {
-            std::string h = config.conf[name]["host"];
-            strcpy(host, h.c_str());
-        }
-        if (config.conf[name].contains("port")) {
-            port = config.conf[name]["port"];
-            port = std::clamp<int>(port, 1, 65535);
-        }
-        if (config.conf[name].contains("ifFreq")) {
-            ifFreq = config.conf[name]["ifFreq"];
-        }
-        config.release();
+        config.readConfig([&](const json& conf) {
+            if (conf[name].contains("host")) {
+                std::string h = conf[name]["host"];
+                strcpy(host, h.c_str());
+            }
+            if (conf[name].contains("port")) {
+                port = conf[name]["port"];
+                port = std::clamp<int>(port, 1, 65535);
+            }
+            if (conf[name].contains("ifFreq")) {
+                ifFreq = conf[name]["ifFreq"];
+            }
+        });
 
         _retuneHandler.ctx = this;
         _retuneHandler.handler = retuneHandler;
@@ -114,16 +114,16 @@ private:
 
         if (_this->running) { style::beginDisabled(); }
         if (ImGui::InputText(CONCAT("##_rigctl_cli_host_", _this->name), _this->host, 1023)) {
-            config.acquire();
-            config.conf[_this->name]["host"] = std::string(_this->host);
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_this->name]["host"] = std::string(_this->host);
+            });
         }
         ImGui::SameLine();
         ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
         if (ImGui::InputInt(CONCAT("##_rigctl_cli_port_", _this->name), &_this->port, 0, 0)) {
-            config.acquire();
-            config.conf[_this->name]["port"] = _this->port;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_this->name]["port"] = _this->port;
+            });
         }
         if (_this->running) { style::endDisabled(); }
 
@@ -133,9 +133,9 @@ private:
             if (_this->running) {
                 sigpath::sourceManager.setPanadapterIF(_this->ifFreq);
             }
-            config.acquire();
-            config.conf[_this->name]["ifFreq"] = _this->ifFreq;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_this->name]["ifFreq"] = _this->ifFreq;
+            });
         }
 
         ImGui::FillWidth();

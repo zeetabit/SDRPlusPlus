@@ -40,9 +40,8 @@ public:
         file = std::ofstream("sync4.f32", std::ios::out | std::ios::binary);
 
         // Load config
-        config.acquire();
-        
-        config.release(true);
+        config.withConfig([&](json& conf) {
+        });
 
         // Initialize VFO
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, 0, VFO_BANDWIDTH, INPUT_SAMPLE_RATE, VFO_BANDWIDTH, VFO_BANDWIDTH, true);

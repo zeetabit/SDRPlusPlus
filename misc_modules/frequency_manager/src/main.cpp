@@ -8,6 +8,8 @@
 #include <signal_path/signal_path.h>
 #include <utils/service_registry.h>
 #include <utils/services.h>
+#include <utils/radio_state.h>
+#include <utils/radio_control.h>
 #include <vector>
 #include <gui/tuner.h>
 #include <gui/file_dialogs.h>
@@ -65,10 +67,12 @@ public:
     FrequencyManagerModule(std::string name) {
         this->name = name;
 
-        config.acquire();
-        std::string selList = config.conf["selectedList"];
-        bookmarkDisplayMode = config.conf["bookmarkDisplayMode"];
-        config.release();
+        std::string selList = config.readConfig<std::string>([](const json& conf) {
+            return (std::string)conf["selectedList"];
+        });
+        bookmarkDisplayMode = config.readConfig<int>([](const json& conf) {
+            return (int)conf["bookmarkDisplayMode"];
+        });
 
         refreshLists();
         loadByName(selList);
@@ -107,9 +111,8 @@ public:
 private:
     static void applyBookmark(FrequencyBookmark bm, std::string vfoName) {
         if (vfoName == "") {
-            // TODO: Replace with proper tune call
-            gui::waterfall.setCenterFrequency(bm.frequency);
-            gui::waterfall.centerFreqMoved = true;
+            auto* rc = ServiceRegistry::get().query<IRadioStateControl>("core");
+            if (rc) { rc->setCenterFrequency(bm.frequency); }
         }
         else {
             auto* radio = ServiceRegistry::get().query<IRadioControl>(vfoName);
@@ -215,17 +218,17 @@ private:
             if (ImGui::Button("Apply")) {
                 open = false;
 
-                config.acquire();
-                if (renameListOpen) {
-                    config.conf["lists"][editedListName] = config.conf["lists"][firstEditedListName];
-                    config.conf["lists"].erase(firstEditedListName);
-                }
-                else {
-                    config.conf["lists"][editedListName]["showOnWaterfall"] = true;
-                    config.conf["lists"][editedListName]["bookmarks"] = json::object();
-                }
-                refreshWaterfallBookmarks(false);
-                config.release(true);
+                config.withConfig([&](json& conf) {
+                    if (renameListOpen) {
+                        conf["lists"][editedListName] = conf["lists"][firstEditedListName];
+                        conf["lists"].erase(firstEditedListName);
+                    }
+                    else {
+                        conf["lists"][editedListName]["showOnWaterfall"] = true;
+                        conf["lists"][editedListName]["bookmarks"] = json::object();
+                    }
+                    refreshWaterfallBookmarksFromConf(conf);
+                });
                 refreshLists();
                 loadByName(editedListName);
             }
@@ -254,10 +257,10 @@ private:
             for (auto [listName, list] : config.conf["lists"].items()) {
                 bool shown = list["showOnWaterfall"];
                 if (ImGui::Checkbox((listName + "##freq_manager_sel_list_").c_str(), &shown)) {
-                    config.acquire();
-                    config.conf["lists"][listName]["showOnWaterfall"] = shown;
-                    refreshWaterfallBookmarks(false);
-                    config.release(true);
+                    config.withConfig([&](json& conf) {
+                        conf["lists"][listName]["showOnWaterfall"] = shown;
+                        refreshWaterfallBookmarksFromConf(conf);
+                    });
                 }
             }
 
@@ -273,32 +276,36 @@ private:
         listNames.clear();
         listNamesTxt = "";
 
-        config.acquire();
-        for (auto [_name, list] : config.conf["lists"].items()) {
-            listNames.push_back(_name);
-            listNamesTxt += _name;
-            listNamesTxt += '\0';
-        }
-        config.release();
+        config.readConfig([&](const json& conf) {
+            for (auto [_name, list] : conf["lists"].items()) {
+                listNames.push_back(_name);
+                listNamesTxt += _name;
+                listNamesTxt += '\0';
+            }
+        });
     }
 
-    void refreshWaterfallBookmarks(bool lockConfig = true) {
-        if (lockConfig) { config.acquire(); }
+    void refreshWaterfallBookmarksFromConf(const json& conf) {
         waterfallBookmarks.clear();
-        for (auto [listName, list] : config.conf["lists"].items()) {
+        for (auto [listName, list] : conf["lists"].items()) {
             if (!((bool)list["showOnWaterfall"])) { continue; }
             WaterfallBookmark wbm;
             wbm.listName = listName;
-            for (auto [bookmarkName, bm] : config.conf["lists"][listName]["bookmarks"].items()) {
+            for (auto [bookmarkName, bm] : conf["lists"][listName]["bookmarks"].items()) {
                 wbm.bookmarkName = bookmarkName;
-                wbm.bookmark.frequency = config.conf["lists"][listName]["bookmarks"][bookmarkName]["frequency"];
-                wbm.bookmark.bandwidth = config.conf["lists"][listName]["bookmarks"][bookmarkName]["bandwidth"];
-                wbm.bookmark.mode = config.conf["lists"][listName]["bookmarks"][bookmarkName]["mode"];
+                wbm.bookmark.frequency = bm["frequency"];
+                wbm.bookmark.bandwidth = bm["bandwidth"];
+                wbm.bookmark.mode = bm["mode"];
                 wbm.bookmark.selected = false;
                 waterfallBookmarks.push_back(wbm);
             }
         }
-        if (lockConfig) { config.release(); }
+    }
+
+    void refreshWaterfallBookmarks() {
+        config.readConfig([&](const json& conf) {
+            refreshWaterfallBookmarksFromConf(conf);
+        });
     }
 
     void loadFirst() {
@@ -320,28 +327,28 @@ private:
         }
         selectedListId = std::distance(listNames.begin(), std::find(listNames.begin(), listNames.end(), listName));
         selectedListName = listName;
-        config.acquire();
-        for (auto [bmName, bm] : config.conf["lists"][listName]["bookmarks"].items()) {
-            FrequencyBookmark fbm;
-            fbm.frequency = bm["frequency"];
-            fbm.bandwidth = bm["bandwidth"];
-            fbm.mode = bm["mode"];
-            fbm.selected = false;
-            bookmarks[bmName] = fbm;
-        }
-        config.release();
+        config.readConfig([&](const json& conf) {
+            for (auto [bmName, bm] : conf["lists"][listName]["bookmarks"].items()) {
+                FrequencyBookmark fbm;
+                fbm.frequency = bm["frequency"];
+                fbm.bandwidth = bm["bandwidth"];
+                fbm.mode = bm["mode"];
+                fbm.selected = false;
+                bookmarks[bmName] = fbm;
+            }
+        });
     }
 
     void saveByName(std::string listName) {
-        config.acquire();
-        config.conf["lists"][listName]["bookmarks"] = json::object();
-        for (auto [bmName, bm] : bookmarks) {
-            config.conf["lists"][listName]["bookmarks"][bmName]["frequency"] = bm.frequency;
-            config.conf["lists"][listName]["bookmarks"][bmName]["bandwidth"] = bm.bandwidth;
-            config.conf["lists"][listName]["bookmarks"][bmName]["mode"] = bm.mode;
-        }
-        refreshWaterfallBookmarks(false);
-        config.release(true);
+        config.withConfig([&](json& conf) {
+            conf["lists"][listName]["bookmarks"] = json::object();
+            for (auto [bmName, bm] : bookmarks) {
+                conf["lists"][listName]["bookmarks"][bmName]["frequency"] = bm.frequency;
+                conf["lists"][listName]["bookmarks"][bmName]["bandwidth"] = bm.bandwidth;
+                conf["lists"][listName]["bookmarks"][bmName]["mode"] = bm.mode;
+            }
+            refreshWaterfallBookmarksFromConf(conf);
+        });
     }
 
     static void menuHandler(void* ctx) {
@@ -360,9 +367,9 @@ private:
         ImGui::SetNextItemWidth(menuWidth - 24 - (2 * lineHeight) - btnSize);
         if (ImGui::Combo(("##freq_manager_list_sel" + _this->name).c_str(), &_this->selectedListId, _this->listNamesTxt.c_str())) {
             _this->loadByName(_this->listNames[_this->selectedListId]);
-            config.acquire();
-            config.conf["selectedList"] = _this->selectedListName;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf["selectedList"] = _this->selectedListName;
+            });
         }
         ImGui::SameLine();
         if (_this->listNames.size() == 0) { style::beginDisabled(); }
@@ -399,10 +406,10 @@ private:
         if (ImGui::GenericDialog(("freq_manager_del_list_confirm" + _this->name).c_str(), _this->deleteListOpen, GENERIC_DIALOG_BUTTONS_YES_NO, [_this]() {
                 ImGui::Text("Deleting list named \"%s\". Are you sure?", _this->selectedListName.c_str());
             }) == GENERIC_DIALOG_BUTTON_YES) {
-            config.acquire();
-            config.conf["lists"].erase(_this->selectedListName);
-            _this->refreshWaterfallBookmarks(false);
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf["lists"].erase(_this->selectedListName);
+                _this->refreshWaterfallBookmarksFromConf(conf);
+            });
             _this->refreshLists();
             _this->selectedListId = std::clamp<int>(_this->selectedListId, 0, _this->listNames.size());
             if (_this->listNames.size() > 0) {
@@ -420,17 +427,18 @@ private:
 
         ImGui::TableSetColumnIndex(0);
         if (ImGui::Button(("Add##_freq_mgr_add_" + _this->name).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0))) {
-            // If there's no VFO selected, just save the center freq
-            if (gui::waterfall.selectedVFO == "") {
-                _this->editedBookmark.frequency = gui::waterfall.getCenterFrequency();
+            auto* rs = ServiceRegistry::get().query<IRadioState>("core");
+            std::string selVfo = rs ? rs->getSelectedVFO() : "";
+            if (selVfo == "") {
+                _this->editedBookmark.frequency = rs ? rs->getCenterFrequency() : 0;
                 _this->editedBookmark.bandwidth = 0;
                 _this->editedBookmark.mode = 7;
             }
             else {
-                _this->editedBookmark.frequency = gui::waterfall.getCenterFrequency() + sigpath::vfoManager.getOffset(gui::waterfall.selectedVFO);
-                _this->editedBookmark.bandwidth = sigpath::vfoManager.getBandwidth(gui::waterfall.selectedVFO);
+                _this->editedBookmark.frequency = (rs ? rs->getCenterFrequency() : 0) + sigpath::vfoManager.getOffset(selVfo);
+                _this->editedBookmark.bandwidth = sigpath::vfoManager.getBandwidth(selVfo);
                 _this->editedBookmark.mode = 7;
-                auto* radio = ServiceRegistry::get().query<IRadioControl>(gui::waterfall.selectedVFO);
+                auto* radio = ServiceRegistry::get().query<IRadioControl>(selVfo);
                 if (radio) {
                     _this->editedBookmark.mode = radio->getMode();
                 }
@@ -502,7 +510,7 @@ private:
                     }
                 }
                 if (ImGui::TableGetHoveredColumn() >= 0 && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                    applyBookmark(bm, gui::waterfall.selectedVFO);
+                    applyBookmark(bm, ServiceRegistry::get().query<IRadioState>("core")->getSelectedVFO());
                 }
 
                 ImGui::TableSetColumnIndex(1);
@@ -516,7 +524,7 @@ private:
         if (selectedNames.size() != 1 && _this->selectedListName != "") { style::beginDisabled(); }
         if (ImGui::Button(("Apply##_freq_mgr_apply_" + _this->name).c_str(), ImVec2(menuWidth, 0))) {
             FrequencyBookmark& bm = _this->bookmarks[selectedNames[0]];
-            applyBookmark(bm, gui::waterfall.selectedVFO);
+            applyBookmark(bm, ServiceRegistry::get().query<IRadioState>("core")->getSelectedVFO());
             bm.selected = false;
         }
         if (selectedNames.size() != 1 && _this->selectedListName != "") { style::endDisabled(); }
@@ -535,11 +543,11 @@ private:
         if (selectedNames.size() == 0 && _this->selectedListName != "") { style::beginDisabled(); }
         if (ImGui::Button(("Export##_freq_mgr_exp_" + _this->name).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0)) && !_this->exportOpen) {
             _this->exportedBookmarks = json::object();
-            config.acquire();
-            for (auto& _name : selectedNames) {
-                _this->exportedBookmarks["bookmarks"][_name] = config.conf["lists"][_this->selectedListName]["bookmarks"][_name];
-            }
-            config.release();
+            config.readConfig([&](const json& conf) {
+                for (auto& _name : selectedNames) {
+                    _this->exportedBookmarks["bookmarks"][_name] = conf["lists"][_this->selectedListName]["bookmarks"][_name];
+                }
+            });
             _this->exportOpen = true;
             _this->exportDialog = new pfd::save_file("Export bookmarks", "", { "JSON Files (*.json)", "*.json", "All Files", "*" });
         }
@@ -553,9 +561,9 @@ private:
         ImGui::LeftLabel("Bookmark display mode");
         ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
         if (ImGui::Combo(("##_freq_mgr_dms_" + _this->name).c_str(), &_this->bookmarkDisplayMode, bookmarkDisplayModesTxt)) {
-            config.acquire();
-            config.conf["bookmarkDisplayMode"] = _this->bookmarkDisplayMode;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf["bookmarkDisplayMode"] = _this->bookmarkDisplayMode;
+            });
         }
 
         if (_this->selectedListName == "") { style::endDisabled(); }
@@ -659,7 +667,7 @@ private:
             if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                 _this->mouseClickedInLabel = false;
             }
-            gui::waterfall.inputHandled = true;
+            ServiceRegistry::get().query<IRadioStateControl>("core")->setInputHandled(true);
             return;
         }
 
@@ -719,7 +727,7 @@ private:
         // If yes, cancel
         if (_this->mouseAlreadyDown || !inALabel) { return; }
 
-        gui::waterfall.inputHandled = true;
+        ServiceRegistry::get().query<IRadioStateControl>("core")->setInputHandled(true);
 
         double centerXpos = args.fftRectMin.x + std::round((hoveredBookmark.bookmark.frequency - args.lowFreq) * args.freqToPixelRatio);
         ImVec2 nameSize = ImGui::CalcTextSize(hoveredBookmarkName.c_str());
@@ -730,7 +738,7 @@ private:
 
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             _this->mouseClickedInLabel = true;
-            applyBookmark(hoveredBookmark.bookmark, gui::waterfall.selectedVFO);
+            applyBookmark(hoveredBookmark.bookmark, ServiceRegistry::get().query<IRadioState>("core")->getSelectedVFO());
         }
 
         ImGui::BeginTooltip();
@@ -832,20 +840,19 @@ MOD_EXPORT void _INIT_() {
     config.load(def);
     config.enableAutoSave();
 
-    // Check if of list and convert if they're the old type
-    config.acquire();
-    if (!config.conf.contains("bookmarkDisplayMode")) {
-        config.conf["bookmarkDisplayMode"] = BOOKMARK_DISP_MODE_TOP;
-    }
-    for (auto [listName, list] : config.conf["lists"].items()) {
-        if (list.contains("bookmarks") && list.contains("showOnWaterfall") && list["showOnWaterfall"].is_boolean()) { continue; }
-        json newList;
-        newList = json::object();
-        newList["showOnWaterfall"] = true;
-        newList["bookmarks"] = list;
-        config.conf["lists"][listName] = newList;
-    }
-    config.release(true);
+    // Migrate old config format if needed
+    config.withConfig([](json& conf) {
+        if (!conf.contains("bookmarkDisplayMode")) {
+            conf["bookmarkDisplayMode"] = BOOKMARK_DISP_MODE_TOP;
+        }
+        for (auto [listName, list] : conf["lists"].items()) {
+            if (list.contains("bookmarks") && list.contains("showOnWaterfall") && list["showOnWaterfall"].is_boolean()) { continue; }
+            json newList = json::object();
+            newList["showOnWaterfall"] = true;
+            newList["bookmarks"] = list;
+            conf["lists"][listName] = newList;
+        }
+    });
 }
 
 MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {

@@ -45,9 +45,8 @@ public:
 
         refresh();
 
-        config.acquire();
-        std::string devSerial = config.conf["device"];
-        config.release();
+        std::string devSerial;
+        config.readConfig([&](const json& conf) { devSerial = conf["device"]; });
         selectByString(devSerial);
 
         sigpath::sourceManager.registerSource("Airspy HF+", &handler);
@@ -169,42 +168,39 @@ public:
         selectedSerStr = std::string(buf);
 
         // Load config here
-        config.acquire();
-        bool created = false;
-        if (!config.conf["devices"].contains(selectedSerStr)) {
-            created = true;
-            config.conf["devices"][selectedSerStr]["sampleRate"] = 768000;
-            config.conf["devices"][selectedSerStr]["agcMode"] = 0;
-            config.conf["devices"][selectedSerStr]["lna"] = false;
-            config.conf["devices"][selectedSerStr]["attenuation"] = 0;
-        }
+        config.withConfig([&](json& conf) {
+            if (!conf["devices"].contains(selectedSerStr)) {
+                conf["devices"][selectedSerStr]["sampleRate"] = 768000;
+                conf["devices"][selectedSerStr]["agcMode"] = 0;
+                conf["devices"][selectedSerStr]["lna"] = false;
+                conf["devices"][selectedSerStr]["attenuation"] = 0;
+            }
 
-        // Load sample rate
-        srId = 0;
-        sampleRate = sampleRateList[0];
-        if (config.conf["devices"][selectedSerStr].contains("sampleRate")) {
-            int selectedSr = config.conf["devices"][selectedSerStr]["sampleRate"];
-            for (int i = 0; i < sampleRateList.size(); i++) {
-                if (sampleRateList[i] == selectedSr) {
-                    srId = i;
-                    sampleRate = selectedSr;
-                    break;
+            // Load sample rate
+            srId = 0;
+            sampleRate = sampleRateList[0];
+            if (conf["devices"][selectedSerStr].contains("sampleRate")) {
+                int selectedSr = conf["devices"][selectedSerStr]["sampleRate"];
+                for (int i = 0; i < sampleRateList.size(); i++) {
+                    if (sampleRateList[i] == selectedSr) {
+                        srId = i;
+                        sampleRate = selectedSr;
+                        break;
+                    }
                 }
             }
-        }
 
-        // Load Gains
-        if (config.conf["devices"][selectedSerStr].contains("agcMode")) {
-            agcMode = config.conf["devices"][selectedSerStr]["agcMode"];
-        }
-        if (config.conf["devices"][selectedSerStr].contains("lna")) {
-            hfLNA = config.conf["devices"][selectedSerStr]["lna"];
-        }
-        if (config.conf["devices"][selectedSerStr].contains("attenuation")) {
-            atten = config.conf["devices"][selectedSerStr]["attenuation"];
-        }
-
-        config.release(created);
+            // Load Gains
+            if (conf["devices"][selectedSerStr].contains("agcMode")) {
+                agcMode = conf["devices"][selectedSerStr]["agcMode"];
+            }
+            if (conf["devices"][selectedSerStr].contains("lna")) {
+                hfLNA = conf["devices"][selectedSerStr]["lna"];
+            }
+            if (conf["devices"][selectedSerStr].contains("attenuation")) {
+                atten = conf["devices"][selectedSerStr]["attenuation"];
+            }
+        });
 
         airspyhf_close(dev);
     }
@@ -300,9 +296,7 @@ private:
             _this->selectBySerial(_this->devList[_this->devId]);
             core::setInputSampleRate(_this->sampleRate);
             if (_this->selectedSerStr != "") {
-                config.acquire();
-                config.conf["device"] = _this->selectedSerStr;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["device"] = _this->selectedSerStr; });
             }
         }
 
@@ -310,9 +304,7 @@ private:
             _this->sampleRate = _this->sampleRateList[_this->srId];
             core::setInputSampleRate(_this->sampleRate);
             if (_this->selectedSerStr != "") {
-                config.acquire();
-                config.conf["devices"][_this->selectedSerStr]["sampleRate"] = _this->sampleRate;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["sampleRate"] = _this->sampleRate; });
             }
         }
 
@@ -321,9 +313,8 @@ private:
         SmGui::ForceSync();
         if (SmGui::Button(CONCAT("Refresh##_airspyhf_refr_", _this->name))) {
             _this->refresh();
-            config.acquire();
-            std::string devSerial = config.conf["device"];
-            config.release();
+            std::string devSerial;
+            config.readConfig([&](const json& conf) { devSerial = conf["device"]; });
             _this->selectByString(devSerial);
             core::setInputSampleRate(_this->sampleRate);
         }
@@ -340,9 +331,7 @@ private:
                 }
             }
             if (_this->selectedSerStr != "") {
-                config.acquire();
-                config.conf["devices"][_this->selectedSerStr]["agcMode"] = _this->agcMode;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["agcMode"] = _this->agcMode; });
             }
         }
 
@@ -353,9 +342,7 @@ private:
                 airspyhf_set_hf_att(_this->openDev, _this->atten / 6.0f);
             }
             if (_this->selectedSerStr != "") {
-                config.acquire();
-                config.conf["devices"][_this->selectedSerStr]["attenuation"] = _this->atten;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["attenuation"] = _this->atten; });
             }
         }
 
@@ -364,9 +351,7 @@ private:
                 airspyhf_set_hf_lna(_this->openDev, _this->hfLNA);
             }
             if (_this->selectedSerStr != "") {
-                config.acquire();
-                config.conf["devices"][_this->selectedSerStr]["lna"] = _this->hfLNA;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["lna"] = _this->hfLNA; });
             }
         }
     }

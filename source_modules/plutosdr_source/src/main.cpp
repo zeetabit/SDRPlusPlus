@@ -56,9 +56,7 @@ public:
         refresh();
 
         // Select device
-        config.acquire();
-        devDesc = config.conf["device"];
-        config.release();
+        config.readConfig([&](const json& conf) { devDesc = conf["device"]; });
         select(devDesc);
 
         // Register source
@@ -220,28 +218,27 @@ private:
         gain = -1.0f;
 
         // Load device config
-        config.acquire();
-        if (config.conf["devices"][devDesc].contains("samplerate")) {
-            samplerate = config.conf["devices"][devDesc]["samplerate"];
-        }
-        if (config.conf["devices"][devDesc].contains("bandwidth")) {
-            bandwidth = config.conf["devices"][devDesc]["bandwidth"];
-        }
-        if (config.conf["devices"][devDesc].contains("gainMode")) {
-            // Select given gain mode or default if invalid
-            std::string gm = config.conf["devices"][devDesc]["gainMode"];
-            if (gainModes.keyExists(gm)) {
-                gmId = gainModes.keyId(gm);
+        config.readConfig([&](const json& conf) {
+            if (conf["devices"][devDesc].contains("samplerate")) {
+                samplerate = conf["devices"][devDesc]["samplerate"];
             }
-            else {
-                gmId = 0;
+            if (conf["devices"][devDesc].contains("bandwidth")) {
+                bandwidth = conf["devices"][devDesc]["bandwidth"];
             }
-        }
-        if (config.conf["devices"][devDesc].contains("gain")) {
-            gain = config.conf["devices"][devDesc]["gain"];
-            gain = std::clamp<int>(gain, -1.0f, 73.0f);
-        }
-        config.release();
+            if (conf["devices"][devDesc].contains("gainMode")) {
+                std::string gm = conf["devices"][devDesc]["gainMode"];
+                if (gainModes.keyExists(gm)) {
+                    gmId = gainModes.keyId(gm);
+                }
+                else {
+                    gmId = 0;
+                }
+            }
+            if (conf["devices"][devDesc].contains("gain")) {
+                gain = conf["devices"][devDesc]["gain"];
+                gain = std::clamp<int>(gain, -1.0f, 73.0f);
+            }
+        });
 
         // Update samplerate ID
         if (samplerates.keyExists(samplerate)) {
@@ -365,18 +362,14 @@ private:
         if (SmGui::Combo("##plutosdr_dev_sel", &_this->devId, _this->devices.txt)) {
             _this->select(_this->devices.key(_this->devId));
             core::setInputSampleRate(_this->samplerate);
-            config.acquire();
-            config.conf["device"] = _this->devices.key(_this->devId);
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["device"] = _this->devices.key(_this->devId); });
         }
 
         if (SmGui::Combo(CONCAT("##_pluto_sr_", _this->name), &_this->srId, _this->samplerates.txt)) {
             _this->samplerate = _this->samplerates.value(_this->srId);
             core::setInputSampleRate(_this->samplerate);
             if (!_this->devDesc.empty()) {
-                config.acquire();
-                config.conf["devices"][_this->devDesc]["samplerate"] = _this->samplerate;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->devDesc]["samplerate"] = _this->samplerate; });
             }
         }
 
@@ -399,9 +392,7 @@ private:
                 _this->setBandwidth(_this->bandwidth);
             }
             if (!_this->devDesc.empty()) {
-                config.acquire();
-                config.conf["devices"][_this->devDesc]["bandwidth"] = _this->bandwidth;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->devDesc]["bandwidth"] = _this->bandwidth; });
             }
         }
 
@@ -413,9 +404,7 @@ private:
                 iio_channel_attr_write(_this->rxChan, "gain_control_mode", _this->gainModes.value(_this->gmId).c_str());
             }
             if (!_this->devDesc.empty()) {
-                config.acquire();
-                config.conf["devices"][_this->devDesc]["gainMode"] = _this->gainModes.key(_this->gmId);
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->devDesc]["gainMode"] = _this->gainModes.key(_this->gmId); });
             }
         }
 
@@ -427,9 +416,7 @@ private:
                 iio_channel_attr_write_double(_this->rxChan, "hardwaregain", _this->gain);
             }
             if (!_this->devDesc.empty()) {
-                config.acquire();
-                config.conf["devices"][_this->devDesc]["gain"] = _this->gain;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->devDesc]["gain"] = _this->gain; });
             }
         }
         if (_this->gmId) { SmGui::EndDisabled(); }
@@ -531,14 +518,11 @@ MOD_EXPORT void _INIT_() {
     config.enableAutoSave();
 
     // Reset the configuration if the old format is still used
-    config.acquire();
-    if (!config.conf.contains("device") || !config.conf.contains("devices")) {
-        config.conf = defConf;
-        config.release(true);
-    }
-    else {
-        config.release();
-    }
+    config.withConfig([&](json& conf) {
+        if (!conf.contains("device") || !conf.contains("devices")) {
+            conf = defConf;
+        }
+    });
 }
 
 MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {

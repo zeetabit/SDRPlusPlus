@@ -34,9 +34,9 @@ public:
         this->name = name;
 
         // Load config
-        config.acquire();
-        // TODO: Load config
-        config.release();
+        config.readConfig([&](const json& conf) {
+            // TODO: Load config
+        });
 
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, 0, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, true);
         decoder = new vor::Decoder(vfo->output, 1);

@@ -39,9 +39,7 @@ namespace bandplanmenu {
         ImGui::PushItemWidth(menuColumnWidth);
         if (ImGui::Combo("##_bandplan_name_", &bandplanId, bandplan::bandplanNameTxt.c_str())) {
             gui::waterfall.bandplan = &bandplan::bandplans[bandplan::bandplanNames[bandplanId]];
-            core::configManager.acquire();
-            core::configManager.conf["bandPlan"] = bandplan::bandplanNames[bandplanId];
-            core::configManager.release(true);
+            core::configManager.withConfig([](json& conf) { conf["bandPlan"] = bandplan::bandplanNames[bandplanId]; });
         }
         ImGui::PopItemWidth();
 
@@ -49,16 +47,12 @@ namespace bandplanmenu {
         ImGui::SetNextItemWidth(menuColumnWidth - ImGui::GetCursorPosX());
         if (ImGui::Combo("##_bandplan_pos_", &bandPlanPos, bandPlanPosTxt)) {
             gui::waterfall.setBandPlanPos(bandPlanPos);
-            core::configManager.acquire();
-            core::configManager.conf["bandPlanPos"] = bandPlanPos;
-            core::configManager.release(true);
+            core::configManager.withConfig([](json& conf) { conf["bandPlanPos"] = bandPlanPos; });
         }
 
         if (ImGui::Checkbox("Enabled", &bandPlanEnabled)) {
             bandPlanEnabled ? gui::waterfall.showBandplan() : gui::waterfall.hideBandplan();
-            core::configManager.acquire();
-            core::configManager.conf["bandPlanEnabled"] = bandPlanEnabled;
-            core::configManager.release(true);
+            core::configManager.withConfig([](json& conf) { conf["bandPlanEnabled"] = bandPlanEnabled; });
         }
         bandplan::BandPlan_t plan = bandplan::bandplans[bandplan::bandplanNames[bandplanId]];
         ImGui::Text("Country: %s (%s)", plan.countryName.c_str(), plan.countryCode.c_str());

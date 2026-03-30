@@ -136,22 +136,17 @@ namespace sourcemenu {
         offsets.define("None", OFFSET_ID_NONE);
         offsets.define("Manual", OFFSET_ID_MANUAL);
 
-        // Acquire the config file
-        core::configManager.acquire();
-
         // Load custom offsets
-        auto ofs = core::configManager.conf["offsets"].items();
-        for (auto& o : ofs) {
-            namedOffsets[o.key()] = (double)o.value();
-        }
+        core::configManager.readConfig([](const json& conf) {
+            for (auto& [key, val] : conf["offsets"].items()) {
+                namedOffsets[key] = (double)val;
+            }
+        });
 
         // Define custom offsets
         for (auto& [name, offset] : namedOffsets) {
             offsets.define(name, offsets.size());
         }
-
-        // Release the config file
-        core::configManager.release();
     }
 
     void init() {
@@ -167,22 +162,21 @@ namespace sourcemenu {
         decimations.define(32, "32x", 32);
         decimations.define(64, "64x", 64);
 
-        // Acquire the config file
-        core::configManager.acquire();
-
         // Load other settings
-        std::string selectedSource = core::configManager.conf["source"];
-        manualOffset = core::configManager.conf["manualOffset"];
-        std::string selectedOffset = core::configManager.conf["selectedOffset"];
-        iqCorrection = core::configManager.conf["iqCorrection"];
-        invertIQ = core::configManager.conf["invertIQ"];
-        int decimation = core::configManager.conf["decimation"];
+        std::string selectedSource;
+        int decimation;
+        std::string selectedOffset;
+        core::configManager.readConfig([&](const json& conf) {
+            selectedSource = conf["source"];
+            manualOffset = conf["manualOffset"];
+            selectedOffset = conf["selectedOffset"];
+            iqCorrection = conf["iqCorrection"];
+            invertIQ = conf["invertIQ"];
+            decimation = conf["decimation"];
+        });
         if (decimations.keyExists(decimation)) {
             decimId = decimations.keyId(decimation);
         }
-
-        // Release the config file
-        core::configManager.release();
 
         // Select the source module
         refreshSources();
@@ -203,14 +197,7 @@ namespace sourcemenu {
     }
 
     void addOffset(const std::string& name, double offset) {
-        // Acquire the config file
-        core::configManager.acquire();
-
-        // Define a new offset
-        core::configManager.conf["offsets"][name] = offset;
-
-        // Acquire the config file
-        core::configManager.release(true);
+        core::configManager.withConfig([&](json& conf) { conf["offsets"][name] = offset; });
 
         // Reload the offsets
         reloadOffsets();
@@ -220,14 +207,7 @@ namespace sourcemenu {
     }
 
     void delOffset(const std::string& name) {
-        // Acquire the config file
-        core::configManager.acquire();
-
-        // Define a new offset
-        core::configManager.conf["offsets"].erase(name);
-
-        // Acquire the config file
-        core::configManager.release(true);
+        core::configManager.withConfig([&](json& conf) { conf["offsets"].erase(name); });
 
         // Reload the offsets
         reloadOffsets();
@@ -292,9 +272,7 @@ namespace sourcemenu {
         if (ImGui::Combo("##source", &sourceId, sources.txt)) {
             std::string newSource = sources.value(sourceId);
             selectSource(newSource);
-            core::configManager.acquire();
-            core::configManager.conf["source"] = newSource;
-            core::configManager.release(true);
+            core::configManager.withConfig([&](json& conf) { conf["source"] = newSource; });
         }
 
         if (running) { style::endDisabled(); }
@@ -303,25 +281,19 @@ namespace sourcemenu {
 
         if (ImGui::Checkbox("IQ Correction##_sdrpp_iq_corr", &iqCorrection)) {
             sigpath::iqFrontEnd.setDCBlocking(iqCorrection);
-            core::configManager.acquire();
-            core::configManager.conf["iqCorrection"] = iqCorrection;
-            core::configManager.release(true);
+            core::configManager.withConfig([](json& conf) { conf["iqCorrection"] = iqCorrection; });
         }
 
         if (ImGui::Checkbox("Invert IQ##_sdrpp_inv_iq", &invertIQ)) {
             sigpath::iqFrontEnd.setInvertIQ(invertIQ);
-            core::configManager.acquire();
-            core::configManager.conf["invertIQ"] = invertIQ;
-            core::configManager.release(true);
+            core::configManager.withConfig([](json& conf) { conf["invertIQ"] = invertIQ; });
         }
 
         ImGui::LeftLabel("Offset mode");
         ImGui::SetNextItemWidth(itemWidth - ImGui::GetCursorPosX() - 2.0f*(lineHeight + 1.5f*spacing));
         if (ImGui::Combo("##_sdrpp_offset", &offsetId, offsets.txt)) {
             selectOffsetById(offsetId);
-            core::configManager.acquire();
-            core::configManager.conf["selectedOffset"] = offsets.key(offsetId);
-            core::configManager.release(true);
+            core::configManager.withConfig([](json& conf) { conf["selectedOffset"] = offsets.key(offsetId); });
         }
         ImGui::SameLine();
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() - spacing);
@@ -353,9 +325,7 @@ namespace sourcemenu {
         if (offsetId == OFFSET_ID_MANUAL) {
             if (ImGui::InputDouble("##freq_offset", &manualOffset, 1.0, 100.0)) {
                 updateOffset();
-                core::configManager.acquire();
-                core::configManager.conf["manualOffset"] = manualOffset;
-                core::configManager.release(true);
+                core::configManager.withConfig([](json& conf) { conf["manualOffset"] = manualOffset; });
             }
         }
         else {
@@ -369,9 +339,7 @@ namespace sourcemenu {
         ImGui::FillWidth();
         if (ImGui::Combo("##source_decim", &decimId, decimations.txt)) {
             sigpath::iqFrontEnd.setDecimation(decimations.value(decimId));
-            core::configManager.acquire();
-            core::configManager.conf["decimation"] = decimations.key(decimId);
-            core::configManager.release(true);
+            core::configManager.withConfig([](json& conf) { conf["decimation"] = decimations.key(decimId); });
         }
         if (running) { style::endDisabled(); }
     }

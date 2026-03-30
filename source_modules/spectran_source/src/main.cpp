@@ -71,9 +71,8 @@ public:
         refresh();
 
         // Select device from config
-        config.acquire();
-        std::string devSerial = config.conf["device"];
-        config.release();
+        std::string devSerial;
+        config.readConfig([&](const json& conf) { devSerial = conf["device"]; });
         // TODO: Select
         selectSerial("");
 

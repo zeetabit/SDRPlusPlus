@@ -50,21 +50,21 @@ public:
         writeBuffer = new int8_t[STREAM_BUFFER_SIZE];
 
         // Load config
-        config.acquire();
-        // Note: this first one may not be needed but I'm paranoid
-        if (!config.conf.contains(name)) {
-            config.conf[name] = json({});
-        }
-        if (config.conf[name].contains("recPath")) {
-            folderSelect.setPath(config.conf[name]["recPath"]);
-        }
-        if (config.conf[name].contains("brokenModulation")) {
-            brokenModulation = config.conf[name]["brokenModulation"];
-        }
-        if (config.conf[name].contains("oqpsk")) {
-            oqpsk = config.conf[name]["oqpsk"];
-        }
-        config.release();
+        config.withConfig([&](json& conf) {
+            // Note: this first one may not be needed but I'm paranoid
+            if (!conf.contains(name)) {
+                conf[name] = json({});
+            }
+            if (conf[name].contains("recPath")) {
+                folderSelect.setPath(conf[name]["recPath"]);
+            }
+            if (conf[name].contains("brokenModulation")) {
+                brokenModulation = conf[name]["brokenModulation"];
+            }
+            if (conf[name].contains("oqpsk")) {
+                oqpsk = conf[name]["oqpsk"];
+            }
+        });
 
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, 0, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, true);
         demod.init(vfo->output, 72000.0f, INPUT_SAMPLE_RATE, 33, 0.6f, 0.1f, 0.005f, brokenModulation, oqpsk, 1e-6, 0.01);
@@ -147,24 +147,24 @@ private:
 
         if (_this->folderSelect.render("##meteor_rec" + _this->name)) {
             if (_this->folderSelect.pathIsValid()) {
-                config.acquire();
-                config.conf[_this->name]["recPath"] = _this->folderSelect.path;
-                config.release(true);
+                config.withConfig([&](json& conf) {
+                    conf[_this->name]["recPath"] = _this->folderSelect.path;
+                });
             }
         }
 
         if (ImGui::Checkbox(CONCAT("Broken modulation##meteor_rec", _this->name), &_this->brokenModulation)) {
             _this->demod.setBrokenModulation(_this->brokenModulation);
-            config.acquire();
-            config.conf[_this->name]["brokenModulation"] = _this->brokenModulation;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_this->name]["brokenModulation"] = _this->brokenModulation;
+            });
         }
 
         if (ImGui::Checkbox(CONCAT("OQPSK##oqpsk", _this->name), &_this->oqpsk)) {
             _this->demod.setOQPSK(_this->oqpsk);
-            config.acquire();
-            config.conf[_this->name]["oqpsk"] = _this->oqpsk;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_this->name]["oqpsk"] = _this->oqpsk;
+            });
         }
 
         if (!_this->folderSelect.pathIsValid() && _this->enabled) { style::beginDisabled(); }

@@ -39,18 +39,18 @@ public:
         lsf.valid = false;
 
         // Load config
-        config.acquire();
-        if (!config.conf.contains(name)) {
-            config.conf[name]["showLines"] = false;
-        }
-        showLines = config.conf[name]["showLines"];
-        if (showLines) {
-            diag.lines.push_back(-1.0);
-            diag.lines.push_back(-1.0/3.0);
-            diag.lines.push_back(1.0/3.0);
-            diag.lines.push_back(1.0);
-        }
-        config.release(true);
+        config.withConfig([&](json& conf) {
+            if (!conf.contains(name)) {
+                conf[name]["showLines"] = false;
+            }
+            showLines = conf[name]["showLines"];
+            if (showLines) {
+                diag.lines.push_back(-1.0);
+                diag.lines.push_back(-1.0/3.0);
+                diag.lines.push_back(1.0/3.0);
+                diag.lines.push_back(1.0);
+            }
+        });
 
 
         // Initialize VFO
@@ -224,9 +224,9 @@ private:
             else {
                 _this->diag.lines.clear();
             }
-            config.acquire();
-            config.conf[_this->name]["showLines"] = _this->showLines;
-            config.release(true);
+            config.withConfig([&](json& conf) {
+                conf[_this->name]["showLines"] = _this->showLines;
+            });
         }
 
         ImGui::TextUnformatted("Status:");

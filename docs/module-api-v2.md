@@ -352,3 +352,61 @@ When `resourcesDirectory` from config.json doesn't point to a valid directory (c
 - `../root_dev/res`
 
 When found, the detected path is saved to config.json for future runs.
+
+---
+
+## Module Author Quick Reference
+
+Summary of what changed and what module authors need to adjust.
+
+### What's Different from Upstream SDR++
+
+| Old Pattern | New Pattern | Action Required |
+|-------------|-------------|-----------------|
+| `gui::waterfall.getBandwidth()` | `ServiceRegistry::get().query<IRadioState>("core")->getBandwidth()` | Add `#include <utils/service_registry.h>` and `#include <utils/radio_state.h>` |
+| `gui::waterfall.getCenterFrequency()` | `query<IRadioState>("core")->getCenterFrequency()` | Same includes |
+| `gui::waterfall.selectedVFO` | `query<IRadioState>("core")->getSelectedVFO()` | Same includes |
+| `gui::waterfall.vfos[name]->generalOffset` | `query<IRadioState>("core")->getVFOGeneralOffset(name)` | Same includes |
+| `gui::waterfall.centerFrequencyLocked = true` | `query<IRadioStateControl>("core")->setCenterFrequencyLocked(true)` | Add `#include <utils/radio_control.h>` |
+| `modComManager.callInterface(vfo, CMD, &in, &out)` | `query<IRadioControl>(vfo)->setMode(mode)` | Add `#include <utils/services.h>` |
+| `modComManager.interfaceExists(name)` | `query<IRadioControl>(name) != nullptr` | Same includes |
+| `class X : public Processor<A,B>` | `class X : public ScheduledProcessor<A,B>` | Add `#include <dsp/engine/scheduled_processor.h>` |
+| `class X : public Sink<T>` | `class X : public ScheduledSink<T>` | Same include |
+| `class X : public Operator<A,B,O>` | `class X : public ScheduledOperator<A,B,O>` | Same include |
+| `SourceHandler` struct + `registerSource(name, &handler)` | Implement `ISource` + `registerSource(name, this)` | Add `#include <signal_path/isource.h>` |
+| `add_subdirectory("decoder_modules/my_mod")` | `add_sdrpp_module("decoder_modules/my_mod" my_mod)` | Update CMakeLists.txt |
+
+### Minimum Required for a New Module
+
+A new module works out of the box with zero V2 changes. The old patterns still compile and function. To adopt V2 features incrementally:
+
+1. **Optional**: Add `SDRPP_MOD_INFO_V2` for API versioning + capabilities
+2. **Recommended**: Use `IRadioState` instead of `gui::waterfall` for reading radio state
+3. **Recommended**: Use `ServiceRegistry` instead of `modComManager` for inter-module calls
+4. **Optional**: Use `ScheduledProcessor` instead of `Processor` for DSP blocks (runs on thread pool)
+5. **Required for new CMake**: Use `add_sdrpp_module()` macro in CMakeLists.txt
+
+### Includes Cheat Sheet
+
+```cpp
+// Radio state (read-only: frequency, bandwidth, VFO info)
+#include <utils/service_registry.h>
+#include <utils/radio_state.h>
+auto* rs = ServiceRegistry::get().query<IRadioState>("core");
+
+// Radio state mutations (set frequency, lock center freq)
+#include <utils/radio_control.h>
+auto* rc = ServiceRegistry::get().query<IRadioStateControl>("core");
+
+// Inter-module communication (radio mode, recorder control)
+#include <utils/services.h>
+auto* radio = ServiceRegistry::get().query<IRadioControl>(vfoName);
+
+// DSP blocks on thread pool
+#include <dsp/engine/scheduled_processor.h>
+// Then: class MyBlock : public ScheduledProcessor<complex_t, float> { ... };
+
+// Source module with ISource
+#include <signal_path/isource.h>
+// Then: class MySource : public ModuleManager::Instance, public ISource { ... };
+```

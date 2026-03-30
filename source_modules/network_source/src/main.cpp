@@ -70,28 +70,28 @@ public:
         sampleTypes.define("Float32", SAMPLE_TYPE_FLOAT32);
 
         // Load config
-        config.acquire();
-        if (config.conf[name].contains("samplerate")) {
-            samplerate = config.conf[name]["samplerate"];
-            tempSamplerate = samplerate;
-        }
-        if (config.conf[name].contains("protocol")) {
-            std::string protoStr = config.conf[name]["protocol"];
-            if (protocols.keyExists(protoStr)) { proto = protocols.value(protocols.keyId(protoStr)); }
-        }
-        if (config.conf[name].contains("sampleType")) {
-            std::string sampTypeStr = config.conf[name]["sampleType"];
-            if (sampleTypes.keyExists(sampTypeStr)) { sampType = sampleTypes.value(sampleTypes.keyId(sampTypeStr)); }
-        }
-        if (config.conf[name].contains("host")) {
-            std::string hostStr = config.conf[name]["host"];
-            strcpy(hostname, hostStr.c_str());
-        }
-        if (config.conf[name].contains("port")) {
-            port = config.conf[name]["port"];
-            port = std::clamp<int>(port, 1, 65535);
-        }
-        config.release();
+        config.readConfig([&](const json& conf) {
+            if (conf[name].contains("samplerate")) {
+                samplerate = conf[name]["samplerate"];
+                tempSamplerate = samplerate;
+            }
+            if (conf[name].contains("protocol")) {
+                std::string protoStr = conf[name]["protocol"];
+                if (protocols.keyExists(protoStr)) { proto = protocols.value(protocols.keyId(protoStr)); }
+            }
+            if (conf[name].contains("sampleType")) {
+                std::string sampTypeStr = conf[name]["sampleType"];
+                if (sampleTypes.keyExists(sampTypeStr)) { sampType = sampleTypes.value(sampleTypes.keyId(sampTypeStr)); }
+            }
+            if (conf[name].contains("host")) {
+                std::string hostStr = conf[name]["host"];
+                strcpy(hostname, hostStr.c_str());
+            }
+            if (conf[name].contains("port")) {
+                port = conf[name]["port"];
+                port = std::clamp<int>(port, 1, 65535);
+            }
+        });
 
         // Set menu IDs
         protoId = protocols.valueId(proto);
@@ -214,17 +214,13 @@ private:
 
         // Hostname and port field
         if (SmGui::InputText(("##network_source_host_" + _this->name).c_str(), _this->hostname, sizeof(_this->hostname))) {
-            config.acquire();
-            config.conf[_this->name]["host"] = _this->hostname;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf[_this->name]["host"] = _this->hostname; });
         }
         SmGui::SameLine();
         SmGui::FillWidth();
         if (SmGui::InputInt(("##network_source_port_" + _this->name).c_str(), &_this->port, 0, 0)) {
             _this->port = std::clamp<int>(_this->port, 1, 65535);
-            config.acquire();
-            config.conf[_this->name]["port"] = _this->port;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf[_this->name]["port"] = _this->port; });
         }
 
         // Mode protocol selector
@@ -232,9 +228,7 @@ private:
         SmGui::FillWidth();
         if (SmGui::Combo(("##network_source_proto_" + _this->name).c_str(), &_this->protoId, _this->protocols.txt)) {
             _this->proto = _this->protocols.value(_this->protoId);
-            config.acquire();
-            config.conf[_this->name]["protocol"] = _this->protocols.key(_this->protoId);
-            config.release(true);
+            config.withConfig([&](json& conf) { conf[_this->name]["protocol"] = _this->protocols.key(_this->protoId); });
         }
 
         // Sample type selector
@@ -242,9 +236,7 @@ private:
         SmGui::FillWidth();
         if (SmGui::Combo(("##network_source_samp_" + _this->name).c_str(), &_this->sampTypeId, _this->sampleTypes.txt)) {
             _this->sampType = _this->sampleTypes.value(_this->sampTypeId);
-            config.acquire();
-            config.conf[_this->name]["sampleType"] = _this->sampleTypes.key(_this->sampTypeId);
-            config.release(true);
+            config.withConfig([&](json& conf) { conf[_this->name]["sampleType"] = _this->sampleTypes.key(_this->sampTypeId); });
         }
 
         // Samplerate selector
@@ -260,9 +252,7 @@ private:
         if (SmGui::Button(("Apply##network_source_apply_" + _this->name).c_str())) {
             _this->samplerate = _this->tempSamplerate;
             core::setInputSampleRate(_this->samplerate);
-            config.acquire();
-            config.conf[_this->name]["samplerate"] = _this->samplerate;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf[_this->name]["samplerate"] = _this->samplerate; });
         }
         if (!applyEn) { SmGui::EndDisabled(); }
 

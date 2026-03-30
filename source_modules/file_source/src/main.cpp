@@ -48,9 +48,7 @@ public:
 
         if (core::args["server"].b()) { return; }
 
-        config.acquire();
-        fileSelect.setPath(config.conf["path"], true);
-        config.release();
+        config.readConfig([&](const json& conf) { fileSelect.setPath(conf["path"], true); });
 
         sigpath::sourceManager.registerSource("File", static_cast<ISource*>(this));
     }
@@ -122,9 +120,7 @@ public:
                 catch (const std::exception& e) {
                     flog::error("Error: {}", e.what());
                 }
-                config.acquire();
-                config.conf["path"] = fileSelect.path;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["path"] = fileSelect.path; });
             }
         }
 

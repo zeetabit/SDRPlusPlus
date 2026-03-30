@@ -38,11 +38,11 @@ public:
         handler.stream = &stream;
 
         // Load config
-        config.acquire();
-        std::string hostStr = config.conf["hostname"];
-        strcpy(hostname, hostStr.c_str());
-        port = config.conf["port"];
-        config.release();
+        config.readConfig([&](const json& conf) {
+            std::string hostStr = conf["hostname"];
+            strcpy(hostname, hostStr.c_str());
+            port = conf["port"];
+        });
 
         sigpath::sourceManager.registerSource("RFspace", &handler);
     }
@@ -132,16 +132,12 @@ private:
 
         if (connected) { SmGui::BeginDisabled(); }
         if (SmGui::InputText(CONCAT("##_rfspace_srv_host_", _this->name), _this->hostname, 1023)) {
-            config.acquire();
-            config.conf["hostname"] = _this->hostname;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["hostname"] = _this->hostname; });
         }
         SmGui::SameLine();
         SmGui::FillWidth();
         if (SmGui::InputInt(CONCAT("##_rfspace_srv_port_", _this->name), &_this->port, 0, 0)) {
-            config.acquire();
-            config.conf["port"] = _this->port;
-            config.release(true);
+            config.withConfig([&](json& conf) { conf["port"] = _this->port; });
         }
         if (connected) { SmGui::EndDisabled(); }
 
@@ -174,9 +170,7 @@ private:
                 _this->client->setSampleRate(_this->sampleRate);
                 core::setInputSampleRate(_this->sampleRate);
                 
-                config.acquire();
-                config.conf["devices"][_this->devConfName]["sampleRate"] = _this->sampleRates.key(_this->srId);
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->devConfName]["sampleRate"] = _this->sampleRates.key(_this->srId); });
             }
 
             if (_this->running) { SmGui::EndDisabled(); }
@@ -187,9 +181,7 @@ private:
                 if (SmGui::Combo("##rfspace_source_rf_port", &_this->rfPortId, _this->rfPorts.txt)) {
                     _this->client->setPort(_this->rfPorts[_this->rfPortId]);
 
-                    config.acquire();
-                    config.conf["devices"][_this->devConfName]["rfPort"] = _this->rfPorts.key(_this->rfPortId);
-                    config.release(true);
+                    config.withConfig([&](json& conf) { conf["devices"][_this->devConfName]["rfPort"] = _this->rfPorts.key(_this->rfPortId); });
                 }
             }
 
@@ -198,9 +190,7 @@ private:
             if (SmGui::SliderFloatWithSteps("##rfspace_source_gain", &_this->gain, -30, 0, 10, SmGui::FMT_STR_FLOAT_DB_NO_DECIMAL)) {
                 _this->client->setGain(_this->gain);
 
-                config.acquire();
-                config.conf["devices"][_this->devConfName]["gain"] = _this->gain;
-                config.release(true);
+                config.withConfig([&](json& conf) { conf["devices"][_this->devConfName]["gain"] = _this->gain; });
             }
 
             SmGui::Text("Status:");
@@ -247,32 +237,30 @@ private:
         // Load config
         srId = 0;
         rfPortId = 0;
-        bool changed = false;
-        config.acquire();
-        if (!config.conf["devices"].contains(devConfName)) {
-            config.conf["devices"][devConfName]["sampleRate"] = sampleRates.key(0);
-            config.conf["devices"][devConfName]["gain"] = 0;
-            if (client->deviceId == rfspace::RFSPACE_DEV_ID_CLOUD_IQ) {
-                config.conf["devices"][devConfName]["rfPort"] = rfPorts.key(0);
+        config.withConfig([&](json& conf) {
+            if (!conf["devices"].contains(devConfName)) {
+                conf["devices"][devConfName]["sampleRate"] = sampleRates.key(0);
+                conf["devices"][devConfName]["gain"] = 0;
+                if (client->deviceId == rfspace::RFSPACE_DEV_ID_CLOUD_IQ) {
+                    conf["devices"][devConfName]["rfPort"] = rfPorts.key(0);
+                }
             }
-            //changed = true;
-        }
-        if (config.conf["devices"][devConfName].contains("sampleRate")) {
-            uint32_t sr = config.conf["devices"][devConfName]["sampleRate"];
-            if (sampleRates.keyExists(sr)) {
-                srId = sampleRates.keyId(sr);
+            if (conf["devices"][devConfName].contains("sampleRate")) {
+                uint32_t sr = conf["devices"][devConfName]["sampleRate"];
+                if (sampleRates.keyExists(sr)) {
+                    srId = sampleRates.keyId(sr);
+                }
             }
-        }
-        if (config.conf["devices"][devConfName].contains("gain")) {
-            gain = config.conf["devices"][devConfName]["gain"];
-        }
-        if (config.conf["devices"][devConfName].contains("rfPort")) {
-            std::string port = config.conf["devices"][devConfName]["rfPort"];
-            if (rfPorts.keyExists(port)) {
-                rfPortId = rfPorts.keyId(port);
+            if (conf["devices"][devConfName].contains("gain")) {
+                gain = conf["devices"][devConfName]["gain"];
             }
-        }
-        config.release(changed);
+            if (conf["devices"][devConfName].contains("rfPort")) {
+                std::string port = conf["devices"][devConfName]["rfPort"];
+                if (rfPorts.keyExists(port)) {
+                    rfPortId = rfPorts.keyId(port);
+                }
+            }
+        });
 
         // Set options
         sampleRate = sampleRates[srId];
@@ -330,13 +318,11 @@ MOD_EXPORT void _INIT_() {
     config.enableAutoSave();
 
     // Check config in case a user has a very old version
-    config.acquire();
-    bool corrected = false;
-    if (!config.conf.contains("hostname") || !config.conf.contains("port") || !config.conf.contains("devices")) {
-        config.conf = def;
-        corrected = true;
-    }
-    config.release(corrected);
+    config.withConfig([&](json& conf) {
+        if (!conf.contains("hostname") || !conf.contains("port") || !conf.contains("devices")) {
+            conf = def;
+        }
+    });
 }
 
 MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
