@@ -5,11 +5,12 @@
 #include <gui/style.h>
 #include <signal_path/signal_path.h>
 #include <core.h>
-#include <recorder_interface.h>
-#include <meteor_demodulator_interface.h>
+#include <utils/services.h>
 #include <config.h>
 #include <cctype>
 #include <radio_interface.h>
+#include <utils/service_registry.h>
+#include <utils/radio_state.h>
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
 #define MAX_COMMAND_LENGTH 8192
@@ -226,7 +227,8 @@ private:
         }
 
         // List VFOs
-        for (auto const& [_name, vfo] : gui::waterfall.vfos) {
+        auto* rs = ServiceRegistry::get().query<IRadioState>("core");
+        for (auto& _name : rs->getVFONames()) {
             vfoNames.push_back(_name);
             vfoNamesTxt += _name;
             vfoNamesTxt += '\0';
@@ -269,15 +271,12 @@ private:
             return;
         }
 
-        std::string type = core::modComManager.getModuleName(_name);
-
-
         // Select the VFO
         {
             if (lock) { std::lock_guard lck(recorderMtx); }
             recorderId = std::distance(recorderNames.begin(), recIt);
             selectedRecorder = _name;
-            if (type == "meteor_demodulator") {
+            if (ServiceRegistry::get().query<IDemodulatorControl>(_name) != nullptr) {
                 recorderType = RECORDER_TYPE_METEOR_DEMODULATOR;
             }
             else {
@@ -412,7 +411,8 @@ private:
             std::lock_guard lck(vfoMtx);
 
             // Get center frequency of the SDR
-            double freq = gui::waterfall.getCenterFrequency();
+            auto* rs = ServiceRegistry::get().query<IRadioState>("core");
+            double freq = rs->getCenterFrequency();
 
             // Add the offset of the VFO if it exists
             if (sigpath::vfoManager.vfoExists(selectedVfo)) {
@@ -467,10 +467,11 @@ private:
             int newMode = it->first;
 
             // If tuning is enabled, set the mode and optionally the bandwidth
-            if (!selectedVfo.empty() && core::modComManager.getModuleName(selectedVfo) == "radio" && tuningEnabled) {
-                core::modComManager.callInterface(selectedVfo, RADIO_IFACE_CMD_SET_MODE, &newMode, NULL);
+            auto* radio = ServiceRegistry::get().query<IRadioControl>(selectedVfo);
+            if (!selectedVfo.empty() && radio && tuningEnabled) {
+                radio->setMode(newMode);
                 if (newBandwidth > 0) {
-                    core::modComManager.callInterface(selectedVfo, RADIO_IFACE_CMD_SET_BANDWIDTH, &newBandwidth, NULL);
+                    radio->setBandwidth(newBandwidth);
                 }
             }
 
@@ -480,9 +481,9 @@ private:
             std::lock_guard lck(vfoMtx);
             resp = "RAW\n";
 
-            if (!selectedVfo.empty() && core::modComManager.getModuleName(selectedVfo) == "radio") {
-                int mode;
-                core::modComManager.callInterface(selectedVfo, RADIO_IFACE_CMD_GET_MODE, NULL, &mode);
+            auto* radio = ServiceRegistry::get().query<IRadioControl>(selectedVfo);
+            if (!selectedVfo.empty() && radio) {
+                int mode = radio->getMode();
                 resp = std::string(radioModeToString[mode]) + "\n";
             }
             else if (!selectedVfo.empty()) {
@@ -546,10 +547,12 @@ private:
 
             // Send the command to the selected recorder
             if (recorderType == RECORDER_TYPE_METEOR_DEMODULATOR) {
-                core::modComManager.callInterface(selectedRecorder, METEOR_DEMODULATOR_IFACE_CMD_START, NULL, NULL);
+                auto* demod = ServiceRegistry::get().query<IDemodulatorControl>(selectedRecorder);
+                if (demod) { demod->startDemod(); }
             }
             else {
-                core::modComManager.callInterface(selectedRecorder, RECORDER_IFACE_CMD_START, NULL, NULL);
+                auto* rec = ServiceRegistry::get().query<IRecorderControl>(selectedRecorder);
+                if (rec) { rec->startRecording(); }
             }
 
             // Respond with a success
@@ -568,10 +571,12 @@ private:
 
             // Send the command to the selected recorder
             if (recorderType == RECORDER_TYPE_METEOR_DEMODULATOR) {
-                core::modComManager.callInterface(selectedRecorder, METEOR_DEMODULATOR_IFACE_CMD_STOP, NULL, NULL);
+                auto* demod = ServiceRegistry::get().query<IDemodulatorControl>(selectedRecorder);
+                if (demod) { demod->stopDemod(); }
             }
             else {
-                core::modComManager.callInterface(selectedRecorder, RECORDER_IFACE_CMD_STOP, NULL, NULL);
+                auto* rec = ServiceRegistry::get().query<IRecorderControl>(selectedRecorder);
+                if (rec) { rec->stopRecording(); }
             }
 
             // Respond with a success

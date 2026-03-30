@@ -11,10 +11,14 @@
 #include <dsp/buffer/reshaper.h>
 #include <dsp/sink/handler_sink.h>
 #include <meteor_demodulator_interface.h>
+#include <utils/service_registry.h>
+#include <utils/services.h>
 #include <gui/widgets/folder_select.h>
 #include <gui/widgets/constellation_diagram.h>
 
 #include <fstream>
+#include <utils/service_registry.h>
+#include <utils/radio_state.h>
 
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
@@ -38,7 +42,7 @@ std::string genFileName(std::string prefix, std::string suffix) {
 
 #define INPUT_SAMPLE_RATE 150000
 
-class MeteorDemodulatorModule : public ModuleManager::Instance {
+class MeteorDemodulatorModule : public ModuleManager::Instance, public IDemodulatorControl {
 public:
     MeteorDemodulatorModule(std::string name) : folderSelect("%ROOT%/recordings") {
         this->name = name;
@@ -79,6 +83,7 @@ public:
 
         gui::menu.registerEntry(name, menuHandler, this, this);
         core::modComManager.registerInterface("meteor_demodulator", name, moduleInterfaceHandler, this);
+        ServiceRegistry::get().provide<IDemodulatorControl>(name, this);
     }
 
     ~MeteorDemodulatorModule() {
@@ -99,7 +104,7 @@ public:
     void postInit() {}
 
     void enable() {
-        double bw = gui::waterfall.getBandwidth();
+        double bw = ServiceRegistry::get().query<IRadioState>("core")->getBandwidth();
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, std::clamp<double>(0, -bw / 2.0, bw / 2.0), 150000, INPUT_SAMPLE_RATE, 150000, 150000, true);
 
         demod.setBrokenModulation(brokenModulation);
@@ -232,6 +237,10 @@ private:
             if (_this->recording) { _this->stopRecording(); }
         }
     }
+
+    // IDemodulatorControl implementation
+    void startDemod() override { if (!recording) { startRecording(); } }
+    void stopDemod() override { if (recording) { stopRecording(); } }
 
     std::string name;
     bool enabled = true;

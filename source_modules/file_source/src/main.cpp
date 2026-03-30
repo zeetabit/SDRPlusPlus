@@ -3,8 +3,11 @@
 #include <utils/flog.h>
 #include <module.h>
 #include <module_manifest.h>
+#include <utils/service_registry.h>
+#include <utils/radio_control.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <wavreader.h>
 #include <core.h>
 #include <gui/widgets/file_select.h>
@@ -38,7 +41,7 @@ SDRPP_MOD_INFO_V2{
 
 ConfigManager config;
 
-class FileSourceModule : public ModuleManager::Instance {
+class FileSourceModule : public ModuleManager::Instance, public ISource {
 public:
     FileSourceModule(std::string name) : fileSelect("", { "Wav IQ Files (*.wav)", "*.wav", "All Files", "*" }) {
         this->name = name;
@@ -49,148 +52,119 @@ public:
         fileSelect.setPath(config.conf["path"], true);
         config.release();
 
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
-        sigpath::sourceManager.registerSource("File", &handler);
+        sigpath::sourceManager.registerSource("File", static_cast<ISource*>(this));
     }
 
     ~FileSourceModule() {
-        stop(this);
+        stopSource();
         sigpath::sourceManager.unregisterSource("File");
     }
 
     void postInit() {}
+    void enable() { enabled = true; }
+    void disable() { enabled = false; }
+    bool isEnabled() { return enabled; }
 
-    void enable() {
-        enabled = true;
-    }
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
 
-    void disable() {
-        enabled = false;
-    }
-
-    bool isEnabled() {
-        return enabled;
-    }
-
-private:
-    static void menuSelected(void* ctx) {
-        FileSourceModule* _this = (FileSourceModule*)ctx;
-        core::setInputSampleRate(_this->sampleRate);
-        tuner::tune(tuner::TUNER_MODE_IQ_ONLY, "", _this->centerFreq);
+    void onSelect() override {
+        core::setInputSampleRate(sampleRate);
+        tuner::tune(tuner::TUNER_MODE_IQ_ONLY, "", centerFreq);
         sigpath::iqFrontEnd.setBuffering(false);
-        gui::waterfall.centerFrequencyLocked = true;
-        //gui::freqSelect.minFreq = _this->centerFreq - (_this->sampleRate/2);
-        //gui::freqSelect.maxFreq = _this->centerFreq + (_this->sampleRate/2);
-        //gui::freqSelect.limitFreq = true;
-        flog::info("FileSourceModule '{0}': Menu Select!", _this->name);
+        ServiceRegistry::get().query<IRadioStateControl>("core")->setCenterFrequencyLocked(true);
+        flog::info("FileSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        FileSourceModule* _this = (FileSourceModule*)ctx;
+    void onDeselect() override {
         sigpath::iqFrontEnd.setBuffering(true);
-        //gui::freqSelect.limitFreq = false;
-        gui::waterfall.centerFrequencyLocked = false;
-        flog::info("FileSourceModule '{0}': Menu Deselect!", _this->name);
+        ServiceRegistry::get().query<IRadioStateControl>("core")->setCenterFrequencyLocked(false);
+        flog::info("FileSourceModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        FileSourceModule* _this = (FileSourceModule*)ctx;
-        if (_this->running) { return; }
-        if (_this->reader == NULL) { return; }
-        _this->running = true;
-        _this->workerThread = _this->float32Mode ? std::thread(floatWorker, _this) : std::thread(worker, _this);
-        flog::info("FileSourceModule '{0}': Start!", _this->name);
+    void start() override {
+        if (running) { return; }
+        if (reader == NULL) { return; }
+        running = true;
+        workerThread = float32Mode ? std::thread(&FileSourceModule::floatWorker, this) : std::thread(&FileSourceModule::worker, this);
+        flog::info("FileSourceModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        FileSourceModule* _this = (FileSourceModule*)ctx;
-        if (!_this->running) { return; }
-        if (_this->reader == NULL) { return; }
-        _this->stream.stopWriter();
-        _this->workerThread.join();
-        _this->stream.clearWriteStop();
-        _this->running = false;
-        _this->reader->rewind();
-        flog::info("FileSourceModule '{0}': Stop!", _this->name);
+    void stop() override {
+        stopSource();
     }
 
-    static void tune(double freq, void* ctx) {
-        FileSourceModule* _this = (FileSourceModule*)ctx;
-        flog::info("FileSourceModule '{0}': Tune: {1}!", _this->name, freq);
+    void tune(double freq) override {
+        flog::info("FileSourceModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        FileSourceModule* _this = (FileSourceModule*)ctx;
-
-        if (_this->fileSelect.render("##file_source_" + _this->name)) {
-            if (_this->fileSelect.pathIsValid()) {
-                if (_this->reader != NULL) {
-                    _this->reader->close();
-                    delete _this->reader;
+    void drawMenu() override {
+        if (fileSelect.render("##file_source_" + name)) {
+            if (fileSelect.pathIsValid()) {
+                if (reader != NULL) {
+                    reader->close();
+                    delete reader;
                 }
                 try {
-                    _this->reader = new WavReader(_this->fileSelect.path);
-                    if (_this->reader->getSampleRate() == 0) {
-                        _this->reader->close();
-                        delete _this->reader;
-                        _this->reader = NULL;
+                    reader = new WavReader(fileSelect.path);
+                    if (reader->getSampleRate() == 0) {
+                        reader->close();
+                        delete reader;
+                        reader = NULL;
                         throw std::runtime_error("Sample rate may not be zero");
                     }
-                    _this->sampleRate = _this->reader->getSampleRate();
-                    core::setInputSampleRate(_this->sampleRate);
-                    std::string filename = std::filesystem::path(_this->fileSelect.path).filename().string();
-                    _this->centerFreq = _this->getFrequency(filename);
-                    tuner::tune(tuner::TUNER_MODE_IQ_ONLY, "", _this->centerFreq);
-                    //gui::freqSelect.minFreq = _this->centerFreq - (_this->sampleRate/2);
-                    //gui::freqSelect.maxFreq = _this->centerFreq + (_this->sampleRate/2);
-                    //gui::freqSelect.limitFreq = true;
+                    sampleRate = reader->getSampleRate();
+                    core::setInputSampleRate(sampleRate);
+                    std::string filename = std::filesystem::path(fileSelect.path).filename().string();
+                    centerFreq = getFrequency(filename);
+                    tuner::tune(tuner::TUNER_MODE_IQ_ONLY, "", centerFreq);
                 }
                 catch (const std::exception& e) {
                     flog::error("Error: {}", e.what());
                 }
                 config.acquire();
-                config.conf["path"] = _this->fileSelect.path;
+                config.conf["path"] = fileSelect.path;
                 config.release(true);
             }
         }
 
-        ImGui::Checkbox("Float32 Mode##_file_source", &_this->float32Mode);
+        ImGui::Checkbox("Float32 Mode##_file_source", &float32Mode);
     }
 
-    static void worker(void* ctx) {
-        FileSourceModule* _this = (FileSourceModule*)ctx;
-        double sampleRate = std::max(_this->reader->getSampleRate(), (uint32_t)1);
-        int blockSize = std::min((int)(sampleRate / 200.0f), (int)STREAM_BUFFER_SIZE);
+private:
+    void stopSource() {
+        if (!running) { return; }
+        if (reader == NULL) { return; }
+        stream.stopWriter();
+        workerThread.join();
+        stream.clearWriteStop();
+        running = false;
+        reader->rewind();
+        flog::info("FileSourceModule '{0}': Stop!", name);
+    }
+
+    void worker() {
+        double sr = std::max(reader->getSampleRate(), (uint32_t)1);
+        int blockSize = std::min((int)(sr / 200.0f), (int)STREAM_BUFFER_SIZE);
         int16_t* inBuf = new int16_t[blockSize * 2];
 
         while (true) {
-            _this->reader->readSamples(inBuf, blockSize * 2 * sizeof(int16_t));
-            volk_16i_s32f_convert_32f((float*)_this->stream.writeBuf, inBuf, 32768.0f, blockSize * 2);
-            if (!_this->stream.swap(blockSize)) { break; };
+            reader->readSamples(inBuf, blockSize * 2 * sizeof(int16_t));
+            volk_16i_s32f_convert_32f((float*)stream.writeBuf, inBuf, 32768.0f, blockSize * 2);
+            if (!stream.swap(blockSize)) { break; };
         }
 
         delete[] inBuf;
     }
 
-    static void floatWorker(void* ctx) {
-        FileSourceModule* _this = (FileSourceModule*)ctx;
-        double sampleRate = std::max(_this->reader->getSampleRate(), (uint32_t)1);
-        int blockSize = std::min((int)(sampleRate / 200.0f), (int)STREAM_BUFFER_SIZE);
-        dsp::complex_t* inBuf = new dsp::complex_t[blockSize];
+    void floatWorker() {
+        double sr = std::max(reader->getSampleRate(), (uint32_t)1);
+        int blockSize = std::min((int)(sr / 200.0f), (int)STREAM_BUFFER_SIZE);
 
         while (true) {
-            _this->reader->readSamples(_this->stream.writeBuf, blockSize * sizeof(dsp::complex_t));
-            if (!_this->stream.swap(blockSize)) { break; };
+            reader->readSamples(stream.writeBuf, blockSize * sizeof(dsp::complex_t));
+            if (!stream.swap(blockSize)) { break; };
         }
-
-        delete[] inBuf;
     }
 
     double getFrequency(std::string filename) {
@@ -205,15 +179,12 @@ private:
     FileSelect fileSelect;
     std::string name;
     dsp::stream<dsp::complex_t> stream;
-    SourceManager::SourceHandler handler;
     WavReader* reader = NULL;
     bool running = false;
     bool enabled = true;
     float sampleRate = 1000000;
     std::thread workerThread;
-
     double centerFreq = 100000000;
-
     bool float32Mode = false;
 };
 

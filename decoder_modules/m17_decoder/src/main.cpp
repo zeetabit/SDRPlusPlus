@@ -15,6 +15,8 @@
 #include <m17dsp.h>
 #include <fstream>
 #include <chrono>
+#include <utils/service_registry.h>
+#include <utils/radio_state.h>
 
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
@@ -96,7 +98,7 @@ public:
     void postInit() {}
 
     void enable() {
-        double bw = gui::waterfall.getBandwidth();
+        double bw = ServiceRegistry::get().query<IRadioState>("core")->getBandwidth();
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, std::clamp<double>(0, -bw / 2.0, bw / 2.0), 9600, INPUT_SAMPLE_RATE, 9600, 9600, true);
         vfo->setSnapInterval(250);
 

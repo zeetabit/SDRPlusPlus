@@ -3,6 +3,8 @@
 #include <utils/freq_formatting.h>
 #include <gui/tuner.h>
 #include <signal_path/signal_path.h>
+#include <utils/service_registry.h>
+#include <utils/radio_state.h>
 
 namespace sched_action {
 
@@ -45,7 +47,8 @@ namespace sched_action {
             vfoNames.clear();
             vfoNamesTxt.clear();
             int id = 0;
-            for (auto& [name, vfo] : gui::waterfall.vfos) {
+            auto* rs = ServiceRegistry::get().query<IRadioState>("core");
+            for (auto& name : rs->getVFONames()) {
                 vfoNames.push_back(name);
                 vfoNamesTxt += name;
                 vfoNamesTxt += '\0';

@@ -18,10 +18,13 @@
 #include <regex>
 #include <gui/widgets/folder_select.h>
 #include <recorder_interface.h>
+#include <radio_interface.h>
+#include <utils/service_registry.h>
+#include <utils/radio_state.h>
+#include <utils/services.h>
 #include <core.h>
 #include <utils/optionlist.h>
 #include <utils/wav.h>
-#include <radio_interface.h>
 
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
@@ -37,7 +40,7 @@ SDRPP_MOD_INFO{
 
 ConfigManager config;
 
-class RecorderModule : public ModuleManager::Instance {
+class RecorderModule : public ModuleManager::Instance, public IRecorderControl {
 public:
     RecorderModule(std::string name) : folderSelect("%ROOT%/recordings") {
         this->name = name;
@@ -105,10 +108,12 @@ public:
 
         gui::menu.registerEntry(name, menuHandler, this);
         core::modComManager.registerInterface("recorder", name, moduleInterfaceHandler, this);
+        ServiceRegistry::get().provide<IRecorderControl>(name, this);
     }
 
     ~RecorderModule() {
         std::lock_guard<std::recursive_mutex> lck(recMtx);
+        ServiceRegistry::get().remove<IRecorderControl>(name);
         core::modComManager.unregisterInterface(name);
         gui::menu.removeEntry(name);
         stop();
@@ -456,9 +461,10 @@ private:
         time_t now = time(0);
         tm* ltm = localtime(&now);
         char buf[1024];
-        double freq = gui::waterfall.getCenterFrequency();
-        if (gui::waterfall.vfos.find(name) != gui::waterfall.vfos.end()) {
-            freq += gui::waterfall.vfos[name]->generalOffset;
+        auto* rs = ServiceRegistry::get().query<IRadioState>("core");
+        double freq = rs->getCenterFrequency();
+        if (rs->vfoExists(name)) {
+            freq += rs->getVFOGeneralOffset(name);
         }
 
         // Select the recording type string
@@ -480,9 +486,9 @@ private:
         sprintf(dayStr, "%02d", ltm->tm_mday);
         sprintf(monStr, "%02d", ltm->tm_mon + 1);
         sprintf(yearStr, "%02d", ltm->tm_year + 1900);
-        if (core::modComManager.getModuleName(name) == "radio") {
-            int mode = -1;
-            core::modComManager.callInterface(name, RADIO_IFACE_CMD_GET_MODE, NULL, &mode);
+        auto* radio = ServiceRegistry::get().query<IRadioControl>(name);
+        if (radio) {
+            int mode = radio->getMode();
             if (mode >= 0) { modeStr = radioModeToString[mode]; };
         }
 
@@ -558,6 +564,12 @@ private:
             if (_this->recording) { _this->stop(); }
         }
     }
+
+    // IRecorderControl implementation
+    int getRecorderMode() override { std::lock_guard<std::recursive_mutex> lck(recMtx); return recMode; }
+    void setRecorderMode(int mode) override { std::lock_guard<std::recursive_mutex> lck(recMtx); if (!recording) { recMode = std::clamp<int>(mode, 0, 1); } }
+    void startRecording() override { start(); }
+    void stopRecording() override { stop(); }
 
     std::string name;
     bool enabled = true;

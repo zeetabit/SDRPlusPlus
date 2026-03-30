@@ -6,7 +6,9 @@
 #include <core.h>
 #include <discord_rpc.h>
 #include <thread>
-#include <radio_interface.h>
+#include <utils/service_registry.h>
+#include <utils/radio_state.h>
+#include <utils/services.h>
 
 SDRPP_MOD_INFO{
     /* Name:            */ "discord_integration",
@@ -79,32 +81,14 @@ private:
         char freq[32];
         char mode[32];
         double selectedFreq = gui::freqSelect.frequency;
-        std::string selectedName = gui::waterfall.selectedVFO;
+        auto* rs = ServiceRegistry::get().query<IRadioState>("core");
+        std::string selectedName = rs->getSelectedVFO();
         strcpy(mode, "Raw");
-        if (core::modComManager.interfaceExists(selectedName)) {
-            if (core::modComManager.getModuleName(selectedName) == "radio") {
-                int modeNum;
-                core::modComManager.callInterface(selectedName, RADIO_IFACE_CMD_GET_MODE, NULL, &modeNum);
-                if (modeNum == RADIO_IFACE_MODE_NFM) { strcpy(mode, "NFM"); }
-                else if (modeNum == RADIO_IFACE_MODE_WFM) {
-                    strcpy(mode, "FM");
-                }
-                else if (modeNum == RADIO_IFACE_MODE_AM) {
-                    strcpy(mode, "AM");
-                }
-                else if (modeNum == RADIO_IFACE_MODE_DSB) {
-                    strcpy(mode, "DSB");
-                }
-                else if (modeNum == RADIO_IFACE_MODE_USB) {
-                    strcpy(mode, "USB");
-                }
-                else if (modeNum == RADIO_IFACE_MODE_CW) {
-                    strcpy(mode, "CW");
-                }
-                else if (modeNum == RADIO_IFACE_MODE_LSB) {
-                    strcpy(mode, "LSB");
-                }
-            }
+        auto* radio = ServiceRegistry::get().query<IRadioControl>(selectedName);
+        if (radio) {
+            int modeNum = radio->getMode();
+            const char* modeNames[] = { "NFM", "FM", "AM", "DSB", "USB", "CW", "LSB", "Raw" };
+            if (modeNum >= 0 && modeNum < 8) { strcpy(mode, modeNames[modeNum]); }
         }
 
         if (selectedFreq != lastFreq || mode != lastMode) {

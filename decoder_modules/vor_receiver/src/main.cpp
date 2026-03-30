@@ -11,6 +11,8 @@
 #include <gui/widgets/constellation_diagram.h>
 #include "vor_decoder.h"
 #include <fstream>
+#include <utils/service_registry.h>
+#include <utils/radio_state.h>
 
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
@@ -55,7 +57,7 @@ public:
     void postInit() {}
 
     void enable() {
-        double bw = gui::waterfall.getBandwidth();
+        double bw = ServiceRegistry::get().query<IRadioState>("core")->getBandwidth();
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, 0, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, true);
 
         decoder->setInput(vfo->output);

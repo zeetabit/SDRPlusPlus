@@ -5,8 +5,9 @@
 #include <gui/style.h>
 #include <core.h>
 #include <thread>
-#include <radio_interface.h>
 #include <signal_path/signal_path.h>
+#include <utils/service_registry.h>
+#include <utils/services.h>
 #include <vector>
 #include <gui/tuner.h>
 #include <gui/file_dialogs.h>
@@ -111,13 +112,10 @@ private:
             gui::waterfall.centerFreqMoved = true;
         }
         else {
-            if (core::modComManager.interfaceExists(vfoName)) {
-                if (core::modComManager.getModuleName(vfoName) == "radio") {
-                    int mode = bm.mode;
-                    float bandwidth = bm.bandwidth;
-                    core::modComManager.callInterface(vfoName, RADIO_IFACE_CMD_SET_MODE, &mode, NULL);
-                    core::modComManager.callInterface(vfoName, RADIO_IFACE_CMD_SET_BANDWIDTH, &bandwidth, NULL);
-                }
+            auto* radio = ServiceRegistry::get().query<IRadioControl>(vfoName);
+            if (radio) {
+                radio->setMode(bm.mode);
+                radio->setBandwidth(bm.bandwidth);
             }
             tuner::tune(tuner::TUNER_MODE_NORMAL, vfoName, bm.frequency);
         }
@@ -432,10 +430,9 @@ private:
                 _this->editedBookmark.frequency = gui::waterfall.getCenterFrequency() + sigpath::vfoManager.getOffset(gui::waterfall.selectedVFO);
                 _this->editedBookmark.bandwidth = sigpath::vfoManager.getBandwidth(gui::waterfall.selectedVFO);
                 _this->editedBookmark.mode = 7;
-                if (core::modComManager.getModuleName(gui::waterfall.selectedVFO) == "radio") {
-                    int mode;
-                    core::modComManager.callInterface(gui::waterfall.selectedVFO, RADIO_IFACE_CMD_GET_MODE, NULL, &mode);
-                    _this->editedBookmark.mode = mode;
+                auto* radio = ServiceRegistry::get().query<IRadioControl>(gui::waterfall.selectedVFO);
+                if (radio) {
+                    _this->editedBookmark.mode = radio->getMode();
                 }
             }
 

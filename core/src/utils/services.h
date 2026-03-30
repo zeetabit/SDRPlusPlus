@@ -26,15 +26,15 @@ public:
 class IRecorderControl {
 public:
     virtual ~IRecorderControl() = default;
-    virtual int getMode() = 0;
-    virtual void setMode(int mode) = 0;
-    virtual void start() = 0;
-    virtual void stop() = 0;
+    virtual int getRecorderMode() = 0;
+    virtual void setRecorderMode(int mode) = 0;
+    virtual void startRecording() = 0;
+    virtual void stopRecording() = 0;
 };
 
 class IDemodulatorControl {
 public:
     virtual ~IDemodulatorControl() = default;
-    virtual void start() = 0;
-    virtual void stop() = 0;
+    virtual void startDemod() = 0;
+    virtual void stopDemod() = 0;
 };

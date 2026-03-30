@@ -19,6 +19,20 @@ void SourceManager::registerSource(std::string name, SourceHandler* handler) {
     EventBus::get().publish(events::SourceRegistered{name});
 }
 
+void SourceManager::registerSource(std::string name, ISource* source) {
+    auto handler = std::make_unique<SourceHandler>();
+    handler->stream = source->getStream();
+    handler->ctx = static_cast<void*>(source);
+    handler->selectHandler = [](void* ctx) { static_cast<ISource*>(ctx)->onSelect(); };
+    handler->deselectHandler = [](void* ctx) { static_cast<ISource*>(ctx)->onDeselect(); };
+    handler->startHandler = [](void* ctx) { static_cast<ISource*>(ctx)->start(); };
+    handler->stopHandler = [](void* ctx) { static_cast<ISource*>(ctx)->stop(); };
+    handler->tuneHandler = [](double freq, void* ctx) { static_cast<ISource*>(ctx)->tune(freq); };
+    handler->menuHandler = [](void* ctx) { static_cast<ISource*>(ctx)->drawMenu(); };
+    adapterHandlers[name] = std::move(handler);
+    registerSource(name, adapterHandlers[name].get());
+}
+
 void SourceManager::unregisterSource(std::string name) {
     if (sources.find(name) == sources.end()) {
         flog::error("Tried to unregister non existent source: {0}", name);
@@ -33,6 +47,7 @@ void SourceManager::unregisterSource(std::string name) {
         selectedHandler = NULL;
     }
     sources.erase(name);
+    adapterHandlers.erase(name);  // Clean up adapter handler if this was an ISource registration
     onSourceUnregistered.emit(name);
     EventBus::get().publish(events::SourceUnregistered{name});
 }

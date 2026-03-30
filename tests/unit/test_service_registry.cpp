@@ -93,24 +93,30 @@ TEST_CASE("ServiceRegistry type isolation", "[service_registry]") {
 
 TEST_CASE("ServiceRegistry listNames", "[service_registry]") {
     auto& reg = ServiceRegistry::get();
-    TestImpl a(1), b(2), c(3);
 
-    reg.provide<ITestService>("list_a", &a);
-    reg.provide<ITestService>("list_b", &b);
-    reg.provide<ITestService>("list_c", &c);
+    // Use unique type to isolate from other tests sharing the singleton
+    class IListTest {
+    public:
+        virtual ~IListTest() = default;
+    };
+    class ListImpl : public IListTest {};
 
-    auto names = reg.listNames<ITestService>();
-    REQUIRE(names.size() >= 3);
+    ListImpl a, b, c;
+    reg.provide<IListTest>("list_a", &a);
+    reg.provide<IListTest>("list_b", &b);
+    reg.provide<IListTest>("list_c", &c);
 
-    // Check all three are present (order not guaranteed)
+    auto names = reg.listNames<IListTest>();
+    REQUIRE(names.size() == 3);
+
     std::sort(names.begin(), names.end());
-    REQUIRE(std::find(names.begin(), names.end(), "list_a") != names.end());
-    REQUIRE(std::find(names.begin(), names.end(), "list_b") != names.end());
-    REQUIRE(std::find(names.begin(), names.end(), "list_c") != names.end());
+    REQUIRE(names[0] == "list_a");
+    REQUIRE(names[1] == "list_b");
+    REQUIRE(names[2] == "list_c");
 
-    reg.remove<ITestService>("list_a");
-    reg.remove<ITestService>("list_b");
-    reg.remove<ITestService>("list_c");
+    reg.remove<IListTest>("list_a");
+    reg.remove<IListTest>("list_b");
+    reg.remove<IListTest>("list_c");
 }
 
 TEST_CASE("ServiceRegistry exists", "[service_registry]") {

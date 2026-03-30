@@ -88,6 +88,15 @@ void SinkManager::Stream::setSampleRate(float sampleRate) {
     EventBus::get().publish(events::StreamSampleRateChanged{"", sampleRate});
 }
 
+void SinkManager::registerSinkProvider(std::string name, ISinkProvider* provider) {
+    SinkProvider prov;
+    prov.ctx = static_cast<void*>(provider);
+    prov.create = [](SinkManager::Stream* stream, std::string streamName, void* ctx) -> SinkManager::Sink* {
+        return static_cast<ISinkProvider*>(ctx)->createSink(stream, streamName);
+    };
+    registerSinkProvider(name, prov);
+}
+
 void SinkManager::registerSinkProvider(std::string name, SinkProvider provider) {
     if (providers.find(name) != providers.end()) {
         flog::error("Cannot register sink provider '{0}', this name is already taken", name);

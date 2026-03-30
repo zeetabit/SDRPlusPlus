@@ -3,6 +3,8 @@
 #include <gui/gui.h>
 #include <gui/style.h>
 #include <signal_path/signal_path.h>
+#include <utils/service_registry.h>
+#include <utils/radio_state.h>
 #include <chrono>
 
 SDRPP_MOD_INFO{
@@ -145,11 +147,13 @@ private:
                 auto now = std::chrono::high_resolution_clock::now();
 
                 // Enforce tuning
-                if (gui::waterfall.selectedVFO.empty()) {
+                auto* rs = ServiceRegistry::get().query<IRadioState>("core");
+                std::string selVFO = rs->getSelectedVFO();
+                if (selVFO.empty()) {
                     running = false;
                     return;
                 }
-                tuner::normalTuning(gui::waterfall.selectedVFO, current);
+                tuner::normalTuning(selVFO, current);
 
                 // Check if we are waiting for a tune
                 if (tuning) {
@@ -162,17 +166,17 @@ private:
 
                 // Get FFT data
                 int dataWidth = 0;
-                float* data = gui::waterfall.acquireLatestFFT(dataWidth);
+                float* data = rs->acquireLatestFFT(dataWidth);
                 if (!data) { continue; }
 
                 // Get gather waterfall data
-                double wfCenter = gui::waterfall.getViewOffset() + gui::waterfall.getCenterFrequency();
-                double wfWidth = gui::waterfall.getViewBandwidth();
+                double wfCenter = rs->getViewOffset() + rs->getCenterFrequency();
+                double wfWidth = rs->getViewBandwidth();
                 double wfStart = wfCenter - (wfWidth / 2.0);
                 double wfEnd = wfCenter + (wfWidth / 2.0);
 
                 // Gather VFO data
-                double vfoWidth = sigpath::vfoManager.getBandwidth(gui::waterfall.selectedVFO);
+                double vfoWidth = sigpath::vfoManager.getBandwidth(selVFO);
 
                 if (receiving) {
                     flog::warn("Receiving");
@@ -192,14 +196,14 @@ private:
                     
                     // Search for a signal in scan direction
                     if (findSignal(scanUp, bottomLimit, topLimit, wfStart, wfEnd, wfWidth, vfoWidth, data, dataWidth)) {
-                        gui::waterfall.releaseLatestFFT();
+                        rs->releaseLatestFFT();
                         continue;
                     }
                     
                     // Search for signal in the inverse scan direction if direction isn't enforced
                     if (!reverseLock) {
                         if (findSignal(!scanUp, bottomLimit, topLimit, wfStart, wfEnd, wfWidth, vfoWidth, data, dataWidth)) {
-                            gui::waterfall.releaseLatestFFT();
+                            rs->releaseLatestFFT();
                             continue;
                         }
                     }
@@ -224,7 +228,7 @@ private:
                 }
 
                 // Release FFT Data
-                gui::waterfall.releaseLatestFFT();
+                rs->releaseLatestFFT();
             }
         }
     }

@@ -6,25 +6,29 @@ A phased plan to modernize the SDR++ codebase for improved modularity, type safe
 
 - [Current State Summary](#current-state-summary)
 - [Phase 1: Core Abstractions](#phase-1-core-abstractions) -- DONE
-- [Phase 2: DSP Engine Modernization](#phase-2-dsp-engine-modernization) -- Infrastructure done, migration in progress
-- [Phase 3: GUI Decoupling](#phase-3-gui-decoupling) -- Not started
-- [Phase 4: Module Ecosystem](#phase-4-module-ecosystem) -- Not started
-- [Phase 5: Build & Distribution](#phase-5-build--distribution) -- Not started
-- [Test Infrastructure](#test-infrastructure) -- Not started
+- [Phase 2: DSP Engine Modernization](#phase-2-dsp-engine-modernization) -- DONE
+- [Phase 3: GUI Decoupling](#phase-3-gui-decoupling) -- DONE
+- [Phase 4: Module Ecosystem](#phase-4-module-ecosystem) -- DONE
+- [Phase 5: Build & Distribution](#phase-5-build--distribution) -- DONE
+- [Test Infrastructure](#test-infrastructure) -- DONE
 - [Migration Tracker](#migration-tracker)
+- [Final Summary](#final-summary)
 
 ---
 
 ## Current State Summary
 
-| Metric | Value |
-|--------|-------|
-| Total LOC | ~150K |
-| DSP blocks | 52 (41 Processor, 7 Sink, 4 Operator) |
-| Modules | 53 (28 source, 11 decoder, 5 sink, 9 misc) |
-| Threads at runtime | 15-25 (thread-per-block) |
-| Test coverage | None (no test framework in project) |
-| Branch | `feature/modular-core-abstractions` |
+| Metric | Before | After |
+|--------|--------|-------|
+| Total LOC | ~150K | ~155K (+5K new infra) |
+| DSP blocks on thread pool | 0/55 | 55/55 (100%) |
+| Modules with gui::waterfall coupling | 15 | 2 (overlay drawing only) |
+| modComManager consumer calls | ~30 | 0 (100% migrated) |
+| Module error isolation | None | try/catch on all entry points |
+| Test coverage | None | 25 test cases, 92 assertions |
+| CMake auto-detection | None | Deps, resources, modules dir |
+| Source modules on ISource | 0 | 1 (file_source, adapter for rest) |
+| Branch | `feature/modular-core-abstractions` | |
 
 ### Pain Points Addressed
 
@@ -161,7 +165,7 @@ Modified `core/src/core.cpp`: when `resourcesDirectory` from config doesn't exis
 
 ## Phase 2: DSP Engine Modernization
 
-**Status: Infrastructure DONE, block migration IN PROGRESS**
+**Status: DONE (committed, needs verification)**
 
 Replaces thread-per-block with a configurable thread pool and provides zero-copy splitter for fan-out paths.
 
@@ -334,7 +338,7 @@ These extend `block` directly or spawn multiple threads:
 
 ## Phase 3: GUI Decoupling
 
-**Status: Not started**
+**Status: DONE (uncommitted, needs verification)**
 
 Separates UI from business logic so modules don't need direct references to waterfall, menus, or GUI state.
 
@@ -383,7 +387,7 @@ Separates UI from business logic so modules don't need direct references to wate
 
 ## Phase 4: Module Ecosystem
 
-**Status: Not started**
+**Status: DONE (uncommitted, needs verification)**
 
 Improves module isolation, configuration, and hardware abstraction interfaces.
 
@@ -443,7 +447,7 @@ Improves module isolation, configuration, and hardware abstraction interfaces.
 
 ## Phase 5: Build & Distribution
 
-**Status: Not started**
+**Status: DONE (committed, needs verification)**
 
 Standardizes module discovery and enables a plugin ecosystem.
 
@@ -487,9 +491,9 @@ Standardizes module discovery and enables a plugin ecosystem.
 
 ## Test Infrastructure
 
-**Status: Not started**
+**Status: DONE (committed, needs verification)**
 
-The project has zero tests. This section defines the test strategy.
+25 test cases, 92 assertions, FIRST-compliant. Catch2 single-header framework.
 
 ### Framework Selection
 
@@ -559,48 +563,129 @@ tests/
 
 ## Migration Tracker
 
-### Phase 1 Files
+Legend: Committed = in git, needs verification testing. Uncommitted = working tree only.
 
-| File | Status | Type |
-|------|--------|------|
-| `core/src/api_version.h` | Done | New |
-| `core/src/module_manifest.h` | Done | New |
-| `core/src/utils/event_bus.h` | Done | New |
-| `core/src/utils/events.h` | Done | New |
-| `core/src/utils/service_registry.h` | Done | New |
-| `core/src/utils/services.h` | Done | New |
-| `core/src/module.h` | Done | Modified |
-| `core/src/module.cpp` | Done | Modified |
-| `core/src/core.cpp` | Done | Modified |
-| `core/src/signal_path/source.cpp` | Done | Modified |
-| `core/src/signal_path/sink.cpp` | Done | Modified |
-| `core/src/signal_path/vfo_manager.cpp` | Done | Modified |
-| `core/src/gui/main_window.cpp` | Done | Modified |
-| `source_modules/file_source/src/main.cpp` | Done | Modified |
-| `decoder_modules/radio/src/radio_module.h` | Done | Modified |
+### Phase 1-2 (Committed: `a8bdebb3`, needs verification)
 
-### Phase 2 Files
+Committed but requires full integration testing before considered production-ready.
 
-| File | Status | Type |
-|------|--------|------|
-| `core/src/dsp/engine/thread_pool.h` | Done | New |
-| `core/src/dsp/engine/scheduler.h` | Done | New |
-| `core/src/dsp/engine/scheduled_block.h` | Done | New |
-| `core/src/dsp/engine/scheduled_processor.h` | Done | New |
-| `core/src/dsp/buffer/shared_buffer.h` | Done | New |
-| `core/src/dsp/routing/zero_copy_splitter.h` | Done | New |
-| `core/src/dsp/stream.h` | Done | Modified |
-| `core/src/dsp/math/conjugate.h` | Done | Modified |
-| 51 remaining DSP blocks | Pending | 1-line each (Groups 1-5) |
+| File | Phase | Change |
+|------|-------|--------|
+| `core/src/api_version.h` | P1 | New: API version constants |
+| `core/src/module_manifest.h` | P1 | New: V2 module manifest with capabilities + dependencies |
+| `core/src/utils/event_bus.h` | P1 | New: Typed pub/sub EventBus |
+| `core/src/utils/events.h` | P1 | New: 15 standard event types |
+| `core/src/utils/service_registry.h` | P1 | New: Typed service locator |
+| `core/src/utils/services.h` | P1 | New: IRadioControl, IRecorderControl, IDemodulatorControl |
+| `core/src/module.h` | P1 | V2 manifest support, checkDependencies(), faulted flag |
+| `core/src/module.cpp` | P1+P4 | V2 loader, try/catch error isolation on all entry points |
+| `core/src/core.cpp` | P1+P5 | EventBus emissions, resource auto-detect, pool shutdown |
+| `core/src/signal_path/source.cpp` | P1 | EventBus emissions |
+| `core/src/signal_path/sink.cpp` | P1 | EventBus emissions |
+| `core/src/signal_path/vfo_manager.cpp` | P1 | EventBus emissions |
+| `core/src/gui/main_window.cpp` | P1+P5 | EventBus, modules dir auto-detect, recursive scan |
+| `decoder_modules/radio/src/radio_module.h` | P1 | RadioControlAdapter + ServiceRegistry |
+| `source_modules/file_source/src/main.cpp` | P1 | V2 manifest |
+| `core/src/dsp/engine/thread_pool.h` | P2 | New: Elastic thread pool with timeout shutdown |
+| `core/src/dsp/engine/scheduler.h` | P2 | New: Data-driven scheduler (available for future use) |
+| `core/src/dsp/engine/scheduled_block.h` | P2 | New: Pool-based block execution |
+| `core/src/dsp/engine/scheduled_processor.h` | P2 | New: ScheduledProcessor, ScheduledSink, ScheduledOperator |
+| `core/src/dsp/buffer/shared_buffer.h` | P2 | New: Ref-counted buffer pool |
+| `core/src/dsp/routing/zero_copy_splitter.h` | P2 | New: ZeroCopySplitter |
+| `core/src/dsp/stream.h` | P2 | onDataReady callback hook |
+| `core/src/dsp/chain.h` | P2 | Type-erased ChainLink for Scheduled* compat |
+| 55 DSP block headers | P2 | Migrated to Scheduled* base classes |
+| `core/src/dsp/buffer/frame_buffer.h` | P2 | Pool threads via custom doStart/doStop |
+| `CMakeLists.txt` | P5 | Auto-detect deps, config summary, module dependency tracking |
+| `tests/` (full directory) | Test | Catch2 + 25 test cases, 92 assertions |
+| `docs/architecture.md` | Docs | Full architecture reference |
+| `docs/module-api-v2.md` | Docs | V2 API reference |
+| `docs/modular-rewrite-plan.md` | Docs | This file |
 
-### Phase 3-5 Files
+### Phase 3-4 (Uncommitted -- needs verification)
 
-All pending. See respective phase sections for file lists.
+| File | Phase | Change | Verify |
+|------|-------|--------|--------|
+| `core/src/utils/radio_state.h` | P3 | New: IRadioState read-only interface | Build |
+| `core/src/utils/radio_control.h` | P3 | New: IRadioStateControl mutation interface | Build |
+| `core/src/utils/radio_state_adapter.h` | P3 | New: Adapter wrapping gui::waterfall | Run app, check waterfall works |
+| `core/src/gui/main_window.cpp` | P3 | Register RadioStateAdapter with ServiceRegistry | Run app |
+| `core/src/gui/menus/module_manager.cpp` | P4 | Red highlight + tooltip for faulted modules | Simulate fault |
+| `core/src/utils/services.h` | P4 | Renamed IRecorderControl/IDemodulatorControl methods | Build |
+| `core/src/signal_path/isource.h` | P4 | New: ISource virtual interface | Build |
+| `core/src/signal_path/isink_provider.h` | P4 | New: ISinkProvider (inside sink.h) | Build |
+| `core/src/signal_path/source.h` | P4 | registerSource(name, ISource*) overload | Build |
+| `core/src/signal_path/source.cpp` | P4 | ISource adapter with lambda trampolines | Run file_source |
+| `core/src/signal_path/sink.h` | P4 | ISinkProvider + registerSinkProvider overload | Build |
+| `core/src/signal_path/sink.cpp` | P4 | ISinkProvider adapter | Build |
+| `source_modules/file_source/src/main.cpp` | P4 | Full ISource conversion (proof of concept) | Load file, play WAV |
+| `decoder_modules/*/src/main.cpp` (7 files) | P3 | getBandwidth() via IRadioState | Run decoders |
+| `misc_modules/recorder/src/main.cpp` | P3+P4 | IRadioState + IRecorderControl provider | Record audio |
+| `misc_modules/discord_integration/src/main.cpp` | P3+P4 | IRadioState + IRadioControl query | Check Discord presence |
+| `misc_modules/rigctl_server/src/main.cpp` | P3+P4 | Full ServiceRegistry migration (0 modComManager calls) | Test rigctl |
+| `misc_modules/frequency_manager/src/main.cpp` | P3+P4 | IRadioControl via ServiceRegistry | Apply bookmark |
+| `misc_modules/scanner/src/main.cpp` | P3 | IRadioState for FFT reads | Run scanner |
+| `misc_modules/scheduler/src/actions/tune_vfo.h` | P3 | IRadioState for VFO names | Build |
+| `tests/unit/test_service_registry.cpp` | Test | FIRST compliance fix (isolated listNames) | Run tests |
 
-### Documentation
+### Verification Checklist
 
-| File | Status |
-|------|--------|
-| `docs/architecture.md` | Done |
-| `docs/module-api-v2.md` | Done |
-| `docs/modular-rewrite-plan.md` | Done (this file) |
+All phases (committed and uncommitted) need verification:
+
+**Build & Tests (Phase 1-5):**
+- [ ] `cmake .. && make` builds with zero errors (all default modules)
+- [ ] `./sdrpp_unit_tests` -- 92 assertions, 25 test cases, all pass
+- [ ] App starts without crashes, no ERROR in log (WARN is ok)
+- [ ] App shuts down cleanly (no hang, "Exiting successfully" logged)
+
+**Phase 1-2 (EventBus, DSP Pool):**
+- [ ] Waterfall renders and scrolls smoothly
+- [ ] Audio plays without glitches or dropouts
+- [ ] Start/stop SDR source works repeatedly
+- [ ] Changing sample rate works
+- [ ] VFO drag-tuning works
+
+**Phase 3-4 (GUI Decoupling, Service Interfaces):**
+- [ ] App starts, waterfall renders, audio plays (with RTL-SDR or file source)
+- [ ] File source: load WAV, play, verify center freq lock works
+- [ ] Radio decoder: change mode (AM/FM/SSB), verify bandwidth changes
+- [ ] Recorder: start/stop recording, verify file saved with correct frequency
+- [ ] Frequency manager: create bookmark, apply it, verify mode/bandwidth set
+- [ ] Scanner: run frequency scan, verify FFT reads work
+- [ ] Rigctl server: connect gpredict or rigctl client, verify mode get/set
+- [ ] Faulted module UI: add `throw` in a module constructor, verify red highlight + tooltip
+- [ ] Module manager: add/remove instances, verify config saved
+- [ ] App closes cleanly (no hang at shutdown)
+
+## Final Summary
+
+### What Was Built (All Phases)
+
+| Component | Description |
+|-----------|-------------|
+| **EventBus** | Typed pub/sub with RAII subscriptions, 15 standard events |
+| **ServiceRegistry** | Typed service locator, replaces void* modComManager |
+| **API Versioning** | V2 module manifest with capabilities + dependency resolution |
+| **Elastic Thread Pool** | DSP blocks run on pool threads, grows on demand, timeout shutdown |
+| **55 DSP blocks migrated** | All Processor/Sink/Operator blocks on ScheduledProcessor |
+| **chain<T> type erasure** | ChainLink supports both old and new block types |
+| **IRadioState / IRadioStateControl** | GUI-decoupled radio state access (13/15 modules migrated) |
+| **ISource / ISinkProvider** | Virtual interfaces with backward-compatible adapters |
+| **IRadioControl / IRecorderControl / IDemodulatorControl** | Typed service interfaces replacing modComManager |
+| **Error isolation** | try/catch on all module entry points, faulted flag + UI indicator |
+| **CMake auto-detection** | Dep scanning, config summary, module dir discovery, CLion compat |
+| **Resource auto-detection** | 10 candidate paths for dev builds |
+| **Test infrastructure** | Catch2, 25 test cases, 92 assertions, FIRST compliant |
+| **Documentation** | architecture.md, module-api-v2.md, this plan |
+
+### What Remains (Optional, Non-Blocking)
+
+| Item | Reason to defer |
+|------|----------------|
+| Config schema validation | Every module has different needs, JSON is flexible enough |
+| 27 source modules to ISource | Adapter handles them, migrate opportunistically |
+| 5 sink modules to ISinkProvider | Adapter handles them |
+| frequency_manager FFT overlay | Inherently GUI-coupled (draws on spectrum) |
+| WFM demod FFT overlay | Inherently GUI-coupled (draws RDS data) |
+| Remove modComManager provider registrations | Keep for backward compat with potential external modules |
+| Remove SourceHandler struct | Keep indefinitely as C-compatible API |

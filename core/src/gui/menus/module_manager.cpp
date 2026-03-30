@@ -49,8 +49,19 @@ namespace module_manager_menu {
             for (auto& [name, inst] : core::moduleManager.instances) {
                 ImGui::TableNextRow();
 
+                // Highlight faulted modules
+                bool isFaulted = inst.faulted;
+                if (isFaulted) {
+                    ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, IM_COL32(180, 40, 40, 80));
+                }
+
                 ImGui::TableSetColumnIndex(0);
+                if (isFaulted) { ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 100, 100, 255)); }
                 ImGui::TextUnformatted(name.c_str());
+                if (isFaulted && ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("FAULTED: %s", inst.faultError.c_str());
+                }
+                if (isFaulted) { ImGui::PopStyleColor(); }
 
                 ImGui::TableSetColumnIndex(1);
                 ImGui::TextUnformatted(inst.module.info->name);
@@ -117,7 +128,7 @@ namespace module_manager_menu {
             json instances;
             for (auto [_name, inst] : core::moduleManager.instances) {
                 instances[_name]["module"] = inst.module.info->name;
-                instances[_name]["enabled"] = inst.instance->isEnabled();
+                instances[_name]["enabled"] = (inst.instance && !inst.faulted) ? inst.instance->isEnabled() : false;
             }
             core::configManager.conf["moduleInstances"] = instances;
             core::configManager.release(true);

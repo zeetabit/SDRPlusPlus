@@ -12,6 +12,8 @@
 #include <gui/widgets/folder_select.h>
 #include <gui/widgets/constellation_diagram.h>
 #include "ryfi/receiver.h"
+#include <utils/service_registry.h>
+#include <utils/radio_state.h>
 
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
@@ -59,7 +61,7 @@ public:
     void postInit() {}
 
     void enable() {
-        double bw = gui::waterfall.getBandwidth();
+        double bw = ServiceRegistry::get().query<IRadioState>("core")->getBandwidth();
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, std::clamp<double>(0, -bw / 2.0, bw / 2.0), INPUT_BANDWIDTH, INPUT_SAMPLE_RATE, INPUT_BANDWIDTH, INPUT_BANDWIDTH, true);
 
         rx.setInput(vfo->output);

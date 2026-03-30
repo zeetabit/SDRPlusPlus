@@ -2,9 +2,11 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <memory>
 #include <dsp/stream.h>
 #include <dsp/types.h>
 #include <utils/event.h>
+#include <signal_path/isource.h>
 
 class SourceManager {
 public:
@@ -27,6 +29,7 @@ public:
     };
 
     void registerSource(std::string name, SourceHandler* handler);
+    void registerSource(std::string name, ISource* source);
     void unregisterSource(std::string name);
     void selectSource(std::string name);
     void showSelectedMenu();
@@ -46,6 +49,7 @@ public:
 
 private:
     std::map<std::string, SourceHandler*> sources;
+    std::map<std::string, std::unique_ptr<SourceHandler>> adapterHandlers;
     std::string selectedName;
     SourceHandler* selectedHandler = NULL;
     double tuneOffset;

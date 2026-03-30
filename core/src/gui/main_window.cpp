@@ -29,10 +29,18 @@
 #include <gui/tuner.h>
 #include <utils/event_bus.h>
 #include <utils/events.h>
+#include <utils/service_registry.h>
+#include <utils/radio_state_adapter.h>
+
+static RadioStateAdapter radioStateAdapter;
 
 void MainWindow::init() {
     LoadingScreen::show("Initializing UI");
     gui::waterfall.init();
+
+    // Register radio state services so modules can query without gui:: dependency
+    ServiceRegistry::get().provide<IRadioState>("core", &radioStateAdapter);
+    ServiceRegistry::get().provide<IRadioStateControl>("core", &radioStateAdapter);
     gui::waterfall.setRawFFTSize(fftSize);
 
     credits::init();

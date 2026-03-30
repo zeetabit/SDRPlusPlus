@@ -10,6 +10,8 @@
 #include "decoder.h"
 #include "pocsag/decoder.h"
 #include "flex/decoder.h"
+#include <utils/service_registry.h>
+#include <utils/radio_state.h>
 
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
@@ -63,7 +65,7 @@ public:
     void postInit() {}
 
     void enable() {
-        double bw = gui::waterfall.getBandwidth();
+        double bw = ServiceRegistry::get().query<IRadioState>("core")->getBandwidth();
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, std::clamp<double>(0, -bw / 2.0, bw / 2.0), 12500, 24000, 12500, 12500, true);
         vfo->setSnapInterval(1);
 

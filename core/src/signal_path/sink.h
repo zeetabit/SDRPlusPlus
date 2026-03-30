@@ -88,7 +88,15 @@ public:
         dsp::sink::Null<dsp::stereo_t> ns;
     };
 
+    // Modern virtual interface for sink providers (alternative to SinkProvider struct)
+    class ISinkProvider {
+    public:
+        virtual ~ISinkProvider() = default;
+        virtual SinkManager::Sink* createSink(SinkManager::Stream* stream, std::string streamName) = 0;
+    };
+
     void registerSinkProvider(std::string name, SinkProvider provider);
+    void registerSinkProvider(std::string name, ISinkProvider* provider);
     void unregisterSinkProvider(std::string name);
 
     void registerStream(std::string name, Stream* stream);
