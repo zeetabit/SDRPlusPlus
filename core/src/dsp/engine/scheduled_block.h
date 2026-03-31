@@ -1,6 +1,7 @@
 #pragma once
 #include "../block.h"
 #include "thread_pool.h"
+#include <utils/flog.h>
 
 namespace dsp {
 
@@ -33,9 +34,26 @@ namespace dsp {
             for (auto& in : inputs) { in->stopReader(); }
             for (auto& out : outputs) { out->stopWriter(); }
 
-            // Wait for the pool-based worker to finish
+            // Wait for the pool-based worker to finish (with timeout to avoid deadlock)
             if (workerDone.valid()) {
-                workerDone.get();
+                auto status = workerDone.wait_for(std::chrono::milliseconds(2000));
+                if (status == std::future_status::ready) {
+                    workerDone.get();
+                }
+                else {
+                    flog::warn("scheduled_block::doStop: worker did not finish within 2s, forcing stop");
+                    // Re-signal in case of a race where the worker started after the first signal
+                    for (auto& in : inputs) { in->stopReader(); }
+                    for (auto& out : outputs) { out->stopWriter(); }
+                    // Give it one more chance
+                    auto retry = workerDone.wait_for(std::chrono::milliseconds(500));
+                    if (retry == std::future_status::ready) {
+                        workerDone.get();
+                    }
+                    else {
+                        flog::error("scheduled_block::doStop: worker stuck, abandoning");
+                    }
+                }
             }
 
             // Clear stream stop flags for potential restart

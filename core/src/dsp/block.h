@@ -33,14 +33,17 @@ namespace dsp {
             doStart();
         }
 
-        virtual void stop() {
-            assert(_block_init);
-            std::lock_guard<std::recursive_mutex> lck(ctrlMtx);
-            if (!running) {
-                return;
+        virtual void stop() noexcept {
+            if (!_block_init) { return; }
+            try {
+                std::lock_guard<std::recursive_mutex> lck(ctrlMtx);
+                if (!running) { return; }
+                doStop();
+                running = false;
             }
-            doStop();
-            running = false;
+            catch (...) {
+                running = false;
+            }
         }
 
         void tempStart() {

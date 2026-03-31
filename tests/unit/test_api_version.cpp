@@ -1,12 +1,10 @@
 #include <catch.hpp>
 #include <api_version.h>
 
-TEST_CASE("API version constants", "[api_version]") {
-    REQUIRE(SDRPP_API_VERSION_MAJOR == 2);
-    REQUIRE(SDRPP_API_VERSION_MINOR == 0);
-    REQUIRE(SDRPP_API_VERSION_PATCH == 0);
-
-    REQUIRE(SDRPP_API_VERSION == SDRPP_MAKE_API_VERSION(2, 0, 0));
+TEST_CASE("API version constants are consistent", "[api_version]") {
+    REQUIRE(SDRPP_API_VERSION_MAJOR >= 1);
+    REQUIRE(SDRPP_API_VERSION == SDRPP_MAKE_API_VERSION(
+        SDRPP_API_VERSION_MAJOR, SDRPP_API_VERSION_MINOR, SDRPP_API_VERSION_PATCH));
 }
 
 TEST_CASE("API version encoding", "[api_version]") {
@@ -21,20 +19,23 @@ TEST_CASE("API compatibility check", "[api_version]") {
         REQUIRE(sdrppApiCompatible(SDRPP_API_VERSION));
     }
 
-    SECTION("same major, lower minor is compatible") {
-        REQUIRE(sdrppApiCompatible(SDRPP_MAKE_API_VERSION(2, 0, 0)));
+    SECTION("same major, lower or equal minor is compatible") {
+        REQUIRE(sdrppApiCompatible(SDRPP_MAKE_API_VERSION(SDRPP_API_VERSION_MAJOR, 0, 0)));
+        if (SDRPP_API_VERSION_MINOR > 0) {
+            REQUIRE(sdrppApiCompatible(SDRPP_MAKE_API_VERSION(SDRPP_API_VERSION_MAJOR, SDRPP_API_VERSION_MINOR - 1, 0)));
+        }
     }
 
     SECTION("same major, higher minor is incompatible") {
-        REQUIRE_FALSE(sdrppApiCompatible(SDRPP_MAKE_API_VERSION(2, 1, 0)));
+        REQUIRE_FALSE(sdrppApiCompatible(SDRPP_MAKE_API_VERSION(SDRPP_API_VERSION_MAJOR, SDRPP_API_VERSION_MINOR + 1, 0)));
     }
 
     SECTION("different major is incompatible") {
-        REQUIRE_FALSE(sdrppApiCompatible(SDRPP_MAKE_API_VERSION(1, 0, 0)));
-        REQUIRE_FALSE(sdrppApiCompatible(SDRPP_MAKE_API_VERSION(3, 0, 0)));
+        REQUIRE_FALSE(sdrppApiCompatible(SDRPP_MAKE_API_VERSION(SDRPP_API_VERSION_MAJOR - 1, 0, 0)));
+        REQUIRE_FALSE(sdrppApiCompatible(SDRPP_MAKE_API_VERSION(SDRPP_API_VERSION_MAJOR + 1, 0, 0)));
     }
 
     SECTION("patch version does not affect compatibility") {
-        REQUIRE(sdrppApiCompatible(SDRPP_MAKE_API_VERSION(2, 0, 99)));
+        REQUIRE(sdrppApiCompatible(SDRPP_MAKE_API_VERSION(SDRPP_API_VERSION_MAJOR, 0, 99)));
     }
 }

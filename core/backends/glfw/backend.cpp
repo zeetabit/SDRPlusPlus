@@ -65,10 +65,10 @@ namespace backend {
     int init(std::string resDir) {
         // Load config
         core::configManager.readConfig([&](const json& conf) {
-            winWidth = conf["windowSize"]["w"];
-            winHeight = conf["windowSize"]["h"];
-            maximized = conf["maximized"];
-            fullScreen = conf["fullscreen"];
+            winWidth = conf["windowSize"].value("w", 1280);
+            winHeight = conf["windowSize"].value("h", 720);
+            maximized = conf.value("maximized", false);
+            fullScreen = conf.value("fullscreen", false);
         });
 
         // Setup window

@@ -64,7 +64,17 @@ namespace module_manager_menu {
                 if (isFaulted) { ImGui::PopStyleColor(); }
 
                 ImGui::TableSetColumnIndex(1);
+                bool isLegacy = !inst.module.isV2();
+                if (isLegacy) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 200, 0, 255));
+                    ImGui::TextUnformatted("\xe2\x9a\xa0"); // ⚠ UTF-8
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Legacy V1 module. May not be supported in future versions.");
+                    }
+                    ImGui::SameLine();
+                }
                 ImGui::TextUnformatted(inst.module.info->name);
+                if (isLegacy) { ImGui::PopStyleColor(); }
 
                 ImGui::TableSetColumnIndex(2);
                 ImVec2 cpos = ImGui::GetCursorPos();
@@ -82,7 +92,21 @@ namespace module_manager_menu {
         if (ImGui::GenericDialog("module_mgr_confirm_", confirmOpened, GENERIC_DIALOG_BUTTONS_YES_NO, []() {
                 ImGui::Text("Deleting \"%s\". Are you sure?", toBeRemoved.c_str());
             }) == GENERIC_DIALOG_BUTTON_YES) {
+            // Save module name before deletion so we can mark it as removed
+            std::string modName;
+            auto it = core::moduleManager.instances.find(toBeRemoved);
+            if (it != core::moduleManager.instances.end()) {
+                modName = it->second.module.info->name;
+            }
             core::moduleManager.deleteInstance(toBeRemoved);
+            // Mark as removed in config to prevent auto-recreation
+            if (!modName.empty()) {
+                core::configManager.withConfig([&](json& conf) {
+                    conf["moduleInstances"][toBeRemoved]["module"] = modName;
+                    conf["moduleInstances"][toBeRemoved]["enabled"] = false;
+                    conf["moduleInstances"][toBeRemoved]["removed"] = true;
+                });
+            }
             modified = true;
         }
 
@@ -123,10 +147,17 @@ namespace module_manager_menu {
         }
 
         if (modified) {
-            // Update enabled and disabled modules
             core::configManager.withConfig([](json& conf) {
+                // Preserve removed entries, update live instances
                 json instances;
-                for (auto [_name, inst] : core::moduleManager.instances) {
+                if (conf.contains("moduleInstances")) {
+                    for (auto& [k, v] : conf["moduleInstances"].items()) {
+                        if (v.value("removed", false)) {
+                            instances[k] = v;
+                        }
+                    }
+                }
+                for (auto& [_name, inst] : core::moduleManager.instances) {
                     instances[_name]["module"] = inst.module.info->name;
                     instances[_name]["enabled"] = (inst.instance && !inst.faulted) ? inst.instance->isEnabled() : false;
                 }

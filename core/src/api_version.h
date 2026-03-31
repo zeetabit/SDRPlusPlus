@@ -5,7 +5,7 @@
 // Bump MINOR when adding new optional features modules can use.
 // Bump PATCH for non-breaking fixes in the core API headers.
 #define SDRPP_API_VERSION_MAJOR 2
-#define SDRPP_API_VERSION_MINOR 0
+#define SDRPP_API_VERSION_MINOR 1
 #define SDRPP_API_VERSION_PATCH 0
 
 #define SDRPP_API_VERSION ((SDRPP_API_VERSION_MAJOR << 16) | (SDRPP_API_VERSION_MINOR << 8) | SDRPP_API_VERSION_PATCH)

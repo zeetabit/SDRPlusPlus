@@ -1,12 +1,19 @@
 #include <module.h>
+#include <module_config.h>
+#include <config.h>
+#include <core.h>
 #include <filesystem>
 #include <utils/flog.h>
 #include <utils/event_bus.h>
 #include <utils/events.h>
 
+ModuleManager::Instance_t::~Instance_t() = default;
+
 ModuleManager::Module_t ModuleManager::loadModule(std::string path) {
     Module_t mod;
     mod.infoV2 = nullptr;
+    mod.createInstanceV2 = nullptr;
+    mod.configManager = nullptr;
 
     // On android, the path has to be relative, don't make it absolute
 #ifndef __ANDROID__
@@ -31,9 +38,12 @@ ModuleManager::Module_t ModuleManager::loadModule(std::string path) {
     mod.info = (ModuleInfo_t*)GetProcAddress(mod.handle, "_INFO_");
     mod.init = (void (*)())GetProcAddress(mod.handle, "_INIT_");
     mod.createInstance = (Instance * (*)(std::string)) GetProcAddress(mod.handle, "_CREATE_INSTANCE_");
+    mod.createInstanceV2 = (Instance * (*)(std::string, ModuleConfig*)) GetProcAddress(mod.handle, "_CREATE_INSTANCE_V2_");
     mod.deleteInstance = (void (*)(Instance*))GetProcAddress(mod.handle, "_DELETE_INSTANCE_");
     mod.end = (void (*)())GetProcAddress(mod.handle, "_END_");
     mod.infoV2 = (ModuleInfoV2*)GetProcAddress(mod.handle, SDRPP_HAS_V2_INFO);
+    mod.configManager = (ConfigManager**)GetProcAddress(mod.handle, "_CONFIG_") ?
+        *(ConfigManager**)GetProcAddress(mod.handle, "_CONFIG_") : nullptr;
 #else
     mod.handle = dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL);
     if (mod.handle == NULL) {
@@ -44,9 +54,12 @@ ModuleManager::Module_t ModuleManager::loadModule(std::string path) {
     mod.info = (ModuleInfo_t*)dlsym(mod.handle, "_INFO_");
     mod.init = (void (*)())dlsym(mod.handle, "_INIT_");
     mod.createInstance = (Instance * (*)(std::string)) dlsym(mod.handle, "_CREATE_INSTANCE_");
+    mod.createInstanceV2 = (Instance * (*)(std::string, ModuleConfig*)) dlsym(mod.handle, "_CREATE_INSTANCE_V2_");
     mod.deleteInstance = (void (*)(Instance*))dlsym(mod.handle, "_DELETE_INSTANCE_");
     mod.end = (void (*)())dlsym(mod.handle, "_END_");
     mod.infoV2 = (ModuleInfoV2*)dlsym(mod.handle, SDRPP_HAS_V2_INFO);
+    ConfigManager** configPtr = (ConfigManager**)dlsym(mod.handle, "_CONFIG_");
+    mod.configManager = configPtr ? *configPtr : nullptr;
 #endif
     if (mod.info == NULL) {
         flog::error("{0} is missing _INFO_ symbol", path);
@@ -116,6 +129,19 @@ ModuleManager::Module_t ModuleManager::loadModule(std::string path) {
         return mod;
     }
 
+    // For V1 modules without _CONFIG_, create a proxy ConfigManager
+    if (!mod.configManager) {
+        std::string modName = mod.info->name;
+        auto proxy = std::make_unique<ConfigManager>();
+        std::string root = (std::string)core::args["root"];
+        proxy->setPath(root + "/" + modName + "_config.json");
+        proxy->load(json({}));
+        proxy->enableAutoSave();
+        mod.configManager = proxy.get();
+        proxyConfigs[modName] = std::move(proxy);
+        flog::info("Created proxy config for V1 module '{0}'", modName);
+    }
+
     modules[mod.info->name] = mod;
     return mod;
 }
@@ -157,15 +183,35 @@ int ModuleManager::createInstance(std::string name, std::string module) {
     Instance_t inst;
     inst.module = modules[module];
 
+    // Always create ModuleConfig — configManager is never null after loadModule
+    inst.moduleConfig = std::make_unique<ModuleConfig>(inst.module.configManager, name);
+
+    // Apply manifest defaults if V2.1 module declares them
+    if (inst.module.infoV2 && inst.module.infoV2->configDefaults) {
+        try {
+            json defaults = json::parse(inst.module.infoV2->configDefaults);
+            inst.moduleConfig->applyDefaults(defaults);
+        }
+        catch (const std::exception& e) {
+            flog::error("Failed to parse config defaults for module '{0}': {1}", module, e.what());
+        }
+    }
+
+    // Create instance: prefer V2 constructor, fall back to V1
     try {
-        inst.instance = inst.module.createInstance(name);
+        if (inst.module.createInstanceV2) {
+            inst.instance = inst.module.createInstanceV2(name, inst.moduleConfig.get());
+        }
+        else {
+            inst.instance = inst.module.createInstance(name);
+        }
     }
     catch (const std::exception& e) {
         flog::error("Module '{0}' threw exception creating instance '{1}': {2}", module, name, e.what());
         inst.faulted = true;
         inst.faultError = e.what();
         inst.instance = nullptr;
-        instances[name] = inst;
+        instances[name] = std::move(inst);
         return -1;
     }
     catch (...) {
@@ -173,11 +219,11 @@ int ModuleManager::createInstance(std::string name, std::string module) {
         inst.faulted = true;
         inst.faultError = "Unknown exception";
         inst.instance = nullptr;
-        instances[name] = inst;
+        instances[name] = std::move(inst);
         return -1;
     }
 
-    instances[name] = inst;
+    instances[name] = std::move(inst);
     onInstanceCreated.emit(name);
     EventBus::get().publish(events::ModuleInstanceCreated{name, module});
     return 0;
@@ -188,24 +234,35 @@ int ModuleManager::deleteInstance(std::string name) {
         flog::error("Tried to remove non-existent instance '{0}'", name);
         return -1;
     }
+    flog::info("[DELETE] Emitting onInstanceDelete for '{0}'", name);
     onInstanceDelete.emit(name);
-    Instance_t inst = instances[name];
+    Instance_t inst = std::move(instances[name]);
 
     if (inst.instance && !inst.faulted) {
+        flog::info("[DELETE] Calling deleteInstance for '{0}' (module: {1})", name, inst.module.info->name);
         try {
             inst.module.deleteInstance(inst.instance);
         }
         catch (const std::exception& e) {
-            flog::error("Module threw exception deleting instance '{0}': {1}", name, e.what());
+            flog::error("[DELETE] Exception deleting '{0}': {1}", name, e.what());
         }
         catch (...) {
-            flog::error("Module threw unknown exception deleting instance '{0}'", name);
+            flog::error("[DELETE] Unknown exception deleting '{0}'", name);
         }
+        flog::info("[DELETE] deleteInstance returned for '{0}'", name);
+    }
+    else {
+        flog::info("[DELETE] Skipping deleteInstance for '{0}' (faulted={1}, hasInstance={2})",
+            name, inst.faulted, (inst.instance != nullptr));
     }
 
+    flog::info("[DELETE] Destroying ModuleConfig for '{0}'", name);
+    inst.moduleConfig.reset();
+    flog::info("[DELETE] Erasing from instances map '{0}'", name);
     instances.erase(name);
     onInstanceDeleted.emit(name);
     EventBus::get().publish(events::ModuleInstanceDeleted{name});
+    flog::info("[DELETE] Done with '{0}'", name);
     return 0;
 }
 

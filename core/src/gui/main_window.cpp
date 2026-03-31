@@ -22,6 +22,7 @@
 #include <gui/menus/theme.h>
 #include <gui/dialogs/credits.h>
 #include <filesystem>
+#include <set>
 #include <signal_path/source.h>
 #include <gui/dialogs/loading_screen.h>
 #include <gui/colormaps.h>
@@ -194,14 +195,65 @@ void MainWindow::init() {
 #endif
     }
 
-    // Create module instances
+    // Create module instances from config (skip removed entries)
     for (auto const& [name, _module] : modList) {
-        std::string mod = _module["module"];
-        bool enabled = _module["enabled"];
+        std::string mod;
+        bool enabled = true;
+        bool removed = false;
+        if (_module.is_string()) {
+            mod = _module.get<std::string>();
+        }
+        else {
+            mod = _module["module"];
+            enabled = _module.value("enabled", true);
+            removed = _module.value("removed", false);
+        }
+        if (removed) {
+            flog::info("Skipping removed instance {0} ({1})", name, mod);
+            continue;
+        }
         flog::info("Initializing {0} ({1})", name, mod);
         LoadingScreen::show("Initializing " + name + " (" + mod + ")");
         core::moduleManager.createInstance(name, mod);
         if (!enabled) { core::moduleManager.disableInstance(name); }
+    }
+
+    // Auto-create instances for loaded modules that have no config entry yet.
+    // Modules already in moduleInstances (active, disabled, or removed) are skipped.
+    std::set<std::string> knownModules;
+    for (auto const& [name, _module] : modList) {
+        std::string mod;
+        if (_module.is_string()) { mod = _module.get<std::string>(); }
+        else { mod = _module["module"].get<std::string>(); }
+        knownModules.insert(mod);
+    }
+    for (auto const& [modName, mod] : core::moduleManager.modules) {
+        if (knownModules.count(modName)) { continue; }
+        if (mod.info->maxInstances == 0) { continue; }
+
+        // Generate a display name from the module name (e.g. "radiosonde_decoder" → "Radiosonde Decoder")
+        std::string displayName;
+        bool capitalize = true;
+        for (char c : modName) {
+            if (c == '_') { displayName += ' '; capitalize = true; continue; }
+            displayName += capitalize ? toupper(c) : c;
+            capitalize = false;
+        }
+
+        flog::info("Auto-creating instance {0} ({1})", displayName, modName);
+        LoadingScreen::show("Initializing " + displayName);
+        try {
+            core::moduleManager.createInstance(displayName, modName);
+
+            // Persist to config so it appears on next launch
+            core::configManager.withConfig([&](json& conf) {
+                conf["moduleInstances"][displayName]["module"] = modName;
+                conf["moduleInstances"][displayName]["enabled"] = true;
+            });
+        }
+        catch (const std::exception& e) {
+            flog::error("Failed to auto-create instance {0}: {1}", displayName, e.what());
+        }
     }
 
     // Load color maps
@@ -240,13 +292,13 @@ void MainWindow::init() {
     double frequency;
     bool centerTuning;
     core::configManager.readConfig([&](const json& conf) {
-        fftControls.fftMin = conf["min"];
-        fftControls.fftMax = conf["max"];
-        frequency = conf["frequency"];
-        menuPanel.showMenu = conf["showMenu"];
-        menuPanel.menuWidth = conf["menuWidth"];
-        fftControls.fftHeight = conf["fftHeight"];
-        centerTuning = conf["centerTuning"];
+        fftControls.fftMin = conf.value("min", -120.0);
+        fftControls.fftMax = conf.value("max", 0.0);
+        frequency = conf.value("frequency", 100000000.0);
+        menuPanel.showMenu = conf.value("showMenu", true);
+        menuPanel.menuWidth = conf.value("menuWidth", 300);
+        fftControls.fftHeight = conf.value("fftHeight", 300);
+        centerTuning = conf.value("centerTuning", false);
     });
 
     gui::waterfall.setFFTMin(fftControls.fftMin);

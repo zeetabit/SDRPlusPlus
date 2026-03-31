@@ -25,6 +25,7 @@ namespace vfo_color_menu {
     void init() {
         // Load colors from config
         core::configManager.withConfig([](json& conf) {
+            if (!conf.contains("vfoColors")) { conf["vfoColors"] = json::object(); }
             for (auto& [name, val] : conf["vfoColors"].items()) {
                 if (!val.is_string()) {
                     conf["vfoColors"][name] = "#FFFFFF";

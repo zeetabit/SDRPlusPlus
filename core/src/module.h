@@ -1,10 +1,14 @@
 #pragma once
 #include <string>
 #include <map>
+#include <memory>
 #include <json.hpp>
 #include <utils/event.h>
 #include <api_version.h>
 #include <module_manifest.h>
+
+class ConfigManager;
+class ModuleConfig;
 
 #ifdef _WIN32
 #ifdef SDRPP_IS_CORE
@@ -62,8 +66,10 @@ public:
         ModuleInfoV2* infoV2;  // Non-null if module exports V2 manifest
         void (*init)();
         ModuleManager::Instance* (*createInstance)(std::string name);
+        ModuleManager::Instance* (*createInstanceV2)(std::string name, ModuleConfig* config);  // V2.1, nullable
         void (*deleteInstance)(ModuleManager::Instance* instance);
         void (*end)();
+        ConfigManager* configManager;  // V2.1: module's global ConfigManager, nullable
 
         bool isV2() const { return infoV2 != nullptr; }
 
@@ -97,8 +103,14 @@ public:
     struct Instance_t {
         ModuleManager::Module_t module;
         ModuleManager::Instance* instance;
+        std::unique_ptr<ModuleConfig> moduleConfig;  // Always present after createInstance
         bool faulted = false;
         std::string faultError;
+
+        Instance_t() = default;
+        Instance_t(Instance_t&&) = default;
+        Instance_t& operator=(Instance_t&&) = default;
+        ~Instance_t();  // Defined in module.cpp where ModuleConfig is complete
     };
 
     ModuleManager::Module_t loadModule(std::string path);
@@ -125,7 +137,23 @@ public:
 
     std::map<std::string, ModuleManager::Module_t> modules;
     std::map<std::string, ModuleManager::Instance_t> instances;
+
+    // Proxy ConfigManagers for V1 modules that don't export _CONFIG_.
+    // Keyed by module name. Lifetime matches the ModuleManager.
+    std::map<std::string, std::unique_ptr<ConfigManager>> proxyConfigs;
 };
 
 // V1 module info macro (still works for all existing modules)
 #define SDRPP_MOD_INFO MOD_EXPORT const ModuleManager::ModuleInfo_t _INFO_
+
+// V2.1 macros: export the module's ConfigManager and provide both V1 and V2 create-instance symbols.
+#define SDRPP_MOD_CONFIG(configVar) \
+    MOD_EXPORT ConfigManager* _CONFIG_ = &configVar;
+
+#define SDRPP_CREATE_INSTANCE_V2(ClassName) \
+    MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) { \
+        return new ClassName(name, nullptr); \
+    } \
+    MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_V2_(std::string name, ModuleConfig* config) { \
+        return new ClassName(name, config); \
+    }

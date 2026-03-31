@@ -63,7 +63,11 @@ public:
     }
 
     ~WeatherSatDecoderModule() {
+        gui::menu.removeEntry(name);
         decoder->stop();
+        if (vfo) {
+            sigpath::vfoManager.deleteVFO(vfo);
+        }
     }
 
     void postInit() {}

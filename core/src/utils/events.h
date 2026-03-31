@@ -63,4 +63,9 @@ struct FFTRedraw {
     float* data;
 };
 
+// --- Application lifecycle ---
+// Published before shutdown begins. Handlers should save state, flush buffers,
+// and release external resources. Handlers run synchronously on the main thread.
+struct ShutdownRequested {};
+
 } // namespace events

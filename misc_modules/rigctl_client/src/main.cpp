@@ -30,19 +30,18 @@ public:
         // Load default
         strcpy(host, "127.0.0.1");
 
-        // Load config
-        config.readConfig([&](const json& conf) {
-            if (conf[name].contains("host")) {
-                std::string h = conf[name]["host"];
-                strcpy(host, h.c_str());
+        // Load config (defaults defined here, written to config on first run)
+        config.withConfig([&](json& conf) {
+            if (!conf.contains(name)) {
+                conf[name]["host"] = "localhost";
+                conf[name]["port"] = 4532;
+                conf[name]["ifFreq"] = 0.0;
             }
-            if (conf[name].contains("port")) {
-                port = conf[name]["port"];
-                port = std::clamp<int>(port, 1, 65535);
-            }
-            if (conf[name].contains("ifFreq")) {
-                ifFreq = conf[name]["ifFreq"];
-            }
+            json& c = conf[name];
+            std::string h = c.value("host", std::string("localhost"));
+            strcpy(host, h.c_str());
+            port = std::clamp<int>(c.value("port", 4532), 1, 65535);
+            ifFreq = c.value("ifFreq", 0.0);
         });
 
         _retuneHandler.ctx = this;

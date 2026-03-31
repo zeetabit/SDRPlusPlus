@@ -60,7 +60,7 @@ void MenuPanel::draw(bool lockControls) {
                 }
                 conf["menuElements"] = arr;
 
-                for (auto [_name, inst] : core::moduleManager.instances) {
+                for (auto& [_name, inst] : core::moduleManager.instances) {
                     if (!conf["moduleInstances"].contains(_name)) { continue; }
                     conf["moduleInstances"][_name]["enabled"] = inst.instance->isEnabled();
                 }

@@ -82,41 +82,35 @@ public:
             packetSizes.define(i, buf, i);
         }
 
-        // Load config
+        // Load config (defaults defined here, written to config on first run)
         bool autoStart = false;
         Mode nMode = MODE_BASEBAND;
-        config.readConfig([&](const json& conf) {
-            if (conf[name].contains("mode")) {
-                std::string modeStr = conf[name]["mode"];
-                if (modes.keyExists(modeStr)) { nMode = modes.value(modes.keyId(modeStr)); }
+        config.withConfig([&](json& conf) {
+            if (!conf.contains(name)) {
+                conf[name]["mode"] = "Baseband";
+                conf[name]["samplerate"] = 1000000;
+                conf[name]["protocol"] = "TCP (Server)";
+                conf[name]["sampleType"] = "Float32";
+                conf[name]["packetSize"] = 8192;
+                conf[name]["host"] = "localhost";
+                conf[name]["port"] = 1234;
+                conf[name]["running"] = false;
             }
-            if (conf[name].contains("samplerate")) {
-                int sr = conf[name]["samplerate"];
-                if (samplerates.keyExists(sr)) { samplerate = samplerates.value(samplerates.keyId(sr)); }
-            }
-            if (conf[name].contains("protocol")) {
-                std::string protoStr = conf[name]["protocol"];
-                if (protocols.keyExists(protoStr)) { proto = protocols.value(protocols.keyId(protoStr)); }
-            }
-            if (conf[name].contains("sampleType")) {
-                std::string sampTypeStr = conf[name]["sampleType"];
-                if (sampleTypes.keyExists(sampTypeStr)) { sampType = sampleTypes.value(sampleTypes.keyId(sampTypeStr)); }
-            }
-            if (conf[name].contains("packetSize")) {
-                int size = conf[name]["packetSize"];
-                if (packetSizes.keyExists(size)) { packetSize = packetSizes.value(packetSizes.keyId(size)); }
-            }
-            if (conf[name].contains("host")) {
-                std::string hostStr = conf[name]["host"];
-                strcpy(hostname, hostStr.c_str());
-            }
-            if (conf[name].contains("port")) {
-                port = conf[name]["port"];
-                port = std::clamp<int>(port, 1, 65535);
-            }
-            if (conf[name].contains("running")) {
-                autoStart = conf[name]["running"];
-            }
+            json& c = conf[name];
+            std::string modeStr = c.value("mode", std::string("Baseband"));
+            if (modes.keyExists(modeStr)) { nMode = modes.value(modes.keyId(modeStr)); }
+            int sr = c.value("samplerate", 1000000);
+            if (samplerates.keyExists(sr)) { samplerate = samplerates.value(samplerates.keyId(sr)); }
+            std::string protoStr = c.value("protocol", std::string("TCP (Server)"));
+            if (protocols.keyExists(protoStr)) { proto = protocols.value(protocols.keyId(protoStr)); }
+            std::string sampTypeStr = c.value("sampleType", std::string("Float32"));
+            if (sampleTypes.keyExists(sampTypeStr)) { sampType = sampleTypes.value(sampleTypes.keyId(sampTypeStr)); }
+            int size = c.value("packetSize", 8192);
+            if (packetSizes.keyExists(size)) { packetSize = packetSizes.value(packetSizes.keyId(size)); }
+            std::string hostStr = c.value("host", std::string("localhost"));
+            strcpy(hostname, hostStr.c_str());
+            port = std::clamp<int>(c.value("port", 1234), 1, 65535);
+            autoStart = c.value("running", false);
         });
 
         // Set menu IDs

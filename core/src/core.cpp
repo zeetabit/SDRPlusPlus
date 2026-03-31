@@ -12,6 +12,7 @@
 #include <config.h>
 #include <core.h>
 #include <filesystem>
+#include <set>
 #include <gui/menus/theme.h>
 #include <backend.h>
 
@@ -40,8 +41,10 @@ namespace core {
     ModuleManager moduleManager;
     ModuleComManager modComManager;
     CommandArgsParser args;
+    bool shuttingDown = false;
 
     void setInputSampleRate(double samplerate) {
+        if (shuttingDown) { return; }
         // Forward this to the server
         if (args["server"].b()) { server::setInputSampleRate(samplerate); return; }
         
@@ -116,173 +119,19 @@ int sdrpp_main(int argc, char* argv[]) {
     }
 
     // ======== DEFAULT CONFIG ========
+    // Only structural keys and platform-specific paths.
+    // All component-specific defaults are owned by their respective readers
+    // using conf.value("key", default) for crash-safe access.
     json defConfig;
-    defConfig["bandColors"]["amateur"] = "#FF0000FF";
-    defConfig["bandColors"]["aviation"] = "#00FF00FF";
-    defConfig["bandColors"]["broadcast"] = "#0000FFFF";
-    defConfig["bandColors"]["marine"] = "#00FFFFFF";
-    defConfig["bandColors"]["military"] = "#FFFF00FF";
-    defConfig["bandPlan"] = "General";
-    defConfig["bandPlanEnabled"] = true;
-    defConfig["bandPlanPos"] = 0;
-    defConfig["centerTuning"] = false;
-    defConfig["colorMap"] = "Classic";
-    defConfig["fftHold"] = false;
-    defConfig["fftHoldSpeed"] = 60;
-    defConfig["fftSmoothing"] = false;
-    defConfig["fftSmoothingSpeed"] = 100;
-    defConfig["snrSmoothing"] = false;
-    defConfig["snrSmoothingSpeed"] = 20;
-    defConfig["fastFFT"] = false;
-    defConfig["fftHeight"] = 300;
-    defConfig["fftRate"] = 20;
-    defConfig["fftSize"] = 65536;
-    defConfig["fftWindow"] = 2;
-    defConfig["frequency"] = 100000000.0;
-    defConfig["fullWaterfallUpdate"] = false;
-    defConfig["max"] = 0.0;
-    defConfig["maximized"] = false;
-    defConfig["fullscreen"] = false;
-
-    // Menu
     defConfig["menuElements"] = json::array();
-
-    defConfig["menuElements"][0]["name"] = "Source";
-    defConfig["menuElements"][0]["open"] = true;
-
-    defConfig["menuElements"][1]["name"] = "Radio";
-    defConfig["menuElements"][1]["open"] = true;
-
-    defConfig["menuElements"][2]["name"] = "Recorder";
-    defConfig["menuElements"][2]["open"] = true;
-
-    defConfig["menuElements"][3]["name"] = "Sinks";
-    defConfig["menuElements"][3]["open"] = true;
-
-    defConfig["menuElements"][4]["name"] = "Frequency Manager";
-    defConfig["menuElements"][4]["open"] = true;
-
-    defConfig["menuElements"][5]["name"] = "VFO Color";
-    defConfig["menuElements"][5]["open"] = true;
-
-    defConfig["menuElements"][6]["name"] = "Band Plan";
-    defConfig["menuElements"][6]["open"] = true;
-
-    defConfig["menuElements"][7]["name"] = "Display";
-    defConfig["menuElements"][7]["open"] = true;
-
-    defConfig["menuWidth"] = 300;
-    defConfig["min"] = -120.0;
-
-    // Module instances
-    defConfig["moduleInstances"]["Airspy Source"]["module"] = "airspy_source";
-    defConfig["moduleInstances"]["Airspy Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["AirspyHF+ Source"]["module"] = "airspyhf_source";
-    defConfig["moduleInstances"]["AirspyHF+ Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["Audio Source"]["module"] = "audio_source";
-    defConfig["moduleInstances"]["Audio Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["BladeRF Source"]["module"] = "bladerf_source";
-    defConfig["moduleInstances"]["BladeRF Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["Dragon Labs Source"]["module"] = "dragonlabs_source";
-    defConfig["moduleInstances"]["Dragon Labs Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["File Source"]["module"] = "file_source";
-    defConfig["moduleInstances"]["File Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["FobosSDR Source"]["module"] = "fobossdr_source";
-    defConfig["moduleInstances"]["FobosSDR Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["HackRF Source"]["module"] = "hackrf_source";
-    defConfig["moduleInstances"]["HackRF Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["Harogic Source"]["module"] = "harogic_source";
-    defConfig["moduleInstances"]["Harogic Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["Hermes Source"]["module"] = "hermes_source";
-    defConfig["moduleInstances"]["Hermes Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["HydraSDR Source"]["module"] = "hydrasdr_source";
-    defConfig["moduleInstances"]["HydraSDR Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["LimeSDR Source"]["module"] = "limesdr_source";
-    defConfig["moduleInstances"]["LimeSDR Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["Network Source"]["module"] = "network_source";
-    defConfig["moduleInstances"]["Network Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["PerseusSDR Source"]["module"] = "perseus_source";
-    defConfig["moduleInstances"]["PerseusSDR Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["PlutoSDR Source"]["module"] = "plutosdr_source";
-    defConfig["moduleInstances"]["PlutoSDR Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["RFNM Source"]["module"] = "rfnm_source";
-    defConfig["moduleInstances"]["RFNM Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["RFspace Source"]["module"] = "rfspace_source";
-    defConfig["moduleInstances"]["RFspace Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["RTL-SDR Source"]["module"] = "rtl_sdr_source";
-    defConfig["moduleInstances"]["RTL-SDR Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["RTL-TCP Source"]["module"] = "rtl_tcp_source";
-    defConfig["moduleInstances"]["RTL-TCP Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["SDRplay Source"]["module"] = "sdrplay_source";
-    defConfig["moduleInstances"]["SDRplay Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["SDR++ Server Source"]["module"] = "sdrpp_server_source";
-    defConfig["moduleInstances"]["SDR++ Server Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["Spectran HTTP Source"]["module"] = "spectran_http_source";
-    defConfig["moduleInstances"]["Spectran HTTP Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["SpyServer Source"]["module"] = "spyserver_source";
-    defConfig["moduleInstances"]["SpyServer Source"]["enabled"] = true;
-    defConfig["moduleInstances"]["USRP Source"]["module"] = "usrp_source";
-    defConfig["moduleInstances"]["USRP Source"]["enabled"] = true;
-
-    defConfig["moduleInstances"]["Audio Sink"] = "audio_sink";
-    defConfig["moduleInstances"]["Network Sink"] = "network_sink";
-
-    defConfig["moduleInstances"]["Radio"] = "radio";
-
-    defConfig["moduleInstances"]["Frequency Manager"] = "frequency_manager";
-    defConfig["moduleInstances"]["Recorder"] = "recorder";
-    defConfig["moduleInstances"]["Rigctl Server"] = "rigctl_server";
-    // defConfig["moduleInstances"]["Rigctl Client"] = "rigctl_client";
-    // TODO: Enable rigctl_client when ready
-    // defConfig["moduleInstances"]["Scanner"] = "scanner";
-    // TODO: Enable scanner when ready
-
-
-    // Themes
-    defConfig["theme"] = "Dark";
-#ifdef __ANDROID__
-    defConfig["uiScale"] = 3.0f;
-#else
-    defConfig["uiScale"] = 1.0f;
-#endif
-
+    defConfig["moduleInstances"] = json::object();
     defConfig["modules"] = json::array();
-
-    defConfig["offsets"]["SpyVerter"] = 120000000.0;
-    defConfig["offsets"]["Ham-It-Up"] = 125000000.0;
-    defConfig["offsets"]["MMDS S-band (1998MHz)"] = -1998000000.0;
-    defConfig["offsets"]["DK5AV X-Band"] = -6800000000.0;
-    defConfig["offsets"]["Ku LNB (9750MHz)"] = -9750000000.0;
-    defConfig["offsets"]["Ku LNB (10700MHz)"] = -10700000000.0;
-
-    defConfig["selectedOffset"] = "None";
-    defConfig["manualOffset"] = 0.0;
-    defConfig["showMenu"] = true;
-    defConfig["showWaterfall"] = true;
-    defConfig["source"] = "";
-    defConfig["decimation"] = 1;
-    defConfig["iqCorrection"] = false;
-    defConfig["invertIQ"] = false;
-
-    defConfig["streams"]["Radio"]["muted"] = false;
-    defConfig["streams"]["Radio"]["sink"] = "Audio";
-    defConfig["streams"]["Radio"]["volume"] = 1.0f;
-
+    defConfig["offsets"] = json::object();
+    defConfig["streams"] = json::object();
+    defConfig["vfoOffsets"] = json::object();
+    defConfig["vfoColors"] = json::object();
     defConfig["windowSize"]["h"] = 720;
     defConfig["windowSize"]["w"] = 1280;
-
-    defConfig["vfoOffsets"] = json::object();
-
-    defConfig["vfoColors"]["Radio"] = "#FFFFFF";
-    defConfig["bandwidth_slider"] = 0.0f;
-    defConfig["bandwidth_view"] = 0.0f;
-    defConfig["bandwidth_offset"] = 0.0;
-
-#ifdef __ANDROID__
-    defConfig["lockMenuOrder"] = true;
-#else
-    defConfig["lockMenuOrder"] = false;
-#endif
 
 #if defined(_WIN32)
     defConfig["modulesDirectory"] = "./modules";
@@ -342,13 +191,28 @@ int sdrpp_main(int argc, char* argv[]) {
             }
         }
 
-        // Remove unused elements
+        // Remove keys that are not structural (defConfig) and not component-owned.
+        // Component keys are registered here so cleanup doesn't wipe user settings.
+        static const std::set<std::string> componentKeys = {
+            // Source menu
+            "source", "manualOffset", "selectedOffset", "iqCorrection",
+            "invertIQ", "decimation",
+            // Display / waterfall
+            "min", "max", "frequency", "showMenu", "menuWidth",
+            "fftHeight", "centerTuning", "fftSpeed", "fftSmoothing",
+            // Theme / UI
+            "theme", "uiScale",
+            // Band colors
+            "bandColors",
+            // Platform paths
+            "modulesDirectory", "resourcesDirectory",
+        };
         auto items = conf.items();
         auto newConf = conf;
         bool configCorrected = false;
         for (auto const& item : items) {
-            if (!defConfig.contains(item.key())) {
-                flog::info("Unused key in config {0}, repairing", item.key());
+            if (!defConfig.contains(item.key()) && !componentKeys.count(item.key())) {
+                flog::info("Removing obsolete config key '{0}'", item.key());
                 newConf.erase(item.key());
                 configCorrected = true;
             }
@@ -366,7 +230,7 @@ int sdrpp_main(int argc, char* argv[]) {
         }
 
         // Load UI scaling
-        style::uiScale = conf["uiScale"];
+        style::uiScale = conf.value("uiScale", 1.0f);
     });
 
     if (serverMode) { return server::main(); }
@@ -374,8 +238,8 @@ int sdrpp_main(int argc, char* argv[]) {
     std::string resDir;
     json bandColors;
     core::configManager.readConfig([&](const json& conf) {
-        resDir = conf["resourcesDirectory"];
-        bandColors = conf["bandColors"];
+        resDir = conf.value("resourcesDirectory", std::string("./res"));
+        bandColors = conf.value("bandColors", json::object());
     });
 
     // Assert that the resource directory is absolute and check existence
@@ -448,34 +312,63 @@ int sdrpp_main(int argc, char* argv[]) {
     // Run render loop (TODO: CHECK RETURN VALUE)
     backend::renderLoop();
 
+    core::shuttingDown = true;
+
     // On android, none of this shutdown should happen due to the way the UI works
 #ifndef __ANDROID__
-    // Stop the IQ frontend first -- it's the data source for the entire DSP graph.
-    // This unblocks all downstream stream::read() calls.
-    sigpath::iqFrontEnd.stop();
 
-    // Delete all module instances (stops their DSP blocks, releases hardware)
+    flog::info("[SHUTDOWN] Step 1/8: Publishing ShutdownRequested event...");
+    EventBus::get().publishWithTimeout(events::ShutdownRequested{}, 5000);
+    flog::info("[SHUTDOWN] Step 1/8: Done");
+
+    flog::info("[SHUTDOWN] Step 2/8: Stopping IQ frontend...");
+    sigpath::iqFrontEnd.stop();
+    flog::info("[SHUTDOWN] Step 2/8: Done");
+
+    flog::info("[SHUTDOWN] Step 3/8: Disabling proxy config auto-save...");
+    for (auto& [name, proxy] : core::moduleManager.proxyConfigs) {
+        flog::info("[SHUTDOWN]   Disabling auto-save for proxy '{0}'", name);
+        proxy->disableAutoSave();
+    }
+    flog::info("[SHUTDOWN] Step 3/8: Done");
+
+    flog::info("[SHUTDOWN] Step 4/8: Deleting module instances...");
     std::vector<std::string> instNames;
     for (auto& [name, inst] : core::moduleManager.instances) {
         instNames.push_back(name);
     }
     for (auto& name : instNames) {
+        flog::info("[SHUTDOWN]   Deleting instance '{0}'", name);
         core::moduleManager.deleteInstance(name);
+        flog::info("[SHUTDOWN]   Deleted '{0}'", name);
     }
+    flog::info("[SHUTDOWN] Step 4/8: Done");
 
-    // Shut down all modules (calls _END_ for each loaded module)
+    flog::info("[SHUTDOWN] Step 5/8: Calling _END_ on all modules...");
     for (auto& [name, mod] : core::moduleManager.modules) {
+        flog::info("[SHUTDOWN]   Ending module '{0}'", name);
         mod.end();
+        flog::info("[SHUTDOWN]   Ended '{0}'", name);
     }
+    flog::info("[SHUTDOWN] Step 5/8: Done");
 
-    // Terminate backend (TODO: CHECK RETURN VALUE)
+    flog::info("[SHUTDOWN] Step 6/8: Saving and clearing proxy configs...");
+    for (auto& [name, proxy] : core::moduleManager.proxyConfigs) {
+        flog::info("[SHUTDOWN]   Saving proxy config '{0}'", name);
+        proxy->save();
+    }
+    core::moduleManager.proxyConfigs.clear();
+    flog::info("[SHUTDOWN] Step 6/8: Done");
+
+    flog::info("[SHUTDOWN] Step 7/8: Ending backend...");
     backend::end();
+    flog::info("[SHUTDOWN] Step 7/8: Done");
 
-    // Shut down the DSP thread pool (all workers should be idle by now)
+    flog::info("[SHUTDOWN] Step 8/8: Shutting down thread pool and saving core config...");
     dsp::engine::getPool().shutdown();
-
     core::configManager.disableAutoSave();
     core::configManager.save();
+    flog::info("[SHUTDOWN] Step 8/8: Done");
 #endif
 
     flog::info("Exiting successfully");

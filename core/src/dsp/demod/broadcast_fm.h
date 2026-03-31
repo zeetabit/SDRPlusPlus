@@ -64,6 +64,7 @@ namespace dsp::demod {
             rdsResamp.out.free();
 
             base_type::init(in);
+            registerOutput(&this->rdsOut);
         }
 
         void setDeviation(double deviation) {

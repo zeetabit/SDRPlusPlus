@@ -49,7 +49,7 @@ TEST_CASE("EventBus subscribe and publish", "[event_bus]") {
 
     SECTION("publish with no subscribers does not crash") {
         struct UnusedEvent { int x; };
-        bus.publish(UnusedEvent{99});
+        REQUIRE_NOTHROW(bus.publish(UnusedEvent{99}));
     }
 }
 
@@ -82,8 +82,8 @@ TEST_CASE("EventBus unsubscribe", "[event_bus]") {
 
     SECTION("double unsubscribe is safe") {
         auto sub = bus.subscribe<TestEvent>([](const TestEvent&) {});
-        sub.unsubscribe();
-        sub.unsubscribe();
+        REQUIRE_NOTHROW(sub.unsubscribe());
+        REQUIRE_NOTHROW(sub.unsubscribe());
     }
 }
 
@@ -147,4 +147,38 @@ TEST_CASE("EventBus thread safety", "[event_bus]") {
 
     // 4 threads * 100 publishes * 10 subscribers * 1 value = 4000
     REQUIRE(total.load() == 4000);
+}
+
+TEST_CASE("EventBus publishWithTimeout completes normally", "[event_bus]") {
+    auto& bus = EventBus::get();
+
+    struct TimeoutTestEvent { int x; };
+
+    int received = 0;
+    auto sub = bus.subscribe<TimeoutTestEvent>([&](const TimeoutTestEvent& e) {
+        received = e.x;
+    });
+
+    bus.publishWithTimeout(TimeoutTestEvent{42}, 1000);
+    REQUIRE(received == 42);
+}
+
+TEST_CASE("EventBus publishWithTimeout does not hang on slow handler", "[event_bus]") {
+    auto& bus = EventBus::get();
+
+    struct SlowEvent {};
+
+    std::atomic<bool> handlerStarted{false};
+    auto sub = bus.subscribe<SlowEvent>([&](const SlowEvent&) {
+        handlerStarted = true;
+        std::this_thread::sleep_for(std::chrono::seconds(10)); // intentionally slow
+    });
+
+    auto start = std::chrono::steady_clock::now();
+    bus.publishWithTimeout(SlowEvent{}, 200); // 200ms timeout
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+
+    REQUIRE(handlerStarted);
+    REQUIRE(elapsed < 2000); // should complete well under 2s, not wait 10s
 }

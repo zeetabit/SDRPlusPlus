@@ -6,6 +6,7 @@
 #include <gui/style.h>
 #include <signal_path/signal_path.h>
 #include <utils/optionlist.h>
+#include <utils/flog.h>
 #include <gui/dialogs/dialog_box.h>
 
 namespace sourcemenu {
@@ -65,13 +66,17 @@ namespace sourcemenu {
         offsetId = id;
         selectedOffset = offsets.name(id);
 
-        // Update the offset
+        // Update the offset and persist
         updateOffset();
+        core::configManager.withConfig([](json& conf) { conf["selectedOffset"] = selectedOffset; });
     }
 
     void selectOffsetByName(const std::string& name) {
         // If the name doesn't exist, select 'None'
         if (!offsets.nameExists(name)) {
+            if (name != "None") {
+                flog::warn("Offset '{0}' not available, falling back to 'None'", name);
+            }
             selectOffsetById(OFFSET_ID_NONE);
             return;
         }
@@ -101,6 +106,7 @@ namespace sourcemenu {
 
         // If a source with the given name doesn't exist, select the first source instead
         if (!sources.valueExists(name)) {
+            flog::warn("Source '{0}' not available, falling back to '{1}'", name, sources.value(0));
             selectSource(sources.value(0));
             return;
         }
@@ -109,11 +115,14 @@ namespace sourcemenu {
         sourceId = sources.valueId(name);
         selectedSource = name;
 
-        // Select the source module
+        // Select the source module and persist
         sigpath::sourceManager.selectSource(name);
+        core::configManager.withConfig([&](json& conf) { conf["source"] = name; });
     }
 
     void onSourcesChanged(std::string name, void* ctx) {
+        if (core::shuttingDown) { return; }
+
         // Update the source list
         refreshSources();
 
@@ -167,15 +176,20 @@ namespace sourcemenu {
         int decimation;
         std::string selectedOffset;
         core::configManager.readConfig([&](const json& conf) {
-            selectedSource = conf["source"];
-            manualOffset = conf["manualOffset"];
-            selectedOffset = conf["selectedOffset"];
-            iqCorrection = conf["iqCorrection"];
-            invertIQ = conf["invertIQ"];
-            decimation = conf["decimation"];
+            selectedSource = conf.value("source", std::string(""));
+            manualOffset = conf.value("manualOffset", 0.0);
+            selectedOffset = conf.value("selectedOffset", std::string("None"));
+            iqCorrection = conf.value("iqCorrection", false);
+            invertIQ = conf.value("invertIQ", false);
+            decimation = conf.value("decimation", 1);
         });
         if (decimations.keyExists(decimation)) {
             decimId = decimations.keyId(decimation);
+        }
+        else {
+            flog::warn("Decimation {0} not available, falling back to 1 (None)", decimation);
+            decimId = decimations.keyId(1);
+            core::configManager.withConfig([](json& conf) { conf["decimation"] = 1; });
         }
 
         // Select the source module
@@ -270,9 +284,7 @@ namespace sourcemenu {
 
         ImGui::SetNextItemWidth(itemWidth);
         if (ImGui::Combo("##source", &sourceId, sources.txt)) {
-            std::string newSource = sources.value(sourceId);
-            selectSource(newSource);
-            core::configManager.withConfig([&](json& conf) { conf["source"] = newSource; });
+            selectSource(sources.value(sourceId));
         }
 
         if (running) { style::endDisabled(); }
@@ -293,7 +305,6 @@ namespace sourcemenu {
         ImGui::SetNextItemWidth(itemWidth - ImGui::GetCursorPosX() - 2.0f*(lineHeight + 1.5f*spacing));
         if (ImGui::Combo("##_sdrpp_offset", &offsetId, offsets.txt)) {
             selectOffsetById(offsetId);
-            core::configManager.withConfig([](json& conf) { conf["selectedOffset"] = offsets.key(offsetId); });
         }
         ImGui::SameLine();
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() - spacing);

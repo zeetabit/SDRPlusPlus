@@ -34,6 +34,10 @@ struct ModuleInfoV2 {
     const int capabilities;         // Bitfield of ModuleCapability
     const int dependencyCount;
     const ModuleDependency* dependencies;
+
+    // --- V2.1 config extensions ---
+    const char* configDefaults;     // JSON string of default config for new instances, or nullptr
+    const char* configFileName;     // Config file name (e.g. "recorder_config.json"), or nullptr for auto
 };
 
 // Macro to declare a V2 module info block.

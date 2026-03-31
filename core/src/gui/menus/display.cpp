@@ -57,9 +57,9 @@ namespace displaymenu {
         fftSizes.define(2048, "2048", 2048);
         fftSizes.define(1024, "1024", 1024);
 
-        showWaterfall = core::configManager.conf["showWaterfall"];
+        showWaterfall = core::configManager.conf.value("showWaterfall", true);
         showWaterfall ? gui::waterfall.showWaterfall() : gui::waterfall.hideWaterfall();
-        std::string colormapName = core::configManager.conf["colorMap"];
+        std::string colormapName = core::configManager.conf.value("colorMap", std::string("Classic"));
         if (colormaps::maps.find(colormapName) != colormaps::maps.end()) {
             colormaps::Map map = colormaps::maps[colormapName];
             gui::waterfall.updatePalletteFromArray(map.map, map.entryCount);
@@ -75,32 +75,32 @@ namespace displaymenu {
             }
         }
 
-        fullWaterfallUpdate = core::configManager.conf["fullWaterfallUpdate"];
+        fullWaterfallUpdate = core::configManager.conf.value("fullWaterfallUpdate", false);
         gui::waterfall.setFullWaterfallUpdate(fullWaterfallUpdate);
 
         fftSizeId = fftSizes.valueId(65536);
-        int size = core::configManager.conf["fftSize"];
+        int size = core::configManager.conf.value("fftSize", 65536);
         if (fftSizes.keyExists(size)) {
             fftSizeId = fftSizes.keyId(size);
         }
         sigpath::iqFrontEnd.setFFTSize(fftSizes.value(fftSizeId));
 
-        fftRate = core::configManager.conf["fftRate"];
+        fftRate = core::configManager.conf.value("fftRate", 20);
         sigpath::iqFrontEnd.setFFTRate(fftRate);
 
-        selectedWindow = std::clamp<int>((int)core::configManager.conf["fftWindow"], 0, (sizeof(fftWindowList) / sizeof(IQFrontEnd::FFTWindow)) - 1);
+        selectedWindow = std::clamp<int>(core::configManager.conf.value("fftWindow", 2), 0, (sizeof(fftWindowList) / sizeof(IQFrontEnd::FFTWindow)) - 1);
         sigpath::iqFrontEnd.setFFTWindow(fftWindowList[selectedWindow]);
 
-        gui::menu.locked = core::configManager.conf["lockMenuOrder"];
+        gui::menu.locked = core::configManager.conf.value("lockMenuOrder", false);
 
-        fftHold = core::configManager.conf["fftHold"];
-        fftHoldSpeed = core::configManager.conf["fftHoldSpeed"];
+        fftHold = core::configManager.conf.value("fftHold", false);
+        fftHoldSpeed = core::configManager.conf.value("fftHoldSpeed", 60);
         gui::waterfall.setFFTHold(fftHold);
-        fftSmoothing = core::configManager.conf["fftSmoothing"];
-        fftSmoothingSpeed = core::configManager.conf["fftSmoothingSpeed"];
+        fftSmoothing = core::configManager.conf.value("fftSmoothing", false);
+        fftSmoothingSpeed = core::configManager.conf.value("fftSmoothingSpeed", 100);
         gui::waterfall.setFFTSmoothing(fftSmoothing);
-        snrSmoothing = core::configManager.conf["snrSmoothing"];
-        snrSmoothingSpeed = core::configManager.conf["snrSmoothingSpeed"];
+        snrSmoothing = core::configManager.conf.value("snrSmoothing", false);
+        snrSmoothingSpeed = core::configManager.conf.value("snrSmoothingSpeed", 20);
         gui::waterfall.setSNRSmoothing(snrSmoothing);
         updateFFTSpeeds();
 

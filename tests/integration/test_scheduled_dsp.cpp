@@ -4,6 +4,8 @@
 #include <dsp/engine/scheduled_processor.h>
 #include <dsp/engine/thread_pool.h>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 #include <cstring>
 #include <cmath>
 
@@ -28,6 +30,8 @@ class TestSummer : public dsp::ScheduledSink<float> {
 public:
     float total = 0;
     int samplesReceived = 0;
+    std::mutex mtx;
+    std::condition_variable cv;
 
     int run() {
         int count = _in->read();
@@ -35,9 +39,19 @@ public:
         for (int i = 0; i < count; i++) {
             total += _in->readBuf[i];
         }
-        samplesReceived += count;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            samplesReceived += count;
+        }
+        cv.notify_all();
         _in->flush();
         return count;
+    }
+
+    bool waitFor(int expected, int timeoutMs = 2000) {
+        std::unique_lock<std::mutex> lock(mtx);
+        return cv.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+            [&]() { return samplesReceived >= expected; });
     }
 };
 
@@ -61,10 +75,7 @@ TEST_CASE("ScheduledProcessor end-to-end data flow", "[integration][dsp]") {
     }
     input.swap(N);
 
-    // Wait for sink to receive data
-    for (int i = 0; i < 200 && sink.samplesReceived < N; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    REQUIRE(sink.waitFor(N));
 
     // Stop processing
     sink.stop();
@@ -95,9 +106,7 @@ TEST_CASE("ScheduledProcessor chain of two blocks", "[integration][dsp]") {
     }
     input.swap(N);
 
-    for (int i = 0; i < 200 && sink.samplesReceived < N; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    REQUIRE(sink.waitFor(N));
 
     sink.stop();
     d2.stop();
@@ -125,9 +134,7 @@ TEST_CASE("ScheduledProcessor tempStop/tempStart preserves data", "[integration]
     for (int i = 0; i < N; i++) { input.writeBuf[i] = 1.0f; }
     input.swap(N);
 
-    for (int i = 0; i < 100 && sink.samplesReceived < N; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    REQUIRE(sink.waitFor(N));
 
     // Pause and resume
     doubler.tempStop();
@@ -137,9 +144,7 @@ TEST_CASE("ScheduledProcessor tempStop/tempStart preserves data", "[integration]
     for (int i = 0; i < N; i++) { input.writeBuf[i] = 3.0f; }
     input.swap(N);
 
-    for (int i = 0; i < 100 && sink.samplesReceived < N * 2; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    REQUIRE(sink.waitFor(N * 2));
 
     sink.stop();
     doubler.stop();
@@ -192,9 +197,7 @@ TEST_CASE("ScheduledOperator two-input data flow", "[integration][dsp]") {
     inputA.swap(N);
     inputB.swap(N);
 
-    for (int i = 0; i < 200 && sink.samplesReceived < N; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    REQUIRE(sink.waitFor(N));
 
     sink.stop();
     adder.stop();
@@ -221,9 +224,7 @@ TEST_CASE("ScheduledOperator setInputs dynamic rewiring", "[integration][dsp]") 
     a1.swap(N);
     b1.swap(N);
 
-    for (int i = 0; i < 100 && sink.samplesReceived < N; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    REQUIRE(sink.waitFor(N));
 
     // Rewire to different streams
     adder.setInputs(&a2, &b2);
@@ -232,9 +233,7 @@ TEST_CASE("ScheduledOperator setInputs dynamic rewiring", "[integration][dsp]") 
     a2.swap(N);
     b2.swap(N);
 
-    for (int i = 0; i < 100 && sink.samplesReceived < N * 2; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    REQUIRE(sink.waitFor(N * 2));
 
     sink.stop();
     adder.stop();
@@ -242,4 +241,61 @@ TEST_CASE("ScheduledOperator setInputs dynamic rewiring", "[integration][dsp]") 
     REQUIRE(sink.samplesReceived == N * 2);
     // Batch 1: 10 * 3.0 = 30.0, Batch 2: 10 * 30.0 = 300.0
     REQUIRE(sink.total == Approx(330.0f));
+}
+
+TEST_CASE("ScheduledProcessor deadlock detection via waitFor timeout", "[integration][dsp]") {
+    TestSummer sink;
+
+    SECTION("waitFor returns false when no data arrives") {
+        // Sink is not connected to any pipeline — no data will ever come
+        REQUIRE_FALSE(sink.waitFor(1, 100)); // 100ms timeout
+        REQUIRE(sink.samplesReceived == 0);
+    }
+
+    SECTION("waitFor returns false when pipeline stalls mid-stream") {
+        dsp::stream<float> input;
+        TestDoubler doubler;
+
+        doubler.init(&input);
+        sink.init(&doubler.out);
+        doubler.start();
+        sink.start();
+
+        // Send 10 samples
+        const int N = 10;
+        for (int i = 0; i < N; i++) { input.writeBuf[i] = 1.0f; }
+        input.swap(N);
+        REQUIRE(sink.waitFor(N));
+
+        // Now wait for 20 more that will never arrive
+        REQUIRE_FALSE(sink.waitFor(N + 20, 100));
+        REQUIRE(sink.samplesReceived == N);
+
+        sink.stop();
+        doubler.stop();
+    }
+}
+
+TEST_CASE("ScheduledProcessor handles stream shutdown cleanly", "[integration][dsp]") {
+    dsp::stream<float> input;
+    TestDoubler doubler;
+    TestSummer sink;
+
+    doubler.init(&input);
+    sink.init(&doubler.out);
+    doubler.start();
+    sink.start();
+
+    // Send some data first
+    const int N = 5;
+    for (int i = 0; i < N; i++) { input.writeBuf[i] = 2.0f; }
+    input.swap(N);
+    REQUIRE(sink.waitFor(N));
+
+    // Stop the pipeline — this should not deadlock
+    sink.stop();
+    doubler.stop();
+
+    REQUIRE(sink.samplesReceived == N);
+    REQUIRE(sink.total == Approx(20.0f)); // 5 * 2.0 * 2.0 = 20.0
 }

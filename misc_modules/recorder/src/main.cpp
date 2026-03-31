@@ -25,6 +25,7 @@
 #include <core.h>
 #include <utils/optionlist.h>
 #include <utils/wav.h>
+#include <module_config.h>
 
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
@@ -38,61 +39,46 @@ SDRPP_MOD_INFO{
     /* Max instances    */ -1
 };
 
+SDRPP_MOD_INFO_V2{
+    "recorder", "Recorder module for SDR++", "Ryzerth", 0, 3, 0, -1,
+    SDRPP_API_VERSION, MOD_CAP_MISC, 0, nullptr,
+    R"({"mode":1,"recPath":"%ROOT%/recordings","container":"WAV","sampleType":"Int16","audioStream":"","audioVolume":1.0,"stereo":false,"ignoreSilence":false,"nameTemplate":"$t_$f_$h-$m-$s_$d-$M-$y"})",
+    "recorder_config.json"
+};
+
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 class RecorderModule : public ModuleManager::Instance, public IRecorderControl {
 public:
-    RecorderModule(std::string name) : folderSelect("%ROOT%/recordings") {
+    RecorderModule(std::string name, ModuleConfig* cfg) : folderSelect("%ROOT%/recordings") {
         this->name = name;
+        this->cfg = cfg;
         root = (std::string)core::args["root"];
         strcpy(nameTemplate, "$t_$f_$h-$m-$s_$d-$M-$y");
 
-        // Define option lists
         containers.define("WAV", wav::FORMAT_WAV);
-        // containers.define("RF64", wav::FORMAT_RF64); // Disabled for now
         sampleTypes.define(wav::SAMP_TYPE_UINT8, "Uint8", wav::SAMP_TYPE_UINT8);
         sampleTypes.define(wav::SAMP_TYPE_INT16, "Int16", wav::SAMP_TYPE_INT16);
         sampleTypes.define(wav::SAMP_TYPE_INT32, "Int32", wav::SAMP_TYPE_INT32);
         sampleTypes.define(wav::SAMP_TYPE_FLOAT32, "Float32", wav::SAMP_TYPE_FLOAT32);
 
-        // Load default config for option lists
         containerId = containers.valueId(wav::FORMAT_WAV);
         sampleTypeId = sampleTypes.valueId(wav::SAMP_TYPE_INT16);
 
-        // Load config
-        config.readConfig([&](const json& conf) {
-            if (conf[name].contains("mode")) {
-                recMode = conf[name]["mode"];
-            }
-            if (conf[name].contains("recPath")) {
-                folderSelect.setPath(conf[name]["recPath"]);
-            }
-            if (conf[name].contains("container") && containers.keyExists(conf[name]["container"])) {
-                containerId = containers.keyId(conf[name]["container"]);
-            }
-            if (conf[name].contains("sampleType") && sampleTypes.keyExists(conf[name]["sampleType"])) {
-                sampleTypeId = sampleTypes.keyId(conf[name]["sampleType"]);
-            }
-            if (conf[name].contains("audioStream")) {
-                selectedStreamName = conf[name]["audioStream"];
-            }
-            if (conf[name].contains("audioVolume")) {
-                audioVolume = conf[name]["audioVolume"];
-            }
-            if (conf[name].contains("stereo")) {
-                stereo = conf[name]["stereo"];
-            }
-            if (conf[name].contains("ignoreSilence")) {
-                ignoreSilence = conf[name]["ignoreSilence"];
-            }
-            if (conf[name].contains("nameTemplate")) {
-                std::string _nameTemplate = conf[name]["nameTemplate"];
-                if (_nameTemplate.length() > sizeof(nameTemplate)-1) {
-                    _nameTemplate = _nameTemplate.substr(0, sizeof(nameTemplate)-1);
-                }
-                strcpy(nameTemplate, _nameTemplate.c_str());
-            }
-        });
+        // Load config — defaults pre-applied by loader via manifest
+        recMode = cfg->get<int>("mode", 1);
+        folderSelect.setPath(cfg->get<std::string>("recPath", "%ROOT%/recordings"));
+        std::string containerStr = cfg->get<std::string>("container", "WAV");
+        if (containers.keyExists(containerStr)) { containerId = containers.keyId(containerStr); }
+        std::string sampTypeStr = cfg->get<std::string>("sampleType", "Int16");
+        if (sampleTypes.nameExists(sampTypeStr)) { sampleTypeId = sampleTypes.nameId(sampTypeStr); }
+        selectedStreamName = cfg->get<std::string>("audioStream", "");
+        audioVolume = cfg->get<float>("audioVolume", 1.0f);
+        stereo = cfg->get<bool>("stereo", false);
+        ignoreSilence = cfg->get<bool>("ignoreSilence", false);
+        std::string tmpl = cfg->get<std::string>("nameTemplate", "$t_$f_$h-$m-$s_$d-$M-$y");
+        strncpy(nameTemplate, tmpl.c_str(), sizeof(nameTemplate) - 1);
 
         // Init audio path
         volume.init(NULL, audioVolume, false);
@@ -572,6 +558,7 @@ private:
     void stopRecording() override { stop(); }
 
     std::string name;
+    ModuleConfig* cfg = nullptr;
     bool enabled = true;
     std::string root;
     char nameTemplate[1024];
@@ -616,7 +603,6 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    // Create default recording directory
     std::string root = (std::string)core::args["root"];
     if (!std::filesystem::exists(root + "/recordings")) {
         flog::warn("Recordings directory does not exist, creating it");
@@ -624,15 +610,10 @@ MOD_EXPORT void _INIT_() {
             flog::error("Could not create recordings directory");
         }
     }
-    json def = json({});
-    config.setPath(root + "/recorder_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "recorder_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new RecorderModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(RecorderModule);
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* inst) {
     delete (RecorderModule*)inst;

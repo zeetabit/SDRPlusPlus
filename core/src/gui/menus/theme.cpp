@@ -12,7 +12,7 @@ namespace thememenu {
         // TODO: Not hardcode theme directory
         gui::themeManager.loadThemesFromDir(resDir + "/themes/");
         std::string selectedThemeName = core::configManager.readConfig<std::string>([](const json& conf) {
-            return (std::string)conf["theme"];
+            return conf.value("theme", std::string("Dark"));
         });
 
         // Select theme by name, if not available, apply Dark theme

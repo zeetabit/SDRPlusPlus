@@ -7,6 +7,8 @@
 #include <memory>
 #include <algorithm>
 #include <atomic>
+#include <future>
+#include <chrono>
 #include <utils/flog.h>
 
 // Subscription handle returned by EventBus::subscribe(). Call unsubscribe() or
@@ -109,6 +111,33 @@ public:
         for (auto& entry : snapshot) {
             auto* typed = static_cast<Handler<E>*>(entry.handler.get());
             typed->fn(event);
+        }
+    }
+
+    // Publish an event and wait up to timeoutMs for all handlers to complete.
+    // Each handler runs on a detached thread; if it exceeds the timeout, shutdown proceeds.
+    template <typename E>
+    void publishWithTimeout(const E& event, int timeoutMs = 5000) {
+        auto key = std::type_index(typeid(E));
+        std::vector<Entry> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            auto it = channels.find(key);
+            if (it == channels.end()) return;
+            snapshot = it->second;
+        }
+        for (auto& entry : snapshot) {
+            auto* typed = static_cast<Handler<E>*>(entry.handler.get());
+            auto done = std::make_shared<std::promise<void>>();
+            auto future = done->get_future();
+            auto handler = entry.handler; // extend lifetime
+            std::thread([typed, &event, done]() {
+                try { typed->fn(event); } catch (...) {}
+                done->set_value();
+            }).detach();
+            if (future.wait_for(std::chrono::milliseconds(timeoutMs)) == std::future_status::timeout) {
+                flog::warn("Shutdown handler timed out after {0}ms (subscriber {1})", timeoutMs, entry.id);
+            }
         }
     }
 

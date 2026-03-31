@@ -9,6 +9,7 @@ namespace core {
     SDRPP_EXPORT ModuleManager moduleManager;
     SDRPP_EXPORT ModuleComManager modComManager;
     SDRPP_EXPORT CommandArgsParser args;
+    SDRPP_EXPORT bool shuttingDown;
 
     void setInputSampleRate(double samplerate);
 };

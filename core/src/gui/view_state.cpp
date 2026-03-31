@@ -9,9 +9,9 @@ void ViewStateCoordinator::loadFromConfig(float& sliderBw) {
     double viewOffset = 0;
     sliderBw = 0;
     config->readConfig([&](const json& conf) {
-        sliderBw = conf["bandwidth_slider"];
-        viewBw = conf["bandwidth_view"];
-        viewOffset = conf["bandwidth_offset"];
+        sliderBw = conf.value("bandwidth_slider", 0.0f);
+        viewBw = conf.value("bandwidth_view", 0.0f);
+        viewOffset = conf.value("bandwidth_offset", 0.0);
     });
     if (sliderBw >= 0 && viewBw > 1.0) {
         flog::info("Loaded zoom: slider={0}, view={1}, offset={2}", sliderBw, viewBw, viewOffset);

@@ -2,6 +2,7 @@
 #include <dsp/engine/thread_pool.h>
 #include <atomic>
 #include <chrono>
+#include <future>
 
 TEST_CASE("ThreadPool basic execution", "[thread_pool]") {
     dsp::engine::ThreadPool pool(2);
@@ -12,14 +13,10 @@ TEST_CASE("ThreadPool basic execution", "[thread_pool]") {
     }
 
     SECTION("submitAsync executes work") {
-        std::atomic<bool> done{false};
-        pool.submitAsync([&]() { done = true; });
-
-        // Wait up to 1s for completion
-        for (int i = 0; i < 100 && !done; i++) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-        REQUIRE(done);
+        std::promise<void> p;
+        auto f = p.get_future();
+        pool.submitAsync([&]() { p.set_value(); });
+        REQUIRE(f.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
     }
 
     SECTION("pool has at least base thread count") {
