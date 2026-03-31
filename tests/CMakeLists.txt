@@ -19,10 +19,14 @@ add_executable(sdrpp_unit_tests
     unit/test_api_version.cpp
     unit/test_thread_pool.cpp
     unit/test_shared_buffer.cpp
+    unit/test_gui_math.cpp
+    unit/test_view_state.cpp
+    unit/test_vfo_handler.cpp
     # Integration tests
     integration/test_scheduled_dsp.cpp
     # Core sources needed by tests
     ${CORE_SRC}/utils/flog.cpp
+    ${CORE_SRC}/gui/view_state.cpp
 )
 
 target_include_directories(sdrpp_unit_tests PRIVATE
@@ -35,9 +39,10 @@ target_link_libraries(sdrpp_unit_tests PRIVATE catch2)
 # Find volk (needed for stream.h / buffer.h)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(VOLK REQUIRED volk)
-target_include_directories(sdrpp_unit_tests PRIVATE ${VOLK_INCLUDE_DIRS})
-target_link_directories(sdrpp_unit_tests PRIVATE ${VOLK_LIBRARY_DIRS})
-target_link_libraries(sdrpp_unit_tests PRIVATE ${VOLK_LIBRARIES})
+pkg_check_modules(FFTW3F REQUIRED fftw3f)
+target_include_directories(sdrpp_unit_tests PRIVATE ${VOLK_INCLUDE_DIRS} ${FFTW3F_INCLUDE_DIRS})
+target_link_directories(sdrpp_unit_tests PRIVATE ${VOLK_LIBRARY_DIRS} ${FFTW3F_LIBRARY_DIRS})
+target_link_libraries(sdrpp_unit_tests PRIVATE ${VOLK_LIBRARIES} ${FFTW3F_LIBRARIES})
 
 enable_testing()
 add_test(NAME unit_tests COMMAND sdrpp_unit_tests)

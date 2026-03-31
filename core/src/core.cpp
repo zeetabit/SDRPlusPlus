@@ -60,7 +60,9 @@ namespace core {
         // Debug logs
         flog::info("New DSP samplerate: {0} (source samplerate is {1})", effectiveSr, samplerate);
 
-        gui::mainWindow.loadZoomFromConfig();
+        float sliderBw;
+        gui::mainWindow.viewState.loadFromConfig(sliderBw);
+        gui::mainWindow.setViewBandwidthSlider(sliderBw);
     }
 };
 
@@ -274,6 +276,7 @@ int sdrpp_main(int argc, char* argv[]) {
     defConfig["vfoColors"]["Radio"] = "#FFFFFF";
     defConfig["bandwidth_slider"] = 0.0f;
     defConfig["bandwidth_view"] = 0.0f;
+    defConfig["bandwidth_offset"] = 0.0;
 
 #ifdef __ANDROID__
     defConfig["lockMenuOrder"] = true;
