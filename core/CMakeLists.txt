@@ -21,6 +21,10 @@ endif ()
 # Configure backend sources
 if (OPT_BACKEND_GLFW)
     file(GLOB_RECURSE BACKEND_SRC "backends/glfw/*.cpp" "backends/glfw/*.c")
+    if (APPLE)
+        file(GLOB_RECURSE BACKEND_OBJC_SRC "backends/glfw/*.mm")
+        list(APPEND BACKEND_SRC ${BACKEND_OBJC_SRC})
+    endif ()
 endif (OPT_BACKEND_GLFW)
 if (OPT_BACKEND_ANDROID)
     file(GLOB_RECURSE BACKEND_SRC "backends/android/*.cpp" "backends/android/*.c")
@@ -158,6 +162,10 @@ else()
 
     if (${CMAKE_SYSTEM_NAME} MATCHES "Linux")
         target_link_libraries(sdrpp_core PUBLIC stdc++fs)
+    endif ()
+
+    if (APPLE)
+        target_link_libraries(sdrpp_core PUBLIC "-framework Cocoa")
     endif ()
 
 endif ()

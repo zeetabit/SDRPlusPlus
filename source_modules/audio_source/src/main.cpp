@@ -140,9 +140,10 @@ public:
             }
         }
 
-        // Load samplerate from config
+        // Load samplerate from config (guard: device may not exist in config yet)
         config.readConfig([&](const json& conf) {
-            if (conf["devices"][selectedDevice].contains("sampleRate")) {
+            if (conf.contains("devices") && conf["devices"].contains(selectedDevice)
+                && conf["devices"][selectedDevice].contains("sampleRate")) {
                 sampleRate = conf["devices"][selectedDevice]["sampleRate"];
                 if (sampleRates.keyExists(sampleRate)) {
                     srId = sampleRates.keyId(sampleRate);

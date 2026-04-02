@@ -20,14 +20,19 @@ A phased plan to modernize the SDR++ codebase for improved modularity, type safe
 
 | Metric | Before | After |
 |--------|--------|-------|
-| Total LOC | ~150K | ~155K (+5K new infra) |
+| Total LOC | ~150K | ~158K (+8K new infra) |
 | DSP blocks on thread pool | 0/55 | 55/55 (100%) |
 | Modules with gui::waterfall coupling | 15 | 2 (overlay drawing only) |
 | modComManager consumer calls | ~30 | 0 (100% migrated) |
-| Module error isolation | None | try/catch on all entry points |
-| Test coverage | None | 25 test cases, 92 assertions |
+| Module error isolation | None | try/catch on all entry points + noexcept stop() |
+| Test coverage | None | 46 test cases, 153+ assertions |
+| V2.1 modules with ModuleConfig | 0 | 2 (recorder, cw_decoder) |
+| V1 modules with proxy ConfigManager | 0 | 55 (auto-provisioned) |
+| Module auto-discovery | None | Auto-create + persist + removed flag |
 | CMake auto-detection | None | Deps, resources, modules dir |
 | Source modules on ISource | 0 | 1 (file_source, adapter for rest) |
+| Shutdown coordination | None | EventBus publishWithTimeout + shuttingDown flag |
+| Config persistence | Partial | Source, zoom, offsets, enable/disable all saved |
 | Branch | `feature/modular-core-abstractions` | |
 
 ### Pain Points Addressed

@@ -3,6 +3,10 @@
 #include <thread>
 #include <vector>
 #include <algorithm>
+#include <chrono>
+#include <string>
+#include <typeinfo>
+#include <atomic>
 #include "stream.h"
 #include "types.h"
 
@@ -83,9 +87,25 @@ namespace dsp {
                 out->stopWriter();
             }
 
-            // TODO: Make sure this isn't needed, I don't know why it stops
             if (workerThread.joinable()) {
-                workerThread.join();
+                // Timed join: detect stuck workers and log diagnostic
+                auto start = std::chrono::steady_clock::now();
+                std::atomic<bool> joined{false};
+                std::thread joiner([this, &joined]() {
+                    workerThread.join();
+                    joined = true;
+                });
+                while (!joined) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    auto elapsed = std::chrono::steady_clock::now() - start;
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() > 3000) {
+                        fprintf(stderr, "[dsp::block] Worker thread stuck for >3s in block type '%s' — possible module bug\n",
+                            typeid(*this).name());
+                        joiner.detach();
+                        break;
+                    }
+                }
+                if (joined) { joiner.join(); }
             }
 
             for (auto& in : inputs) {

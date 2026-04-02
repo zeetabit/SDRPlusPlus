@@ -376,37 +376,145 @@ Summary of what changed and what module authors need to adjust.
 | `SourceHandler` struct + `registerSource(name, &handler)` | Implement `ISource` + `registerSource(name, this)` | Add `#include <signal_path/isource.h>` |
 | `add_subdirectory("decoder_modules/my_mod")` | `add_sdrpp_module("decoder_modules/my_mod" my_mod)` | Update CMakeLists.txt |
 
+### V2.1: ModuleConfig and Scoped Configuration
+
+V2.1 modules receive a `ModuleConfig*` in their constructor, providing instance-scoped config access:
+
+```cpp
+class MyModule : public ModuleManager::Instance {
+public:
+    MyModule(std::string name, ModuleConfig* cfg) {
+        float gain = cfg->get<float>("gain", 1.0f);  // reads with default
+        cfg->set("gain", gain);                        // writes to instance namespace
+    }
+};
+```
+
+**Manifest defaults**: Declare default config in the V2 manifest:
+
+```cpp
+SDRPP_MOD_INFO_V2 {
+    "my_mod", "My Module", "Author", 1, 0, 0, -1,
+    SDRPP_API_VERSION, MOD_CAP_DECODER, 0, nullptr,
+    R"({"gain": 1.0, "enabled": true})",   // configDefaults JSON
+    "my_mod_config.json"                     // configFileName
+};
+```
+
+**V1 compatibility proxy**: V1 modules that don't export `_CONFIG_` automatically get a proxy `ConfigManager` at `<root>/<moduleName>_config.json`. This means `ModuleConfig` always has a valid backend -- V1 modules get config support without code changes.
+
+**Macros**:
+- `SDRPP_MOD_CONFIG(configVar)` -- exports the module's ConfigManager for V2.1
+- `SDRPP_CREATE_INSTANCE_V2(ClassName)` -- exports both V1 and V2 constructors
+
+### Module Lifecycle
+
+**Auto-discovery**: Loaded modules without a config entry get auto-created with a display name derived from the module name (e.g., `radiosonde_decoder` -> `Radiosonde Decoder`). Auto-created entries are persisted to config.
+
+**Enable/disable persistence**: Module enabled state is saved to `config["moduleInstances"][name]["enabled"]`. Disabled modules are loaded but not started on next launch.
+
+**Removed modules**: Deleting a module in Module Manager marks it as `"removed": true` in config. Removed modules are not auto-recreated. Re-add via the Module Manager "+" button.
+
+**Module Manager UI**: V1 (legacy) modules are shown with a yellow warning icon and tooltip in the Module Manager instance table. V2 modules have no indicator. Faulted modules get a red row highlight with error tooltip.
+
+**VFO lifecycle**: Decoder modules should create VFO in `enable()` and delete in `disable()`:
+
+```cpp
+void enable() {
+    enabled = true;
+    vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, 0, bw, sr, bw, bw, true);
+    // start DSP chain...
+}
+void disable() {
+    // stop DSP chain (consumers before producers)...
+    if (vfo) { sigpath::vfoManager.deleteVFO(vfo); vfo = nullptr; }
+    enabled = false;
+}
+```
+
+### DSP Block Lifecycle
+
+`block::stop()` is `noexcept` -- exceptions in stop are caught to prevent app termination from destructors. DSP chains must be stopped in reverse data-flow order (consumers first, producers last) before deleting VFOs.
+
+`scheduled_block::doStop()` uses a 2-second timeout on `workerDone.get()` with automatic retry to handle rare race conditions.
+
+All output streams that a block writes to must be registered via `registerOutput()`. Unregistered outputs won't receive `stopWriter()` during shutdown, causing deadlocks. (Example: `BroadcastFM` registers both `out` and `rdsOut`.)
+
+### Shutdown
+
+The app publishes `events::ShutdownRequested{}` via `EventBus::get().publishWithTimeout()` with a 5-second timeout per handler. Modules can subscribe to perform cleanup:
+
+```cpp
+auto sub = EventBus::get().subscribe<events::ShutdownRequested>([this](const auto&) {
+    saveState();
+});
+```
+
+The `core::shuttingDown` flag is set before shutdown begins. Guards in `setInputSampleRate()` and `sourcemenu::onSourcesChanged()` prevent cascading source re-selection during teardown.
+
+### Config System
+
+Core config uses a component-key allowlist for cleanup. Module-specific keys stored in core config must be registered in `componentKeys` (in `core.cpp`) to survive cleanup. Module-owned config files (via `ConfigManager`) are not affected.
+
+**Registered component keys** (in `core.cpp`):
+- Source menu: `source`, `manualOffset`, `selectedOffset`, `iqCorrection`, `invertIQ`, `decimation`
+- Display: `min`, `max`, `frequency`, `showMenu`, `menuWidth`, `fftHeight`, `centerTuning`, `fftSpeed`, `fftSmoothing`
+- Zoom state: `bandwidth_slider`, `bandwidth_view`, `bandwidth_offset`
+- Theme/UI: `theme`, `uiScale`
+- Other: `bandColors`, `modulesDirectory`, `resourcesDirectory`
+
+**Source selection persistence**: The source menu saves and restores the selected source, offset mode, decimation, and IQ correction settings. When a saved source is not available on restart (e.g., hardware disconnected), it falls back to the first available source and persists the fallback. Same pattern for offset mode and decimation.
+
+**Zoom persistence**: View bandwidth, slider position, and view offset are saved on every zoom change and restored on startup via `ViewStateCoordinator::loadFromConfig()`.
+
+The `conf.value("key", default)` pattern is used throughout for crash-safe config reads. Never use `conf["key"]` directly for reads -- it creates null entries on missing keys.
+
 ### Minimum Required for a New Module
 
-A new module works out of the box with zero V2 changes. The old patterns still compile and function. To adopt V2 features incrementally:
+V1 patterns still compile and work. To adopt V2 features:
 
-1. **Optional**: Add `SDRPP_MOD_INFO_V2` for API versioning + capabilities
-2. **Recommended**: Use `IRadioState` instead of `gui::waterfall` for reading radio state
-3. **Recommended**: Use `ServiceRegistry` instead of `modComManager` for inter-module calls
-4. **Optional**: Use `ScheduledProcessor` instead of `Processor` for DSP blocks (runs on thread pool)
-5. **Required for new CMake**: Use `add_sdrpp_module()` macro in CMakeLists.txt
+1. **Required for V2.1**: Add `SDRPP_MOD_INFO_V2` + `SDRPP_MOD_CONFIG` + `SDRPP_CREATE_INSTANCE_V2`
+2. **Recommended**: Use `ModuleConfig` for scoped config instead of manual JSON paths
+3. **Recommended**: Use `ScheduledProcessor` for DSP blocks (thread pool)
+4. **Recommended**: Proper VFO lifecycle in enable/disable
+5. **Recommended**: Per-module tests in `<module>/tests/` with own CMakeLists.txt
+
+### Reference Implementation
+
+The CW decoder (`decoder_modules/cw_decoder/`) is a complete V2.1 reference:
+- Multi-channel auto-detection with FFT-based tone scanning
+- CFAR-style noise estimation, adaptive timing, Morse tree decoding
+- Waterfall overlay via `onFFTRedraw` callback
+- Per-module test suite (`tests/CMakeLists.txt` + Catch2)
+- Clean separation: `main.cpp` (99 lines), channel_manager, menu, DSP, detector
 
 ### Includes Cheat Sheet
 
 ```cpp
-// Radio state (read-only: frequency, bandwidth, VFO info)
+// V2.1 module config
+#include <module_config.h>
+#include <module_manifest.h>
+
+// Radio state (read-only)
 #include <utils/service_registry.h>
 #include <utils/radio_state.h>
 auto* rs = ServiceRegistry::get().query<IRadioState>("core");
 
-// Radio state mutations (set frequency, lock center freq)
+// Radio state mutations
 #include <utils/radio_control.h>
 auto* rc = ServiceRegistry::get().query<IRadioStateControl>("core");
 
-// Inter-module communication (radio mode, recorder control)
+// Inter-module communication
 #include <utils/services.h>
 auto* radio = ServiceRegistry::get().query<IRadioControl>(vfoName);
 
 // DSP blocks on thread pool
 #include <dsp/engine/scheduled_processor.h>
-// Then: class MyBlock : public ScheduledProcessor<complex_t, float> { ... };
 
 // Source module with ISource
 #include <signal_path/isource.h>
-// Then: class MySource : public ModuleManager::Instance, public ISource { ... };
+
+// EventBus
+#include <utils/event_bus.h>
+#include <utils/events.h>
 ```

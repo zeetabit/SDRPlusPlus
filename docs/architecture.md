@@ -280,60 +280,66 @@ Handler Sink ─── Callback to MainWindow
 
 ## Threading Model
 
+DSP blocks run on an **elastic thread pool** (`dsp::engine::ThreadPool`), not dedicated threads. The pool grows automatically when all workers are busy, preventing deadlocks from blocking reads.
+
 ```
 Main Thread
 │  GLFW event loop + ImGui rendering
 │  Menu drawing, waterfall rendering
 │  Configuration changes, event dispatching
 │
-├── Auto-Save Thread
-│     Config writes every 1s if dirty
+├── Auto-Save Thread(s)
+│     Config writes every 1s if dirty (one per ConfigManager)
 │
 ├── Source Thread
 │     Hardware reads → stream.swap()
 │
-├── IQ Frontend Threads (one per block)
-│   ├── Decimator worker
-│   ├── DC Blocker worker
-│   ├── Splitter worker
-│   └── FFT Reshaper + Sink worker
-│
-├── VFO Threads (one per VFO)
-│     RxVFO: shift + resample + filter
-│
-├── Demodulator Threads (one per demod block)
-│     FM/AM/SSB demod → audio output
-│
-├── Post-Processing Threads
-│   ├── Resampler
-│   ├── High-pass filter
-│   └── Squelch
-│
-├── Sink Threads (one per audio sink)
-│     Audio device writes
+├── DSP Thread Pool (elastic, starts at hardware_concurrency)
+│   │  All ScheduledProcessor/ScheduledSink blocks share this pool.
+│   │  Pool grows when idle=0, workers block on stream::read().
+│   ├── IQ Frontend blocks (decimator, DC blocker, splitter, FFT)
+│   ├── VFO blocks (frequency xlator, resampler, filter)
+│   ├── Demodulator blocks (FM, AM, SSB, CW, etc.)
+│   ├── Post-processing blocks (resampler, HPF, squelch, AGC)
+│   └── Sink handlers (audio, network, recorder)
 │
 └── Module-Specific Threads
     ├── Rigctl server socket
     ├── Scanner stepping
-    ├── Recorder file writes
     └── Server TCP listener (if enabled)
 ```
 
-**Typical thread count:** 15-25 threads in normal operation.
+**Thread pool benefits over thread-per-block:**
+- Centralized lifecycle management and shutdown with timeout
+- Thread reuse when blocks are stopped/restarted
+- Observable: `size()` and `active()` for diagnostics
 
 **Synchronization primitives:**
 - `std::mutex` + `std::condition_variable` in streams (buffer swap coordination)
 - `std::recursive_mutex` in blocks (allows nested `tempStop`/`tempStart`)
 - `std::mutex` in ConfigManager (acquire/release pattern)
-- No lock-free structures -- relies on mutex granularity and short critical sections
+- `block::stop()` is `noexcept` -- exceptions caught to prevent `std::terminate` from destructors
+- `scheduled_block::doStop()` uses 2-second timeout with retry for stuck workers
 
 **Reconfiguration pattern** (`tempStop` / `tempStart`):
 When changing a parameter that affects a running block (e.g., bandwidth, sample rate):
-1. `block.tempStop()` -- increment stop depth, join worker if depth goes 0 to 1
+1. `block.tempStop()` -- increment stop depth, stop worker if depth goes 0 to 1
 2. Modify parameters
 3. `block.tempStart()` -- decrement stop depth, restart worker if depth goes 1 to 0
 
 This nesting allows multiple callers to pause a block without conflicting.
+
+**Shutdown sequence** (8 steps with logging):
+1. Publish `ShutdownRequested` event with 5s timeout per handler
+2. Stop IQ frontend
+3. Disable proxy config auto-save
+4. Delete all module instances (stop DSP chains consumers-first)
+5. Call `_END_()` on all modules
+6. Save and clear proxy configs
+7. End backend (GLFW)
+8. Shutdown thread pool and save core config
+
+The `core::shuttingDown` flag prevents source cascade during teardown.
 
 ---
 
@@ -345,7 +351,7 @@ This nesting allows multiple callers to pause a block without conflicting.
 | Lines of code | ~150K |
 | Build system | CMake 3.13+ |
 | GUI framework | ImGui (immediate mode) + GLFW3 + OpenGL |
-| DSP architecture | Thread-per-block, stream-based |
+| DSP architecture | Elastic thread pool, stream-based |
 | Plugin system | Dynamic `.so`/`.dylib`/`.dll` loading |
 | Configuration | JSON (nlohmann/json) |
 | Platforms | Windows, Linux, macOS, Android |

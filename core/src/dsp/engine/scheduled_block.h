@@ -2,6 +2,7 @@
 #include "../block.h"
 #include "thread_pool.h"
 #include <utils/flog.h>
+#include <typeinfo>
 
 namespace dsp {
 
@@ -15,21 +16,23 @@ namespace dsp {
     // original block. The only difference is WHERE the thread comes from:
     // a shared pool instead of std::thread per block.
     class scheduled_block : public block {
+    public:
+        void setBlockName(const std::string& name) { blockName = name; }
+
     protected:
         void doStart() override {
-            // Submit the worker loop to the thread pool instead of spawning
-            // a dedicated thread. The pool thread runs workerLoop() exactly
-            // like a dedicated thread would, blocking on stream reads.
-            //
-            // We still need a joinable handle for doStop(). Use std::future
-            // to track completion.
+            // Build a diagnostic name: explicit name + RTTI class name
+            std::string taskName = blockName.empty() ? typeid(*this).name() : blockName;
+
             workerDone = engine::getPool().submit([this]() -> int {
                 workerLoop();
                 return 0;
-            });
+            }, taskName);
         }
 
         void doStop() override {
+            std::string taskName = blockName.empty() ? typeid(*this).name() : blockName;
+
             // Signal all streams to stop (unblocks read/swap)
             for (auto& in : inputs) { in->stopReader(); }
             for (auto& out : outputs) { out->stopWriter(); }
@@ -41,17 +44,15 @@ namespace dsp {
                     workerDone.get();
                 }
                 else {
-                    flog::warn("scheduled_block::doStop: worker did not finish within 2s, forcing stop");
-                    // Re-signal in case of a race where the worker started after the first signal
+                    flog::warn("scheduled_block::doStop: worker '{0}' did not finish within 2s, forcing stop", taskName);
                     for (auto& in : inputs) { in->stopReader(); }
                     for (auto& out : outputs) { out->stopWriter(); }
-                    // Give it one more chance
                     auto retry = workerDone.wait_for(std::chrono::milliseconds(500));
                     if (retry == std::future_status::ready) {
                         workerDone.get();
                     }
                     else {
-                        flog::error("scheduled_block::doStop: worker stuck, abandoning");
+                        flog::error("scheduled_block::doStop: worker '{0}' stuck, abandoning", taskName);
                     }
                 }
             }
@@ -62,6 +63,7 @@ namespace dsp {
         }
 
     private:
+        std::string blockName;
         std::future<int> workerDone;
     };
 

@@ -11,6 +11,16 @@ namespace gui_math {
         return std::min<double>(1000.0 + (factor * delta), wholeBandwidth);
     }
 
+    // Inverse: maps a view bandwidth back to a slider value (0..1).
+    // Accounts for changed total bandwidth since save.
+    inline float bandwidthToZoomSlider(double viewBandwidth, double wholeBandwidth) {
+        if (wholeBandwidth <= 1000.0) { return 1.0f; }
+        double delta = wholeBandwidth - 1000.0;
+        double factor = (viewBandwidth - 1000.0) / delta;
+        factor = std::clamp(factor, 0.0, 1.0);
+        return (float)sqrt(factor);
+    }
+
     // Clamps a VFO offset to be within the visible view window.
     inline double clampVFOOffset(double offset, double viewOffset, double viewBandwidth) {
         double viewLower = viewOffset - (viewBandwidth / 2.0);

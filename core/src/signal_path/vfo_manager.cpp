@@ -87,6 +87,34 @@ void VFOManager::VFO::setColor(ImU32 color) {
     wtfVFO->color = color;
 }
 
+void VFOManager::VFO::setVisible(bool visible) {
+    if (visible) {
+        gui::waterfall.vfos[name] = wtfVFO;
+    }
+    else {
+        gui::waterfall.vfos.erase(name);
+        if (gui::waterfall.selectedVFO == name) {
+            gui::waterfall.selectFirstVFO();
+        }
+    }
+}
+
+bool VFOManager::VFO::isVisible() {
+    return gui::waterfall.vfos.count(name) > 0;
+}
+
+void VFOManager::VFO::setZOrder(int z) {
+    wtfVFO->zOrder = z;
+}
+
+void VFOManager::VFO::setMarkers(const std::vector<ImGui::WaterfallVFO::Marker>& markers) {
+    wtfVFO->markers = markers;
+}
+
+void VFOManager::VFO::clearMarkers() {
+    wtfVFO->markers.clear();
+}
+
 std::string VFOManager::VFO::getName() {
     return name;
 }
@@ -198,6 +226,21 @@ void VFOManager::setColor(std::string name, ImU32 color) {
         return;
     }
     return vfos[name]->setColor(color);
+}
+
+void VFOManager::setVisible(std::string name, bool visible) {
+    if (vfos.find(name) == vfos.end()) { return; }
+    vfos[name]->setVisible(visible);
+}
+
+bool VFOManager::isVisible(std::string name) {
+    if (vfos.find(name) == vfos.end()) { return false; }
+    return vfos[name]->isVisible();
+}
+
+void VFOManager::setZOrder(std::string name, int z) {
+    if (vfos.find(name) == vfos.end()) { return; }
+    vfos[name]->setZOrder(z);
 }
 
 bool VFOManager::vfoExists(std::string name) {

@@ -12,6 +12,10 @@
 #include <stb_image_resize.h>
 #include <gui/gui.h>
 
+#ifdef __APPLE__
+extern void macos_setDockIcon(const std::string& pngPath);
+#endif
+
 namespace backend {
     const char* OPENGL_VERSIONS_GLSL[] = {
         "#version 120",
@@ -123,6 +127,14 @@ namespace backend {
             return 1;
         }
 
+#ifdef __APPLE__
+        // macOS: glfwSetWindowIcon is a no-op. Use Cocoa API to set the dock icon.
+        {
+            std::string macIcon = resDir + "/icons/sdrpp.macos.png";
+            if (!std::filesystem::is_regular_file(macIcon)) { macIcon = resDir + "/icons/sdrpp.png"; }
+            macos_setDockIcon(macIcon);
+        }
+#else
         GLFWimage icons[10];
         icons[0].pixels = stbi_load(((std::string)(resDir + "/icons/sdrpp.png")).c_str(), &icons[0].width, &icons[0].height, 0, 4);
         icons[1].pixels = (unsigned char*)malloc(16 * 16 * 4);
@@ -157,6 +169,7 @@ namespace backend {
         for (int i = 1; i < 10; i++) {
             free(icons[i].pixels);
         }
+#endif
 
         // Add callback for max/min if GLFW supports it
     #if (GLFW_VERSION_MAJOR == 3) && (GLFW_VERSION_MINOR >= 3)

@@ -200,6 +200,8 @@ int sdrpp_main(int argc, char* argv[]) {
             // Display / waterfall
             "min", "max", "frequency", "showMenu", "menuWidth",
             "fftHeight", "centerTuning", "fftSpeed", "fftSmoothing",
+            // Zoom state
+            "bandwidth_slider", "bandwidth_view", "bandwidth_offset",
             // Theme / UI
             "theme", "uiScale",
             // Band colors

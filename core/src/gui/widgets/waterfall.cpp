@@ -272,10 +272,13 @@ namespace ImGui {
         lastMousePos = mousePos;
 
         std::string hoveredVFOName = "";
+        int hoveredZ = INT_MIN;
         for (auto const& [name, _vfo] : vfos) {
             if (ImGui::IsMouseHoveringRect(_vfo->rectMin, _vfo->rectMax) || ImGui::IsMouseHoveringRect(_vfo->wfRectMin, _vfo->wfRectMax)) {
-                hoveredVFOName = name;
-                break;
+                if (_vfo->zOrder > hoveredZ) {
+                    hoveredVFOName = name;
+                    hoveredZ = _vfo->zOrder;
+                }
             }
         }
 
@@ -1361,6 +1364,35 @@ namespace ImGui {
 
         if (notchVisible) {
             window->DrawList->AddRectFilled(notchMin, notchMax, IM_COL32(255, 0, 0, 127));
+        }
+
+        // Draw channel markers inside VFO rect
+        if (!markers.empty()) {
+            float vfoPixelWidth = rectMax.x - rectMin.x;
+            if (vfoPixelWidth > 4.0f && bandwidth > 0) {
+                float centerX = (rectMin.x + rectMax.x) * 0.5f;
+                float hzToPixel = vfoPixelWidth / (float)bandwidth;
+
+                for (auto& m : markers) {
+                    float mx = centerX + (float)m.offset * hzToPixel;
+                    if (mx < rectMin.x || mx > rectMax.x) { continue; }
+
+                    window->DrawList->AddLine(
+                        ImVec2(mx, rectMin.y), ImVec2(mx, rectMax.y),
+                        m.color, style::uiScale);
+
+                    if (m.label[0]) {
+                        // Draw label vertically (one char per line)
+                        float charH = ImGui::GetFontSize();
+                        float y = rectMin.y + 2;
+                        for (const char* p = m.label; *p && y + charH < rectMax.y; p++) {
+                            char ch[2] = {*p, '\0'};
+                            window->DrawList->AddText(ImVec2(mx + 2, y), m.color, ch);
+                            y += charH;
+                        }
+                    }
+                }
+            }
         }
 
         if (!gui::mainWindow.lockWaterfallControls && !gui::waterfall.inputHandled) {

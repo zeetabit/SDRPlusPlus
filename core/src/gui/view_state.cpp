@@ -13,12 +13,30 @@ void ViewStateCoordinator::loadFromConfig(float& sliderBw) {
         viewBw = conf.value("bandwidth_view", 0.0f);
         viewOffset = conf.value("bandwidth_offset", 0.0);
     });
-    if (sliderBw >= 0 && viewBw > 1.0) {
+    if (viewBw > 1.0) {
+        // Clamp viewBw to current total bandwidth
+        double wholeBw = wf->getBandwidth();
+        double savedViewBw = viewBw;
+        if (viewBw > wholeBw) { viewBw = wholeBw; }
+
+        // Recalculate slider from actual viewBw and current total bandwidth.
+        // The saved slider value is only correct if total BW hasn't changed.
+        sliderBw = gui_math::bandwidthToZoomSlider(viewBw, wholeBw);
+
         flog::info("Loaded zoom: slider={0}, view={1}, offset={2}", sliderBw, viewBw, viewOffset);
         this->onZoomChanged(sliderBw, viewBw, false);
-        // Restore saved offset after onZoomChanged (which may override it with VFO center)
         wf->setViewOffset(viewOffset);
-        lastSavedViewOffset = viewOffset;
+        double actualOffset = wf->getViewOffset();
+        lastSavedViewOffset = actualOffset;
+
+        // Persist corrected values if bandwidth change caused clamping
+        if (viewBw != savedViewBw || actualOffset != viewOffset) {
+            config->withConfig([&](json& conf) {
+                conf["bandwidth_slider"] = sliderBw;
+                conf["bandwidth_view"] = viewBw;
+                conf["bandwidth_offset"] = actualOffset;
+            });
+        }
     }
 }
 

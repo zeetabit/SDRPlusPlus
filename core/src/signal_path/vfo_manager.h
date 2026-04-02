@@ -24,6 +24,11 @@ public:
         double getBandwidth();
         int getReference();
         void setColor(ImU32 color);
+        void setVisible(bool visible);
+        bool isVisible();
+        void setZOrder(int z);
+        void setMarkers(const std::vector<ImGui::WaterfallVFO::Marker>& markers);
+        void clearMarkers();
         std::string getName();
 
         dsp::stream<dsp::complex_t>* output;
@@ -52,6 +57,9 @@ public:
     bool getBandwidthChanged(std::string name, bool erase = true);
     double getBandwidth(std::string name);
     void setColor(std::string name, ImU32 color);
+    void setVisible(std::string name, bool visible);
+    bool isVisible(std::string name);
+    void setZOrder(std::string name, int z);
     std::string getName();
     int getReference(std::string name);
     bool vfoExists(std::string name);

@@ -139,9 +139,6 @@ void MainWindow::init() {
     gui::waterfall.setBandwidth(8000000);
     gui::waterfall.setViewBandwidth(8000000);
     viewState.inject(&waterfallAdapter, &configAdapter);
-    float sliderBw;
-    viewState.loadFromConfig(sliderBw);
-    fftControls.bw = sliderBw;
 
     fftManager.inject(&fftBufferAdapter);
     fftManager.init(8192 * 8);
@@ -310,7 +307,12 @@ void MainWindow::init() {
     gui::freqSelect.frequencyChanged = false;
     sigpath::sourceManager.tune(frequency);
     gui::waterfall.setCenterFrequency(frequency);
-    fftControls.bw = 1.0;
+    fftControls.bw = 1.0;  // default before zoom restore
+    {
+        float sliderBw;
+        viewState.loadFromConfig(sliderBw);
+        fftControls.bw = sliderBw;
+    }
     gui::waterfall.vfoFreqChanged = false;
     gui::waterfall.centerFreqMoved = false;
     gui::waterfall.selectFirstVFO();

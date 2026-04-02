@@ -76,6 +76,19 @@ namespace ImGui {
 
         ImU32 color = IM_COL32(255, 255, 255, 50);
 
+        // Z-order for overlapping VFOs. Higher values are on top (receive
+        // mouse events first). Default 0. Use negative to send to back.
+        int zOrder = 0;
+
+        // Channel markers: vertical lines drawn inside the VFO rect.
+        // Each marker has an offset (Hz from VFO center), a color, and a label.
+        struct Marker {
+            double offset;   // Hz from VFO center
+            ImU32 color;
+            char label[24];
+        };
+        std::vector<Marker> markers;
+
         Event<double> onUserChangedBandwidth;
         Event<double> onUserChangedNotch;
     };

@@ -30,13 +30,18 @@ namespace ImGui {
 
         window->DrawList->AddRectFilled(min + ImVec2(0, 1), min + ImVec2(roundf((float)val * ratio), 10 * style::uiScale), IM_COL32(0, 136, 255, 255));
         window->DrawList->AddLine(min, min + ImVec2(0, (10.0f * style::uiScale) - 1), text, style::uiScale);
-        window->DrawList->AddLine(min + ImVec2(0, (10.0f * style::uiScale) - 1), min + ImVec2(size.x + 1, (10.0f * style::uiScale) - 1), text, style::uiScale);
+        window->DrawList->AddLine(min + ImVec2(0, (10.0f * style::uiScale) - 1), min + ImVec2(size.x, (10.0f * style::uiScale) - 1), text, style::uiScale);
 
         for (int i = 0; i < 10; i++) {
-            window->DrawList->AddLine(min + ImVec2(roundf((float)i * it), (10.0f * style::uiScale) - 1), min + ImVec2(roundf((float)i * it), (15.0f * style::uiScale) - 1), text, style::uiScale);
+            float tickX = roundf((float)i * it);
+            window->DrawList->AddLine(min + ImVec2(tickX, (10.0f * style::uiScale) - 1), min + ImVec2(tickX, (15.0f * style::uiScale) - 1), text, style::uiScale);
             sprintf(buf, "%d", i * 10);
             ImVec2 sz = ImGui::CalcTextSize(buf);
-            window->DrawList->AddText(min + ImVec2(roundf(((float)i * it) - (sz.x / 2.0)) + 1, 16.0f * style::uiScale), text, buf);
+            float labelX = roundf(tickX - (sz.x / 2.0f)) + 1;
+            // Clamp label within widget bounds
+            if (labelX < 0) { labelX = 0; }
+            if (labelX + sz.x > size.x) { labelX = size.x - sz.x; }
+            window->DrawList->AddText(min + ImVec2(labelX, 16.0f * style::uiScale), text, buf);
         }
     }
 }
