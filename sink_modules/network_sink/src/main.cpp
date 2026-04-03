@@ -48,6 +48,12 @@ public:
                 conf[_streamName]["stereo"] = false;
                 conf[_streamName]["listening"] = false;
             }
+            if (!conf[_streamName].contains("hostname")) { conf[_streamName]["hostname"] = "localhost"; }
+            if (!conf[_streamName].contains("port")) { conf[_streamName]["port"] = 7355; }
+            if (!conf[_streamName].contains("protocol")) { conf[_streamName]["protocol"] = SINK_MODE_UDP; }
+            if (!conf[_streamName].contains("sampleRate")) { conf[_streamName]["sampleRate"] = 48000.0; }
+            if (!conf[_streamName].contains("stereo")) { conf[_streamName]["stereo"] = false; }
+            if (!conf[_streamName].contains("listening")) { conf[_streamName]["listening"] = false; }
             std::string host = conf[_streamName]["hostname"];
             strcpy(hostname, host.c_str());
             port = conf[_streamName]["port"];

@@ -11,6 +11,7 @@ public:
     FileSelect(std::string defaultPath, std::vector<std::string> filter = { "All Files", "*" });
     bool render(std::string id);
     void setPath(std::string path, bool markChanged = false);
+    void clearChanged() { pathChanged = false; }
     bool pathIsValid();
 
     std::string expandString(std::string input);

@@ -92,7 +92,7 @@ public:
 
         // Initialize the config if it doesn't exist
         config.withConfig([&](json& conf) {
-            if (!conf.contains(name)) {
+            if (!conf.contains(name) || !conf[name].contains("selectedDemodId")) {
                 conf[name]["selectedDemodId"] = 1;
             }
             selectedDemodID = conf[name]["selectedDemodId"];
@@ -422,7 +422,6 @@ private:
     }
 
     void selectDemodByID(DemodID id) {
-        auto startTime = std::chrono::high_resolution_clock::now();
         demod::Demodulator* demod = instantiateDemod(id);
         if (!demod) {
             flog::error("Demodulator {0} not implemented", (int)id);
@@ -433,8 +432,6 @@ private:
 
         // Save config
         config.withConfig([&](json& conf) { conf[name]["selectedDemodId"] = id; });
-        auto endTime = std::chrono::high_resolution_clock::now();
-        flog::warn("Demod switch took {0} us", (int64_t)((std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime)).count()));
     }
 
     void selectDemod(demod::Demodulator* demod) {

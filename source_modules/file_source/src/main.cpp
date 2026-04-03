@@ -48,7 +48,32 @@ public:
 
         if (core::args["server"].b()) { return; }
 
-        config.readConfig([&](const json& conf) { fileSelect.setPath(conf["path"], true); });
+        config.readConfig([&](const json& conf) {
+            if (conf.contains("path")) {
+                fileSelect.setPath(conf["path"], true);
+            }
+        });
+
+        if (fileSelect.pathIsValid()) {
+            try {
+                reader = new WavReader(fileSelect.path);
+                if (reader->getSampleRate() == 0) {
+                    reader->close();
+                    delete reader;
+                    reader = NULL;
+                }
+                else {
+                    sampleRate = reader->getSampleRate();
+                    std::string filename = std::filesystem::path(fileSelect.path).filename().string();
+                    centerFreq = getFrequency(filename);
+                    // Clear the changed flag so drawMenu doesn't re-open on first render
+                    fileSelect.clearChanged();
+                }
+            }
+            catch (const std::exception& e) {
+                flog::error("Error opening saved file: {}", e.what());
+            }
+        }
 
         sigpath::sourceManager.registerSource("File", static_cast<ISource*>(this));
     }

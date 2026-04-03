@@ -49,6 +49,8 @@ public:
                 conf[_streamName]["device"] = "";
                 conf[_streamName]["devices"] = json::object();
             }
+            if (!conf[_streamName].contains("device")) { conf[_streamName]["device"] = ""; }
+            if (!conf[_streamName].contains("devices")) { conf[_streamName]["devices"] = json::object(); }
             selected = conf[_streamName]["device"];
         });
 

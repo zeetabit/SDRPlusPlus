@@ -41,6 +41,8 @@ public:
                 conf[_streamName]["device"] = "";
                 conf[_streamName]["devices"] = json({});
             }
+            if (!conf[_streamName].contains("device")) { conf[_streamName]["device"] = ""; }
+            if (!conf[_streamName].contains("devices")) { conf[_streamName]["devices"] = json({}); }
             device = conf[_streamName]["device"];
         });
 

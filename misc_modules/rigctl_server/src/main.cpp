@@ -45,6 +45,13 @@ public:
                 conf[name]["vfo"] = "";
                 conf[name]["recorder"] = "";
             }
+            if (!conf[name].contains("host")) { conf[name]["host"] = "localhost"; }
+            if (!conf[name].contains("port")) { conf[name]["port"] = 4532; }
+            if (!conf[name].contains("tuning")) { conf[name]["tuning"] = true; }
+            if (!conf[name].contains("recording")) { conf[name]["recording"] = false; }
+            if (!conf[name].contains("autoStart")) { conf[name]["autoStart"] = false; }
+            if (!conf[name].contains("vfo")) { conf[name]["vfo"] = ""; }
+            if (!conf[name].contains("recorder")) { conf[name]["recorder"] = ""; }
             std::string host = conf[name]["host"];
             strcpy(hostname, host.c_str());
             port = conf[name]["port"];

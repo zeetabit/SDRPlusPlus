@@ -22,12 +22,14 @@ add_executable(sdrpp_unit_tests
     unit/test_gui_math.cpp
     unit/test_view_state.cpp
     unit/test_vfo_handler.cpp
+    unit/test_config_manager.cpp
     # Integration tests
     integration/test_scheduled_dsp.cpp
     # Stubs for symbols needed by core sources in the test binary
     unit/stubs.cpp
     # Core sources needed by tests
     ${CORE_SRC}/utils/flog.cpp
+    ${CORE_SRC}/config.cpp
     ${CORE_SRC}/gui/view_state.cpp
     ${CORE_SRC}/gui/vfo_handler.cpp
 )

@@ -1,168 +1,214 @@
-#include <imgui.h>
-#include <config.h>
-#include <core.h>
-#include <gui/style.h>
+#include <module.h>
+#include <module_config.h>
+#include <module_manifest.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
-#include <module.h>
-#include <gui/widgets/folder_select.h>
-#include <utils/optionlist.h>
-#include <utils/service_registry.h>
-#include <utils/radio_state.h>
-#include "decoder.h"
-#include "cw/decoder.h"
+#include <core.h>
+#include <dsp/sink/handler_sink.h>
 
-#define CONCAT(a, b) ((std::string(a) + b).c_str())
+#include "cw/channel_manager.h"
+#include "cw/menu.h"
 
-SDRPP_MOD_INFO{
-    /* Name:            */ "cw_decoder",
-    /* Description:     */ "CW Decoder"
-    /* Author:          */ "zetabit / zeetabit",
-    /* Version:         */ 0, 0, 1,
-    /* Max instances    */ -1
-};
+#define CW_VFO_BANDWIDTH 3000.0f
+#define CW_SNAP_INTERVAL 10.0  // 10 Hz — fine tuning for CW
 
 ConfigManager config;
 
-enum Protocol {
-    PROTOCOL_INVALID = -1,
-    PROTOCOL_CW
+SDRPP_MOD_INFO{
+    "cw_decoder", "Multi-channel CW Decoder", "zetabit", 1, 0, 0, -1
 };
+
+SDRPP_MOD_INFO_V2{
+    "cw_decoder", "Multi-channel CW Decoder", "zetabit", 1, 0, 0, -1,
+    SDRPP_API_VERSION, MOD_CAP_DECODER, 0, nullptr,
+    R"({"autoDetect":true,"scanThreshold":10,"listenMode":false})",
+    "cw_decoder_config.json"
+};
+
+SDRPP_MOD_CONFIG(config);
 
 class CWDecoderModule : public ModuleManager::Instance {
 public:
-    CWDecoderModule(std::string name) {
-        this->name = name;
-
-        // Define protocols
-        protocols.define("CW", PROTOCOL_CW);
-
-        // Initialize VFO with default values
-        vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, 0, BAUDRATE, SAMPLERATE, BAUDRATE, BAUDRATE, true);
-        vfo->setSnapInterval(1);
-
-        // Select the protocol
-        selectProtocol(PROTOCOL_CW);
+    CWDecoderModule(std::string name, ModuleConfig* cfg) : name(name) {
+        mgr.init(CW_SAMPLERATE);
 
 
+        config.readConfig([&](const json& conf) {
+            if (conf.contains(name)) {
+                listenMode = conf[name].value("listenMode", false);
+            }
+        });
+        mgr.loadConfig(config, name);
+
+        sink.init(NULL, iqHandler, this);
         gui::menu.registerEntry(name, menuHandler, this, this);
+        enable();
     }
 
     ~CWDecoderModule() {
+        if (enabled) { disable(); }
         gui::menu.removeEntry(name);
-        // Stop DSP
-        if (enabled) {
-            decoder->stop();
-            decoder.reset();
-            sigpath::vfoManager.deleteVFO(vfo);
-        }
-
-        sigpath::sinkManager.unregisterStream(name);
     }
 
     void postInit() {}
 
     void enable() {
-        double bw = ServiceRegistry::get().query<IRadioState>("core")->getBandwidth();
-        vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, std::clamp<double>(0, -bw / 2.0, bw / 2.0), BAUDRATE, SAMPLERATE, BAUDRATE, BAUDRATE, true);
-        vfo->setSnapInterval(1);
-
-//        decoder->setVFO(vfo);
-//        decoder->start();
-
+        if (enabled) { return; }
         enabled = true;
+        vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER,
+            0, CW_VFO_BANDWIDTH, CW_SAMPLERATE, CW_VFO_BANDWIDTH, CW_VFO_BANDWIDTH, true);
+        if (vfo) {
+            vfo->setSnapInterval(CW_SNAP_INTERVAL);
+        }
+        mgr.createPinnedChannels();
+        sink.setInput(vfo->output);
+        sink.start();
+
+        if (listenMode) { applyListenMode(true); }
     }
 
     void disable() {
-//        decoder->stop();
-        sigpath::vfoManager.deleteVFO(vfo);
-        enabled = false;
-    }
-
-    bool isEnabled() {
-        return enabled;
-    }
-
-    void selectProtocol(Protocol newProto) {
-        // Cannot change while disabled
         if (!enabled) { return; }
-
-        // If the protocol hasn't changed, no need to do anything
-        if (newProto == proto) { return; }
-
-        // Delete current decoder
-        decoder.reset();
-
-        // Create a new decoder
-        switch (newProto) {
-        case PROTOCOL_CW:
-            decoder = std::make_unique<CWDecoder>(name, vfo);
-            break;
-        default:
-            flog::error("Tried to select unknown cw protocol");
-            return;
-        }
-
-        // Start the new decoder
-        decoder->start();
-
-        // Save selected protocol
-        proto = newProto;
+        enabled = false;  // Guard iqHandler first — stops processing immediately
+        sink.stop();
+        mgr.clearEntries();
+        if (vfo) { sigpath::vfoManager.deleteVFO(vfo); vfo = nullptr; }
     }
+
+    bool isEnabled() { return enabled; }
 
 private:
-    static void menuHandler(void* ctx) {
-        CWDecoderModule* _this = (CWDecoderModule*)ctx;
+    void applyListenMode(bool entering) {
+        if (!vfo) { return; }
+        if (entering) {
+            // Hide CW VFO — radio VFO is the only one visible
+            vfo->clearMarkers();
+            vfo->setVisible(false);
+            vfo->setZOrder(-1);
+            vfo->setBandwidthLimits(CW_VFO_BANDWIDTH, CW_SAMPLERATE, false);
+            auto [tName, tVfo] = findTargetVFO();
+            if (tVfo) {
+                vfo->setCenterOffset(tVfo->centerOffset);
+                lastTargetOffset = tVfo->centerOffset;
+                double bw = std::min(std::max(tVfo->bandwidth, (double)CW_VFO_BANDWIDTH), (double)CW_SAMPLERATE);
+                vfo->setBandwidth(bw);
+                lastTargetBw = bw;
+            }
+        }
+        else {
+            // Clear markers from target VFO before restoring CW VFO
+            auto [tName, tVfo] = findTargetVFO();
+            if (tVfo) { tVfo->markers.clear(); }
+            vfo->setVisible(true);
+            vfo->setZOrder(0);
+            vfo->setBandwidth(CW_VFO_BANDWIDTH);
+            vfo->setBandwidthLimits(CW_VFO_BANDWIDTH, CW_VFO_BANDWIDTH, true);
+            lastTargetBw = CW_VFO_BANDWIDTH;
+        }
+    }
 
-        float menuWidth = ImGui::GetContentRegionAvail().x;
+    // Find the VFO to follow: the currently selected VFO on the waterfall.
+    // In listen mode our VFO is hidden, so selectedVFO is always the radio's.
+    std::pair<std::string, ImGui::WaterfallVFO*> findTargetVFO() {
+        std::string sel = gui::waterfall.selectedVFO;
+        if (sel.empty() || sel == name) { return {"", nullptr}; }
+        auto it = gui::waterfall.vfos.find(sel);
+        if (it == gui::waterfall.vfos.end()) { return {"", nullptr}; }
+        return {sel, it->second};
+    }
 
-        if (!_this->enabled) { style::beginDisabled(); }
+    // Called every UI frame: track the target VFO center position.
+    void syncVFOs() {
+        if (!listenMode || !enabled || !vfo) { return; }
 
-        ImGui::LeftLabel("Protocol");
-        ImGui::FillWidth();
-        if (ImGui::Combo(("##cw_decoder_proto_" + _this->name).c_str(), &_this->protoId, _this->protocols.txt)) {
-            _this->selectProtocol(_this->protocols.value(_this->protoId));
+        auto [targetName, targetWtf] = findTargetVFO();
+        if (!targetWtf) { return; }
+
+        double targetCenter = targetWtf->centerOffset;
+        double targetBw = targetWtf->bandwidth;
+
+        // Track center position
+        if (fabs(targetCenter - lastTargetOffset) > 1.0) {
+            vfo->setCenterOffset(targetCenter);
+            lastTargetOffset = targetCenter;
         }
 
-        if (_this->decoder) { _this->decoder->showMenu(); }
+        // Track bandwidth — CW decoder VFO should cover at least the radio's BW
+        // but not exceed our max sample rate capability
+        double cwBw = std::min(std::max(targetBw, (double)CW_VFO_BANDWIDTH), (double)CW_SAMPLERATE);
+        if (fabs(cwBw - lastTargetBw) > 1.0) {
+            vfo->setBandwidth(cwBw);
+            lastTargetBw = cwBw;
+        }
+    }
 
-        ImGui::Button(("Record##cw_decoder_show_" + _this->name).c_str(), ImVec2(menuWidth, 0));
-        ImGui::Button(("Show Messages##cw_decoder_show_" + _this->name).c_str(), ImVec2(menuWidth, 0));
+    static void iqHandler(dsp::complex_t* data, int count, void* ctx) {
+        auto* _this = (CWDecoderModule*)ctx;
+        if (!_this->enabled) { return; }
+        _this->mgr.process(data, count);
+    }
 
-        if (!_this->enabled) { style::endDisabled(); }
+    static void menuHandler(void* ctx) {
+        auto* _this = (CWDecoderModule*)ctx;
+
+        _this->syncVFOs();
+        _this->mgr.updateChannels();
+
+        // Push channel markers to the visible VFO for waterfall display
+        {
+            auto markers = _this->mgr.getMarkers();
+            if (_this->listenMode) {
+                // CW VFO is hidden — put markers on the target (radio) VFO
+                auto [tName, tVfo] = _this->findTargetVFO();
+                if (tVfo) { tVfo->markers = markers; }
+            }
+            else if (_this->vfo) {
+                _this->vfo->setMarkers(markers);
+            }
+        }
+
+        bool configChanged = false;
+
+        if (ImGui::Checkbox(("Listen Mode##cw_listen_" + _this->name).c_str(), &_this->listenMode)) {
+            _this->applyListenMode(_this->listenMode);
+            configChanged = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("CW decoder follows the radio VFO.\nRadio VFO stays on top for tuning.");
+        }
+
+        if (cw::drawMenu(_this->mgr, _this->name, _this->enabled)) {
+            configChanged = true;
+        }
+
+        if (configChanged) {
+            _this->mgr.saveConfig(config, _this->name);
+            config.withConfig([&](json& conf) {
+                conf[_this->name]["listenMode"] = _this->listenMode;
+            });
+        }
     }
 
     std::string name;
-    uint vfoBandwidth = SAMPLERATE / 2;
-    bool enabled = true;
-
-    Protocol proto = PROTOCOL_INVALID;
-    int protoId = 0;
-
-    OptionList<std::string, Protocol> protocols;
-
-    // DSP Chain
-    VFOManager::VFO* vfo;
-    std::unique_ptr<Decoder> decoder;
-
-    bool showLines = false;
+    bool enabled = false;
+    bool listenMode = false;
+    double lastTargetOffset = 0;
+    double lastTargetBw = CW_VFO_BANDWIDTH;
+    VFOManager::VFO* vfo = nullptr;
+    dsp::sink::Handler<dsp::complex_t> sink;
+    cw::ChannelManager mgr;
 };
 
 MOD_EXPORT void _INIT_() {
-    // Create default recording directory
     json def = json({});
     config.setPath(core::args["root"].s() + "/cw_decoder_config.json");
     config.load(def);
     config.enableAutoSave();
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new CWDecoderModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(CWDecoderModule);
 
-MOD_EXPORT void _DELETE_INSTANCE_(void* instance) {
-    delete (CWDecoderModule*)instance;
-}
+MOD_EXPORT void _DELETE_INSTANCE_(void* instance) { delete (CWDecoderModule*)instance; }
 
 MOD_EXPORT void _END_() {
     config.disableAutoSave();

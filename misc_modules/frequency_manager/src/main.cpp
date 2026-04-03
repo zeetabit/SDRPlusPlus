@@ -68,10 +68,10 @@ public:
         this->name = name;
 
         std::string selList = config.readConfig<std::string>([](const json& conf) {
-            return (std::string)conf["selectedList"];
+            return conf.contains("selectedList") ? (std::string)conf["selectedList"] : "General";
         });
         bookmarkDisplayMode = config.readConfig<int>([](const json& conf) {
-            return (int)conf["bookmarkDisplayMode"];
+            return conf.contains("bookmarkDisplayMode") ? (int)conf["bookmarkDisplayMode"] : 0;
         });
 
         refreshLists();

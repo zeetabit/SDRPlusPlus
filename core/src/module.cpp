@@ -129,17 +129,16 @@ ModuleManager::Module_t ModuleManager::loadModule(std::string path) {
         return mod;
     }
 
-    // For V1 modules without _CONFIG_, create a proxy ConfigManager
+    // For V1 modules without _CONFIG_, create an in-memory-only proxy ConfigManager.
+    // V1 modules manage their own config file in _INIT_/_END_ — the proxy must NOT
+    // load from or save to that file, as it would overwrite the module's own writes.
     if (!mod.configManager) {
         std::string modName = mod.info->name;
         auto proxy = std::make_unique<ConfigManager>();
-        std::string root = (std::string)core::args["root"];
-        proxy->setPath(root + "/" + modName + "_config.json");
-        proxy->load(json({}));
-        proxy->enableAutoSave();
+        // No setPath/load/enableAutoSave — in-memory only, never touches disk
         mod.configManager = proxy.get();
         proxyConfigs[modName] = std::move(proxy);
-        flog::info("Created proxy config for V1 module '{0}'", modName);
+        flog::info("Created in-memory proxy config for V1 module '{0}'", modName);
     }
 
     modules[mod.info->name] = mod;

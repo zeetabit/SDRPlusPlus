@@ -43,6 +43,9 @@ public:
             if (!conf.contains(name)) {
                 conf[name]["showLines"] = false;
             }
+            if (!conf[name].contains("showLines")) {
+                conf[name]["showLines"] = false;
+            }
             showLines = conf[name]["showLines"];
             if (showLines) {
                 diag.lines.push_back(-1.0);

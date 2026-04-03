@@ -235,7 +235,7 @@ private:
                 }
                 int i = 0;
                 for (auto gain : gainList) {
-                    if (conf["devices"][name]["gains"].contains(gain)) {
+                    if (conf["devices"][name].contains("gains") && conf["devices"][name]["gains"].contains(gain)) {
                         uiGains[i] = conf["devices"][name]["gains"][gain];
                     }
                     else {

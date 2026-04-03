@@ -1,77 +1,154 @@
 #pragma once
-#include <dsp/stream.h>
-#include <dsp/buffer/reshaper.h>
-#include <dsp/multirate/rational_resampler.h>
-#include <dsp/sink/handler_sink.h>
-#include <dsp/demod/quadrature.h>
-#include <dsp/clock_recovery/mm.h>
-#include <dsp/taps/root_raised_cosine.h>
-#include <dsp/correction/dc_blocker.h>
-#include <dsp/loop/fast_agc.h>
-#include <dsp/digital/binary_slicer.h>
-#include <dsp/routing/doubler.h>
+#include <dsp/types.h>
+#include <dsp/buffer/buffer.h>
+#include <dsp/taps/tap.h>
+#include <dsp/taps/low_pass.h>
+#include <volk/volk.h>
+#include <cmath>
+#include <cstring>
 
-class CWDSP : public dsp::Processor<dsp::complex_t, uint8_t> {
-    using base_type = dsp::Processor<dsp::complex_t, uint8_t>;
-public:
-    CWDSP() {}
-    CWDSP(dsp::stream<dsp::complex_t>* in, double samplerate, double baudrate) { init(in, samplerate, baudrate); }
+namespace cw {
 
-    void init(dsp::stream<dsp::complex_t>* in, double samplerate, double baudrate) {
-        // Save settings
-        _samplerate = samplerate;
+    // Inline DSP processor: extracts CW tone envelope from IQ samples.
+    // No streams or threading — called directly from a handler callback.
+    //
+    // Chain: FreqXlator → Decimate 8:1 → Narrow LPF → Magnitude → Smoothing LPF
+    //
+    // Input:  complex_t at SAMPLERATE (8000 Hz)
+    // Output: float envelope at INTERNAL_RATE (1000 Hz)
+    class EnvelopeDSP {
+    public:
+        void init(float toneFreq, float sampleRate, float internalRate) {
+            _sampleRate = sampleRate;
+            _internalRate = internalRate;
+            _decimRatio = (int)(sampleRate / internalRate);
 
-        // Configure blocks
-        demod.init(NULL, -4500.0, samplerate);
-        //taps = dsp::taps::bandPass<dsp::complex_t>(0, 2375, 100, 5000);
-        float taps[] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
-        shape = dsp::taps::fromArray<float>(10, taps);
-        fir.init(NULL, shape);
-        recov.init(NULL, samplerate/baudrate, 1e-4, 1.0, 0.05);
+            // Xlator state
+            setToneFreq(toneFreq);
 
-        // Free useless buffers
-        fir.out.free();
-        recov.out.free();
+            // Narrow BPF (complex lowpass at internal rate)
+            // 100 Hz cutoff, 100 Hz transition → ~200 Hz effective BW, ~20 taps.
+            // Must be wide enough for CW keying bandwidth (50-80 Hz at typical WPM)
+            // while rejecting adjacent signals 200+ Hz away.
+            bpfTaps = dsp::taps::lowPass(100.0, 100.0, _internalRate);
+            bpfBufSize = bpfTaps.size - 1;
+            bpfBuffer = dsp::buffer::alloc<dsp::complex_t>(bpfBufSize + 65536);
+            dsp::buffer::clear(bpfBuffer, bpfBufSize);
+            bpfBufStart = &bpfBuffer[bpfBufSize];
 
-        // Init base
-        base_type::init(in);
-    }
+            // Smoothing LPF (float lowpass at internal rate)
+            // 80 Hz cutoff, 100 Hz transition → ~20 taps.
+            // Wider bandwidth preserves edge timing for jittery/QSB signals.
+            // The matched filter in channel.h provides additional narrowing.
+            smoothTaps = dsp::taps::lowPass(80.0, 100.0, _internalRate);
+            smoothBufSize = smoothTaps.size - 1;
+            smoothBuffer = dsp::buffer::alloc<float>(smoothBufSize + 65536);
+            dsp::buffer::clear(smoothBuffer, smoothBufSize);
+            smoothBufStart = &smoothBuffer[smoothBufSize];
 
-    int process(int count, dsp::complex_t* in, float* softOut, uint8_t* out) {
-        count = demod.process(count, in, demod.out.readBuf);
-        count = fir.process(count, demod.out.readBuf, demod.out.readBuf);
-        count = recov.process(count, demod.out.readBuf, softOut);
-        dsp::digital::BinarySlicer::process(count, softOut, out);
-        return count;
-    }
+            // Intermediate buffers
+            xlatedBuf = dsp::buffer::alloc<dsp::complex_t>(65536);
+            decimBuf = dsp::buffer::alloc<dsp::complex_t>(65536);
+            filteredBuf = dsp::buffer::alloc<dsp::complex_t>(65536);
+            magBuf = dsp::buffer::alloc<float>(65536);
+        }
 
-    void setBaudrate(double baudrate) {
-        assert(base_type::_block_init);
-        std::lock_guard<std::recursive_mutex> lck(base_type::ctrlMtx);
-        base_type::tempStop();
-        
-        base_type::tempStart();
-    }
+        ~EnvelopeDSP() {
+            if (bpfTaps.taps) { dsp::taps::free(bpfTaps); }
+            if (smoothTaps.taps) { dsp::taps::free(smoothTaps); }
+            if (bpfBuffer) { dsp::buffer::free(bpfBuffer); }
+            if (smoothBuffer) { dsp::buffer::free(smoothBuffer); }
+            if (xlatedBuf) { dsp::buffer::free(xlatedBuf); }
+            if (decimBuf) { dsp::buffer::free(decimBuf); }
+            if (filteredBuf) { dsp::buffer::free(filteredBuf); }
+            if (magBuf) { dsp::buffer::free(magBuf); }
+        }
 
-    int run() {
-        int count = base_type::_in->read();
-        if (count < 0) { return -1; }
+        // Process IQ samples, output envelope. Returns output sample count.
+        // Input count must not exceed 65536 samples.
+        int process(int count, const dsp::complex_t* in, float* out) {
+            if (count > 65536) { count = 65536; }
+            // 1. Frequency shift tone to DC
+#if VOLK_VERSION_MAJOR > 3 || (VOLK_VERSION_MAJOR == 3 && VOLK_VERSION_MINOR >= 1)
+            volk_32fc_s32fc_x2_rotator2_32fc((lv_32fc_t*)xlatedBuf, (lv_32fc_t*)in, &xlPhaseDelta, &xlPhase, count);
+#else
+            volk_32fc_s32fc_x2_rotator_32fc((lv_32fc_t*)xlatedBuf, (lv_32fc_t*)in, xlPhaseDelta, &xlPhase, count);
+#endif
 
-        count = process(count, base_type::_in->readBuf, soft.writeBuf, base_type::out.writeBuf);
+            // 2. Decimate (simple take-every-Nth after the narrow filter will alias,
+            //    but we're about to narrow-filter at the decimated rate anyway.
+            //    For proper anti-alias, decimate with averaging.)
+            int decimCount = count / _decimRatio;
+            for (int i = 0; i < decimCount; i++) {
+                // Average _decimRatio samples for anti-alias
+                dsp::complex_t sum = {0, 0};
+                int base = i * _decimRatio;
+                for (int j = 0; j < _decimRatio; j++) {
+                    sum.re += xlatedBuf[base + j].re;
+                    sum.im += xlatedBuf[base + j].im;
+                }
+                float scale = 1.0f / _decimRatio;
+                decimBuf[i].re = sum.re * scale;
+                decimBuf[i].im = sum.im * scale;
+            }
 
-        base_type::_in->flush();
-        if (!base_type::out.swap(count)) { return -1; }
-        if (count) { if (!soft.swap(count)) { return -1; } }
-        return count;
-    }
+            // 3. Narrow bandpass FIR (complex)
+            memcpy(bpfBufStart, decimBuf, decimCount * sizeof(dsp::complex_t));
+            for (int i = 0; i < decimCount; i++) {
+                volk_32fc_32f_dot_prod_32fc((lv_32fc_t*)&filteredBuf[i],
+                    (lv_32fc_t*)&bpfBuffer[i], bpfTaps.taps, bpfTaps.size);
+            }
+            memmove(bpfBuffer, &bpfBuffer[decimCount], bpfBufSize * sizeof(dsp::complex_t));
 
-    dsp::stream<float> soft;
+            // 4. Magnitude (envelope)
+            volk_32fc_magnitude_32f(magBuf, (lv_32fc_t*)filteredBuf, decimCount);
 
-private:
-    dsp::demod::Quadrature demod;
-    dsp::tap<float> shape;
-    dsp::filter::FIR<float, float> fir;
-    dsp::clock_recovery::MM<float> recov;
+            // 5. Smoothing LPF (float)
+            memcpy(smoothBufStart, magBuf, decimCount * sizeof(float));
+            for (int i = 0; i < decimCount; i++) {
+                volk_32f_x2_dot_prod_32f(&out[i], &smoothBuffer[i], smoothTaps.taps, smoothTaps.size);
+            }
+            memmove(smoothBuffer, &smoothBuffer[decimCount], smoothBufSize * sizeof(float));
 
-    double _samplerate;
-};
+            return decimCount;
+        }
+
+        void setToneFreq(float freq) {
+            _toneFreq = freq;
+            float omega = -2.0f * M_PI * _toneFreq / _sampleRate;
+            xlPhaseDelta = {cosf(omega), sinf(omega)};
+            xlPhase = {1.0f, 0.0f};
+        }
+
+        float getToneFreq() const { return _toneFreq; }
+
+    private:
+        float _sampleRate = 8000;
+        float _internalRate = 1000;
+        float _toneFreq = 700;
+        int _decimRatio = 8;
+
+        // Frequency xlator state
+        lv_32fc_t xlPhase = {1.0f, 0.0f};
+        lv_32fc_t xlPhaseDelta = {1.0f, 0.0f};
+
+        // Narrow BPF state
+        dsp::tap<float> bpfTaps = {};
+        dsp::complex_t* bpfBuffer = nullptr;
+        dsp::complex_t* bpfBufStart = nullptr;
+        int bpfBufSize = 0;
+
+        // Smoothing LPF state
+        dsp::tap<float> smoothTaps = {};
+        float* smoothBuffer = nullptr;
+        float* smoothBufStart = nullptr;
+        int smoothBufSize = 0;
+
+        // Intermediate buffers
+        dsp::complex_t* xlatedBuf = nullptr;
+        dsp::complex_t* decimBuf = nullptr;
+        dsp::complex_t* filteredBuf = nullptr;
+        float* magBuf = nullptr;
+    };
+
+}

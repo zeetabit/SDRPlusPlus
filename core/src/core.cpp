@@ -327,11 +327,8 @@ int sdrpp_main(int argc, char* argv[]) {
     sigpath::iqFrontEnd.stop();
     flog::info("[SHUTDOWN] Step 2/8: Done");
 
-    flog::info("[SHUTDOWN] Step 3/8: Disabling proxy config auto-save...");
-    for (auto& [name, proxy] : core::moduleManager.proxyConfigs) {
-        flog::info("[SHUTDOWN]   Disabling auto-save for proxy '{0}'", name);
-        proxy->disableAutoSave();
-    }
+    flog::info("[SHUTDOWN] Step 3/8: Clearing proxy configs...");
+    core::moduleManager.proxyConfigs.clear();
     flog::info("[SHUTDOWN] Step 3/8: Done");
 
     flog::info("[SHUTDOWN] Step 4/8: Deleting module instances...");
@@ -354,13 +351,7 @@ int sdrpp_main(int argc, char* argv[]) {
     }
     flog::info("[SHUTDOWN] Step 5/8: Done");
 
-    flog::info("[SHUTDOWN] Step 6/8: Saving and clearing proxy configs...");
-    for (auto& [name, proxy] : core::moduleManager.proxyConfigs) {
-        flog::info("[SHUTDOWN]   Saving proxy config '{0}'", name);
-        proxy->save();
-    }
-    core::moduleManager.proxyConfigs.clear();
-    flog::info("[SHUTDOWN] Step 6/8: Done");
+    flog::info("[SHUTDOWN] Step 6/8: Done (proxy configs already cleared)");
 
     flog::info("[SHUTDOWN] Step 7/8: Ending backend...");
     backend::end();
