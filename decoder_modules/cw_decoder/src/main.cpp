@@ -29,16 +29,12 @@ SDRPP_MOD_CONFIG(config);
 
 class CWDecoderModule : public ModuleManager::Instance {
 public:
-    CWDecoderModule(std::string name, ModuleConfig* cfg) : name(name) {
+    CWDecoderModule(std::string name, ModuleConfig* cfg) : name(name), cfg(cfg) {
         mgr.init(CW_SAMPLERATE);
+        mgr.debugLog = cfg->get<bool>("debugLog", false);
 
-
-        config.readConfig([&](const json& conf) {
-            if (conf.contains(name)) {
-                listenMode = conf[name].value("listenMode", false);
-            }
-        });
-        mgr.loadConfig(config, name);
+        listenMode = cfg->get<bool>("listenMode", false);
+        mgr.loadConfig(cfg);
 
         sink.init(NULL, iqHandler, this);
         gui::menu.registerEntry(name, menuHandler, this, this);
@@ -182,14 +178,13 @@ private:
         }
 
         if (configChanged) {
-            _this->mgr.saveConfig(config, _this->name);
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["listenMode"] = _this->listenMode;
-            });
+            _this->mgr.saveConfig(_this->cfg);
+            _this->cfg->set("listenMode", _this->listenMode);
         }
     }
 
     std::string name;
+    ModuleConfig* cfg = nullptr;
     bool enabled = false;
     bool listenMode = false;
     double lastTargetOffset = 0;
@@ -200,15 +195,12 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    config.setPath(core::args["root"].s() + "/cw_decoder_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "cw_decoder_config.json");
 }
 
-SDRPP_CREATE_INSTANCE_V2(CWDecoderModule);
+SDRPP_CREATE_INSTANCE_V2(CWDecoderModule)
 
-MOD_EXPORT void _DELETE_INSTANCE_(void* instance) { delete (CWDecoderModule*)instance; }
+MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* inst) { delete (CWDecoderModule*)inst; }
 
 MOD_EXPORT void _END_() {
     config.disableAutoSave();

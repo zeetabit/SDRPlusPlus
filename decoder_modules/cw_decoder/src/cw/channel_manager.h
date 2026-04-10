@@ -2,6 +2,7 @@
 #include "channel.h"
 #include "tone_scanner.h"
 #include <config.h>
+#include <module_config.h>
 #include <gui/widgets/waterfall.h>
 #include <utils/flog.h>
 #include <vector>
@@ -44,6 +45,8 @@ namespace cw {
     // A mutex protects entries during structural changes.
     class ChannelManager {
     public:
+        bool debugLog = false;  // Set from module entrypoint to enable channel debug output
+
         void init(float sampleRate) {
             scanner.init(sampleRate, 1024);
         }
@@ -55,7 +58,7 @@ namespace cw {
             if ((int)entries.size() >= maxChannels) { return; }
             auto ch = std::make_unique<Channel>();
             ch->init(nextId++, toneFreq);
-            ch->debugLog = true;  // TEMP: enable decode logging
+            ch->debugLog = debugLog;
             entries.push_back({std::move(ch), pinned, 0});
         }
 
@@ -188,7 +191,7 @@ namespace cw {
                 else if ((int)entries.size() < maxChannels) {
                     auto ch = std::make_unique<Channel>();
                     ch->init(nextId++, st.frequency);
-                    ch->debugLog = true;  // TEMP: enable decode logging
+                    ch->debugLog = debugLog;
                     entries.push_back({std::move(ch), false, 0});
                     flog::info("CW confirmed tone at {0:.0f} Hz ({1:.1f} dB)", st.frequency, st.power);
                 }
@@ -248,10 +251,8 @@ namespace cw {
             }
         }
 
-        void loadConfig(ConfigManager& config, const std::string& name) {
-            config.readConfig([&](const json& conf) {
-                if (!conf.contains(name)) { return; }
-                auto& c = conf[name];
+        void loadConfig(ModuleConfig* cfg) {
+            cfg->read([&](const json& c) {
                 maxChannels = c.value("maxChannels", CW_MAX_CHANNELS_DEFAULT);
                 if (maxChannels < 1) { maxChannels = 1; }
                 if (maxChannels > CW_MAX_CHANNELS_HARD) { maxChannels = CW_MAX_CHANNELS_HARD; }
@@ -266,15 +267,15 @@ namespace cw {
             });
         }
 
-        void saveConfig(ConfigManager& config, const std::string& name) {
+        void saveConfig(ModuleConfig* cfg) {
             rebuildPinnedList();
-            config.withConfig([&](json& conf) {
-                conf[name]["maxChannels"] = maxChannels;
-                conf[name]["autoDetect"] = autoDetect;
-                conf[name]["scanThreshold"] = scanThreshold;
+            cfg->with([&](json& conf) {
+                conf["maxChannels"] = maxChannels;
+                conf["autoDetect"] = autoDetect;
+                conf["scanThreshold"] = scanThreshold;
                 json pinned = json::array();
                 for (auto& t : pinnedTones) { pinned.push_back({{"tone", t}}); }
-                conf[name]["pinnedChannels"] = pinned;
+                conf["pinnedChannels"] = pinned;
             });
         }
 

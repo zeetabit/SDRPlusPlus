@@ -46,13 +46,13 @@ namespace cw {
 
         void process(int count, const dsp::complex_t* iq) {
             if (!active) { return; }
-            if (totalSamples == 0) {
-                fprintf(stderr, "[CW ch%d] FIRST PROCESS debugLog=%d tone=%.1f active=%d\n", id, (int)debugLog, toneFreq, (int)active);
+            if (debugLog && totalSamples == 0) {
+                fprintf(stderr, "[CW ch%d] INIT tone=%.1f\n", id, toneFreq);
                 fflush(stderr);
             }
-            if (totalSamples % 10000 == 0) {
-                fprintf(stderr, "[CW ch%d] t=%.1fs snr=%.1f wpm=%.1f locked=%d frozen=%d dbg=%d\n",
-                    id, (float)totalSamples / CW_INTERNAL_RATE, snr, wpm, (int)timingWasLocked, (int)timingFrozen, (int)debugLog);
+            if (debugLog && (totalSamples % 10000 == 0)) {
+                fprintf(stderr, "[CW ch%d] t=%.1fs snr=%.1f wpm=%.1f locked=%d frozen=%d\n",
+                    id, (float)totalSamples / CW_INTERNAL_RATE, snr, wpm, (int)timingWasLocked, (int)timingFrozen);
                 fflush(stderr);
             }
 

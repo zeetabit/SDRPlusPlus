@@ -247,6 +247,11 @@ namespace cw {
                 }
                 if (!all.empty()) { ImGui::SetClipboardText(all.c_str()); }
             }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(CONCAT("Reset All##cw_rst_", name))) {
+                std::string all;
+                for (auto& e : mgr.entries) { e.channel->reset();}
+            }
         }
 
         if (!enabled) { style::endDisabled(); }
