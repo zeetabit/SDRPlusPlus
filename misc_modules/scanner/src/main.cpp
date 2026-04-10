@@ -1,5 +1,7 @@
 #include <imgui.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <gui/style.h>
 #include <signal_path/signal_path.h>
@@ -15,9 +17,14 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
+SDRPP_MOD_INFO_V2{
+    "scanner", "Frequency scanner for SDR++", "Ryzerth", 0, 1, 0, 1,
+    SDRPP_API_VERSION, MOD_CAP_MISC, 0, nullptr, nullptr, nullptr
+};
+
 class ScannerModule : public ModuleManager::Instance {
 public:
-    ScannerModule(std::string name) {
+    ScannerModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
         gui::menu.registerEntry(name, menuHandler, this, NULL);
     }
@@ -294,16 +301,12 @@ private:
     std::mutex scanMtx;
 };
 
-MOD_EXPORT void _INIT_() {
-    // Nothing here
-}
+MOD_EXPORT void _INIT_() {}
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new ScannerModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(ScannerModule)
 
-MOD_EXPORT void _DELETE_INSTANCE_(void* instance) {
-    delete (ScannerModule*)instance;
+MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* inst) {
+    delete (ScannerModule*)inst;
 }
 
 MOD_EXPORT void _END_() {

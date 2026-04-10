@@ -1,7 +1,10 @@
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <gui/style.h>
 #include <config.h>
@@ -22,7 +25,20 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "rtl_sdr_source",
+    /* Description:     */ "RTL-SDR source module for SDR++",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 1, 0,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
+};
+
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 const double sampleRates[] = {
     250000,
@@ -54,23 +70,14 @@ const char* sampleRatesTxt[] = {
 
 const char* directSamplingModesTxt = "Disabled\0I branch\0Q branch\0";
 
-class RTLSDRSourceModule : public ModuleManager::Instance {
+class RTLSDRSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    RTLSDRSourceModule(std::string name) {
+    RTLSDRSourceModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
         serverMode = (bool)core::args["server"];
 
         sampleRate = sampleRates[0];
-
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
 
         strcpy(dbTxt, "--");
 
@@ -92,11 +99,11 @@ public:
         });
         selectByName(selectedDevName);
 
-        sigpath::sourceManager.registerSource("RTL-SDR", &handler);
+        sigpath::sourceManager.registerSource("RTL-SDR", static_cast<ISource*>(this));
     }
 
     ~RTLSDRSourceModule() {
-        stop(this);
+        stop();
         sigpath::sourceManager.unregisterSource("RTL-SDR");
     }
 
@@ -113,6 +120,9 @@ public:
     bool isEnabled() {
         return enabled;
     }
+
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
 
     void refresh() {
         devNames.clear();
@@ -268,29 +278,26 @@ private:
         return std::string(buf);
     }
 
-    static void menuSelected(void* ctx) {
-        RTLSDRSourceModule* _this = (RTLSDRSourceModule*)ctx;
-        core::setInputSampleRate(_this->sampleRate);
-        flog::info("RTLSDRSourceModule '{0}': Menu Select!", _this->name);
+    void onSelect() override {
+        core::setInputSampleRate(sampleRate);
+        flog::info("RTLSDRSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        RTLSDRSourceModule* _this = (RTLSDRSourceModule*)ctx;
-        flog::info("RTLSDRSourceModule '{0}': Menu Deselect!", _this->name);
+    void onDeselect() override {
+        flog::info("RTLSDRSourceModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        RTLSDRSourceModule* _this = (RTLSDRSourceModule*)ctx;
-        if (_this->running) { return; }
-        if (_this->selectedDevName == "") {
+    void start() override {
+        if (running) { return; }
+        if (selectedDevName == "") {
             flog::error("No device selected");
             return;
         }
 
 #ifndef __ANDROID__
-        int oret = rtlsdr_open(&_this->openDev, _this->devId);
+        int oret = rtlsdr_open(&openDev, devId);
 #else
-        int oret = rtlsdr_open_sys_dev(&_this->openDev, _this->devFd);
+        int oret = rtlsdr_open_sys_dev(&openDev, devFd);
 #endif
 
         if (oret < 0) {
@@ -298,203 +305,199 @@ private:
             return;
         }
 
-        flog::info("RTL-SDR Sample Rate: {0}", _this->sampleRate);
+        flog::info("RTL-SDR Sample Rate: {0}", sampleRate);
 
-        rtlsdr_set_sample_rate(_this->openDev, _this->sampleRate);
-        rtlsdr_set_center_freq(_this->openDev, _this->freq);
-        rtlsdr_set_freq_correction(_this->openDev, _this->ppm);
-        rtlsdr_set_tuner_bandwidth(_this->openDev, 0);
-        rtlsdr_set_direct_sampling(_this->openDev, _this->directSamplingMode);
-        rtlsdr_set_bias_tee(_this->openDev, _this->biasT);
-        rtlsdr_set_agc_mode(_this->openDev, _this->rtlAgc);
-        rtlsdr_set_tuner_gain(_this->openDev, _this->gainList[_this->gainId]);
-        if (_this->tunerAgc) {
-            rtlsdr_set_tuner_gain_mode(_this->openDev, 0);
+        rtlsdr_set_sample_rate(openDev, sampleRate);
+        rtlsdr_set_center_freq(openDev, freq);
+        rtlsdr_set_freq_correction(openDev, ppm);
+        rtlsdr_set_tuner_bandwidth(openDev, 0);
+        rtlsdr_set_direct_sampling(openDev, directSamplingMode);
+        rtlsdr_set_bias_tee(openDev, biasT);
+        rtlsdr_set_agc_mode(openDev, rtlAgc);
+        rtlsdr_set_tuner_gain(openDev, gainList[gainId]);
+        if (tunerAgc) {
+            rtlsdr_set_tuner_gain_mode(openDev, 0);
         }
         else {
-            rtlsdr_set_tuner_gain_mode(_this->openDev, 1);
-            rtlsdr_set_tuner_gain(_this->openDev, _this->gainList[_this->gainId]);
+            rtlsdr_set_tuner_gain_mode(openDev, 1);
+            rtlsdr_set_tuner_gain(openDev, gainList[gainId]);
         }
-        rtlsdr_set_offset_tuning(_this->openDev, _this->offsetTuning);
+        rtlsdr_set_offset_tuning(openDev, offsetTuning);
 
-        _this->asyncCount = (int)roundf(_this->sampleRate / (200 * 512)) * 512;
+        asyncCount = (int)roundf(sampleRate / (200 * 512)) * 512;
 
-        _this->workerThread = std::thread(&RTLSDRSourceModule::worker, _this);
+        workerThread = std::thread(&RTLSDRSourceModule::worker, this);
 
-        _this->running = true;
-        flog::info("RTLSDRSourceModule '{0}': Start!", _this->name);
+        running = true;
+        flog::info("RTLSDRSourceModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        RTLSDRSourceModule* _this = (RTLSDRSourceModule*)ctx;
-        if (!_this->running) { return; }
-        _this->running = false;
-        _this->stream.stopWriter();
-        rtlsdr_cancel_async(_this->openDev);
-        if (_this->workerThread.joinable()) { _this->workerThread.join(); }
-        _this->stream.clearWriteStop();
-        rtlsdr_close(_this->openDev);
-        flog::info("RTLSDRSourceModule '{0}': Stop!", _this->name);
+    void stop() override {
+        if (!running) { return; }
+        running = false;
+        stream.stopWriter();
+        rtlsdr_cancel_async(openDev);
+        if (workerThread.joinable()) { workerThread.join(); }
+        stream.clearWriteStop();
+        rtlsdr_close(openDev);
+        flog::info("RTLSDRSourceModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
-        RTLSDRSourceModule* _this = (RTLSDRSourceModule*)ctx;
-        if (_this->running) {
+    void tune(double freq) override {
+        if (running) {
             uint32_t newFreq = freq;
             int i;
             for (i = 0; i < 10; i++) {
-                rtlsdr_set_center_freq(_this->openDev, freq);
-                if (rtlsdr_get_center_freq(_this->openDev) == newFreq) { break; }
+                rtlsdr_set_center_freq(openDev, freq);
+                if (rtlsdr_get_center_freq(openDev) == newFreq) { break; }
             }
             if (i > 1) {
                 flog::warn("RTL-SDR took {0} attempts to tune...", i);
             }
         }
-        _this->freq = freq;
-        flog::info("RTLSDRSourceModule '{0}': Tune: {1}!", _this->name, freq);
+        freq = freq;
+        flog::info("RTLSDRSourceModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        RTLSDRSourceModule* _this = (RTLSDRSourceModule*)ctx;
-
-        if (_this->running) { SmGui::BeginDisabled(); }
+    void drawMenu() override {
+        if (running) { SmGui::BeginDisabled(); }
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Combo(CONCAT("##_rtlsdr_dev_sel_", _this->name), &_this->devId, _this->devListTxt.c_str())) {
-            _this->selectById(_this->devId);
-            core::setInputSampleRate(_this->sampleRate);
-            if (_this->selectedDevName != "") {
-                config.withConfig([&](json& conf) { conf["device"] = _this->selectedDevName; });
+        if (SmGui::Combo(CONCAT("##_rtlsdr_dev_sel_", name), &devId, devListTxt.c_str())) {
+            selectById(devId);
+            core::setInputSampleRate(sampleRate);
+            if (selectedDevName != "") {
+                config.withConfig([&](json& conf) { conf["device"] = selectedDevName; });
             }
         }
 
-        if (SmGui::Combo(CONCAT("##_rtlsdr_sr_sel_", _this->name), &_this->srId, _this->sampleRateListTxt.c_str())) {
-            _this->sampleRate = sampleRates[_this->srId];
-            core::setInputSampleRate(_this->sampleRate);
-            if (_this->selectedDevName != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedDevName]["sampleRate"] = _this->sampleRate; });
+        if (SmGui::Combo(CONCAT("##_rtlsdr_sr_sel_", name), &srId, sampleRateListTxt.c_str())) {
+            sampleRate = sampleRates[srId];
+            core::setInputSampleRate(sampleRate);
+            if (selectedDevName != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedDevName]["sampleRate"] = sampleRate; });
             }
         }
 
         SmGui::SameLine();
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Button(CONCAT("Refresh##_rtlsdr_refr_", _this->name)/*, ImVec2(refreshBtnWdith, 0)*/)) {
-            _this->refresh();
-            _this->selectByName(_this->selectedDevName);
-            core::setInputSampleRate(_this->sampleRate);
+        if (SmGui::Button(CONCAT("Refresh##_rtlsdr_refr_", name)/*, ImVec2(refreshBtnWdith, 0)*/)) {
+            refresh();
+            selectByName(selectedDevName);
+            core::setInputSampleRate(sampleRate);
         }
 
-        if (_this->running) { SmGui::EndDisabled(); }
+        if (running) { SmGui::EndDisabled(); }
 
         // Rest of rtlsdr config here
         SmGui::LeftLabel("Direct Sampling");
         SmGui::FillWidth();
-        if (SmGui::Combo(CONCAT("##_rtlsdr_ds_", _this->name), &_this->directSamplingMode, directSamplingModesTxt)) {
-            if (_this->running) {
-                rtlsdr_set_direct_sampling(_this->openDev, _this->directSamplingMode);
+        if (SmGui::Combo(CONCAT("##_rtlsdr_ds_", name), &directSamplingMode, directSamplingModesTxt)) {
+            if (running) {
+                rtlsdr_set_direct_sampling(openDev, directSamplingMode);
 
                 // Update gains (fix for librtlsdr bug)
-                if (_this->directSamplingMode == false) {
-                    rtlsdr_set_agc_mode(_this->openDev, _this->rtlAgc);
-                    if (_this->tunerAgc) {
-                        rtlsdr_set_tuner_gain_mode(_this->openDev, 0);
+                if (directSamplingMode == false) {
+                    rtlsdr_set_agc_mode(openDev, rtlAgc);
+                    if (tunerAgc) {
+                        rtlsdr_set_tuner_gain_mode(openDev, 0);
                     }
                     else {
-                        rtlsdr_set_tuner_gain_mode(_this->openDev, 1);
-                        rtlsdr_set_tuner_gain(_this->openDev, _this->gainList[_this->gainId]);
+                        rtlsdr_set_tuner_gain_mode(openDev, 1);
+                        rtlsdr_set_tuner_gain(openDev, gainList[gainId]);
                     }
                 }
             }
-            if (_this->selectedDevName != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedDevName]["directSampling"] = _this->directSamplingMode; });
+            if (selectedDevName != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedDevName]["directSampling"] = directSamplingMode; });
             }
         }
 
         SmGui::LeftLabel("PPM Correction");
         SmGui::FillWidth();
-        if (SmGui::InputInt(CONCAT("##_rtlsdr_ppm_", _this->name), &_this->ppm, 1, 10)) {
-            _this->ppm = std::clamp<int>(_this->ppm, -1000000, 1000000);
-            if (_this->running) {
-                rtlsdr_set_freq_correction(_this->openDev, _this->ppm);
+        if (SmGui::InputInt(CONCAT("##_rtlsdr_ppm_", name), &ppm, 1, 10)) {
+            ppm = std::clamp<int>(ppm, -1000000, 1000000);
+            if (running) {
+                rtlsdr_set_freq_correction(openDev, ppm);
             }
-            if (_this->selectedDevName != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedDevName]["ppm"] = _this->ppm; });
+            if (selectedDevName != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedDevName]["ppm"] = ppm; });
             }
         }
 
-        if (_this->tunerAgc || _this->gainList.size() == 0) { SmGui::BeginDisabled(); }
+        if (tunerAgc || gainList.size() == 0) { SmGui::BeginDisabled(); }
 
         SmGui::LeftLabel("Gain");
         SmGui::FillWidth();
         SmGui::ForceSync();
         // TODO: FIND ANOTHER WAY
-        if (_this->serverMode) {
-            if (SmGui::SliderInt(CONCAT("##_rtlsdr_gain_", _this->name), &_this->gainId, 0, _this->gainList.size() - 1, SmGui::FMT_STR_NONE)) {
-                _this->updateGainTxt();
-                if (_this->running) {
-                    rtlsdr_set_tuner_gain(_this->openDev, _this->gainList[_this->gainId]);
+        if (serverMode) {
+            if (SmGui::SliderInt(CONCAT("##_rtlsdr_gain_", name), &gainId, 0, gainList.size() - 1, SmGui::FMT_STR_NONE)) {
+                updateGainTxt();
+                if (running) {
+                    rtlsdr_set_tuner_gain(openDev, gainList[gainId]);
                 }
-                if (_this->selectedDevName != "") {
-                    config.withConfig([&](json& conf) { conf["devices"][_this->selectedDevName]["gain"] = _this->gainId; });
+                if (selectedDevName != "") {
+                    config.withConfig([&](json& conf) { conf["devices"][selectedDevName]["gain"] = gainId; });
                 }
             }
         }
         else {
-            if (ImGui::SliderInt(CONCAT("##_rtlsdr_gain_", _this->name), &_this->gainId, 0, _this->gainList.size() - 1, _this->dbTxt)) {
-                _this->updateGainTxt();
-                if (_this->running) {
-                    rtlsdr_set_tuner_gain(_this->openDev, _this->gainList[_this->gainId]);
+            if (ImGui::SliderInt(CONCAT("##_rtlsdr_gain_", name), &gainId, 0, gainList.size() - 1, dbTxt)) {
+                updateGainTxt();
+                if (running) {
+                    rtlsdr_set_tuner_gain(openDev, gainList[gainId]);
                 }
-                if (_this->selectedDevName != "") {
-                    config.withConfig([&](json& conf) { conf["devices"][_this->selectedDevName]["gain"] = _this->gainId; });
+                if (selectedDevName != "") {
+                    config.withConfig([&](json& conf) { conf["devices"][selectedDevName]["gain"] = gainId; });
                 }
             }
         }
 
         
-        if (_this->tunerAgc || _this->gainList.size() == 0) { SmGui::EndDisabled(); }
+        if (tunerAgc || gainList.size() == 0) { SmGui::EndDisabled(); }
 
-        if (SmGui::Checkbox(CONCAT("Bias T##_rtlsdr_rtl_biast_", _this->name), &_this->biasT)) {
-            if (_this->running) {
-                rtlsdr_set_bias_tee(_this->openDev, _this->biasT);
+        if (SmGui::Checkbox(CONCAT("Bias T##_rtlsdr_rtl_biast_", name), &biasT)) {
+            if (running) {
+                rtlsdr_set_bias_tee(openDev, biasT);
             }
-            if (_this->selectedDevName != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedDevName]["biasT"] = _this->biasT; });
+            if (selectedDevName != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedDevName]["biasT"] = biasT; });
             }
         }
 
-        if (SmGui::Checkbox(CONCAT("Offset Tuning##_rtlsdr_rtl_ofs_", _this->name), &_this->offsetTuning)) {
-            if (_this->running) {
-                rtlsdr_set_offset_tuning(_this->openDev, _this->offsetTuning);
+        if (SmGui::Checkbox(CONCAT("Offset Tuning##_rtlsdr_rtl_ofs_", name), &offsetTuning)) {
+            if (running) {
+                rtlsdr_set_offset_tuning(openDev, offsetTuning);
             }
-            if (_this->selectedDevName != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedDevName]["offsetTuning"] = _this->offsetTuning; });
+            if (selectedDevName != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedDevName]["offsetTuning"] = offsetTuning; });
             }
         }
 
-        if (SmGui::Checkbox(CONCAT("RTL AGC##_rtlsdr_rtl_agc_", _this->name), &_this->rtlAgc)) {
-            if (_this->running) {
-                rtlsdr_set_agc_mode(_this->openDev, _this->rtlAgc);
+        if (SmGui::Checkbox(CONCAT("RTL AGC##_rtlsdr_rtl_agc_", name), &rtlAgc)) {
+            if (running) {
+                rtlsdr_set_agc_mode(openDev, rtlAgc);
             }
-            if (_this->selectedDevName != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedDevName]["rtlAgc"] = _this->rtlAgc; });
+            if (selectedDevName != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedDevName]["rtlAgc"] = rtlAgc; });
             }
         }
 
         SmGui::ForceSync();
-        if (SmGui::Checkbox(CONCAT("Tuner AGC##_rtlsdr_tuner_agc_", _this->name), &_this->tunerAgc)) {
-            if (_this->running) {
-                if (_this->tunerAgc) {
-                    rtlsdr_set_tuner_gain_mode(_this->openDev, 0);
+        if (SmGui::Checkbox(CONCAT("Tuner AGC##_rtlsdr_tuner_agc_", name), &tunerAgc)) {
+            if (running) {
+                if (tunerAgc) {
+                    rtlsdr_set_tuner_gain_mode(openDev, 0);
                 }
                 else {
-                    rtlsdr_set_tuner_gain_mode(_this->openDev, 1);
-                    rtlsdr_set_tuner_gain(_this->openDev, _this->gainList[_this->gainId]);
+                    rtlsdr_set_tuner_gain_mode(openDev, 1);
+                    rtlsdr_set_tuner_gain(openDev, gainList[gainId]);
                 }
             }
-            if (_this->selectedDevName != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedDevName]["tunerAgc"] = _this->tunerAgc; });
+            if (selectedDevName != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedDevName]["tunerAgc"] = tunerAgc; });
             }
         }
     }
@@ -523,7 +526,6 @@ private:
     bool enabled = true;
     dsp::stream<dsp::complex_t> stream;
     double sampleRate;
-    SourceManager::SourceHandler handler;
     bool running = false;
     double freq;
     std::string selectedDevName = "";
@@ -561,17 +563,10 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    def["devices"] = json({});
-    def["device"] = 0;
-    config.setPath(core::args["root"].s() + "/rtl_sdr_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "rtl_sdr_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new RTLSDRSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(RTLSDRSourceModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (RTLSDRSourceModule*)instance;

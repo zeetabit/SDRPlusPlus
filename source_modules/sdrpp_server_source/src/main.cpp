@@ -2,8 +2,11 @@
 #include <imgui.h>
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <gui/style.h>
 #include <config.h>
@@ -21,11 +24,24 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
-ConfigManager config;
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "sdrpp_server_source",
+    /* Description:     */ "SDR++ Server source module for SDR++",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 2, 0,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
+};
 
-class SDRPPServerSourceModule : public ModuleManager::Instance {
+ConfigManager config;
+SDRPP_MOD_CONFIG(config);
+
+class SDRPPServerSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    SDRPPServerSourceModule(std::string name) {
+    SDRPPServerSourceModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
         // Yeah no server-ception, sorry...
@@ -37,15 +53,6 @@ public:
         sampleTypeList.define("Float32", dsp::compression::PCM_TYPE_F32);
         sampleTypeId = sampleTypeList.valueId(dsp::compression::PCM_TYPE_I16);
 
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
-
         // Load config
         config.readConfig([&](const json& conf) {
             std::string hostStr = conf["hostname"];
@@ -53,11 +60,11 @@ public:
             port = conf["port"];
         });
 
-        sigpath::sourceManager.registerSource("SDR++ Server", &handler);
+        sigpath::sourceManager.registerSource("SDR++ Server", static_cast<ISource*>(this));
     }
 
     ~SDRPPServerSourceModule() {
-        stop(this);
+        stop();
         sigpath::sourceManager.unregisterSource("SDR++ Server");
     }
 
@@ -75,6 +82,9 @@ public:
         return enabled;
     }
 
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
+
 private:
     std::string getBandwdithScaled(double bw) {
         char buf[1024];
@@ -90,105 +100,99 @@ private:
         return std::string(buf);
     }
 
-    static void menuSelected(void* ctx) {
-        SDRPPServerSourceModule* _this = (SDRPPServerSourceModule*)ctx;
-        if (_this->client) {
-            core::setInputSampleRate(_this->client->getSampleRate());
+    void onSelect() override {
+        if (client) {
+            core::setInputSampleRate(client->getSampleRate());
         }
-        gui::mainWindow.playButtonLocked = !(_this->client && _this->client->isOpen());
-        flog::info("SDRPPServerSourceModule '{0}': Menu Select!", _this->name);
+        gui::mainWindow.playButtonLocked = !(client && client->isOpen());
+        flog::info("SDRPPServerSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        SDRPPServerSourceModule* _this = (SDRPPServerSourceModule*)ctx;
+    void onDeselect() override {
         gui::mainWindow.playButtonLocked = false;
-        flog::info("SDRPPServerSourceModule '{0}': Menu Deselect!", _this->name);
+        flog::info("SDRPPServerSourceModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        SDRPPServerSourceModule* _this = (SDRPPServerSourceModule*)ctx;
-        if (_this->running) { return; }
+    void start() override {
+        if (running) { return; }
 
         // Try to connect if not already connected (Play button is locked anyway so not sure why I put this here)
-        if (!_this->connected()) {
-            _this->tryConnect();
-            if (!_this->connected()) { return; }
+        if (!connected()) {
+            tryConnect();
+            if (!connected()) { return; }
         }
 
         // Set configuration
-        _this->client->setFrequency(_this->freq);
-        _this->client->start();
+        client->setFrequency(freq);
+        client->start();
 
-        _this->running = true;
-        flog::info("SDRPPServerSourceModule '{0}': Start!", _this->name);
+        running = true;
+        flog::info("SDRPPServerSourceModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        SDRPPServerSourceModule* _this = (SDRPPServerSourceModule*)ctx;
-        if (!_this->running) { return; }
+    void stop() override {
+        if (!running) { return; }
 
-        if (_this->connected()) { _this->client->stop(); }
+        if (connected()) { client->stop(); }
 
-        _this->running = false;
-        flog::info("SDRPPServerSourceModule '{0}': Stop!", _this->name);
+        running = false;
+        flog::info("SDRPPServerSourceModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
-        SDRPPServerSourceModule* _this = (SDRPPServerSourceModule*)ctx;
-        if (_this->running && _this->connected()) {
-            _this->client->setFrequency(freq);
+    void tune(double freq) override {
+        if (running && connected()) {
+            client->setFrequency(freq);
         }
-        _this->freq = freq;
-        flog::info("SDRPPServerSourceModule '{0}': Tune: {1}!", _this->name, freq);
+        freq = freq;
+        flog::info("SDRPPServerSourceModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        SDRPPServerSourceModule* _this = (SDRPPServerSourceModule*)ctx;
+    void drawMenu() override {
         float menuWidth = ImGui::GetContentRegionAvail().x;
 
-        bool connected = _this->connected();
-        gui::mainWindow.playButtonLocked = !connected;
+        bool isConnected = connected();
+        gui::mainWindow.playButtonLocked = !isConnected;
 
-        ImGui::GenericDialog("##sdrpp_srv_src_err_dialog", _this->serverBusy, GENERIC_DIALOG_BUTTONS_OK, [=](){
+        ImGui::GenericDialog("##sdrpp_srv_src_err_dialog", serverBusy, GENERIC_DIALOG_BUTTONS_OK, [=](){
             ImGui::TextUnformatted("This server is already in use.");
         });
 
-        if (connected) { style::beginDisabled(); }
-        if (ImGui::InputText(CONCAT("##sdrpp_srv_srv_host_", _this->name), _this->hostname, 1023)) {
-            config.withConfig([&](json& conf) { conf["hostname"] = _this->hostname; });
+        if (isConnected) { style::beginDisabled(); }
+        if (ImGui::InputText(CONCAT("##sdrpp_srv_srv_host_", name), hostname, 1023)) {
+            config.withConfig([&](json& conf) { conf["hostname"] = hostname; });
         }
         ImGui::SameLine();
         ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
-        if (ImGui::InputInt(CONCAT("##sdrpp_srv_srv_port_", _this->name), &_this->port, 0, 0)) {
-            config.withConfig([&](json& conf) { conf["port"] = _this->port; });
+        if (ImGui::InputInt(CONCAT("##sdrpp_srv_srv_port_", name), &port, 0, 0)) {
+            config.withConfig([&](json& conf) { conf["port"] = port; });
         }
-        if (connected) { style::endDisabled(); }
+        if (isConnected) { style::endDisabled(); }
 
-        if (_this->running) { style::beginDisabled(); }
-        if (!connected && ImGui::Button("Connect##sdrpp_srv_source", ImVec2(menuWidth, 0))) {
-            _this->tryConnect();
+        if (running) { style::beginDisabled(); }
+        if (!isConnected && ImGui::Button("Connect##sdrpp_srv_source", ImVec2(menuWidth, 0))) {
+            tryConnect();
         }
-        else if (connected && ImGui::Button("Disconnect##sdrpp_srv_source", ImVec2(menuWidth, 0))) {
-            _this->client->close();
+        else if (isConnected && ImGui::Button("Disconnect##sdrpp_srv_source", ImVec2(menuWidth, 0))) {
+            client->close();
         }
-        if (_this->running) { style::endDisabled(); }
+        if (running) { style::endDisabled(); }
 
 
-        if (connected) {
+        if (isConnected) {
             ImGui::LeftLabel("Sample type");
             ImGui::FillWidth();
-            if (ImGui::Combo("##sdrpp_srv_source_samp_type", &_this->sampleTypeId, _this->sampleTypeList.txt)) {
-                _this->client->setSampleType(_this->sampleTypeList[_this->sampleTypeId]);
+            if (ImGui::Combo("##sdrpp_srv_source_samp_type", &sampleTypeId, sampleTypeList.txt)) {
+                client->setSampleType(sampleTypeList[sampleTypeId]);
 
                 // Save config
-                config.withConfig([&](json& conf) { conf["servers"][_this->devConfName]["sampleType"] = _this->sampleTypeList.key(_this->sampleTypeId); });
+                config.withConfig([&](json& conf) { conf["servers"][devConfName]["sampleType"] = sampleTypeList.key(sampleTypeId); });
             }
             
-            if (ImGui::Checkbox("Compression", &_this->compression)) {
-                _this->client->setCompression(_this->compression);
+            if (ImGui::Checkbox("Compression", &compression)) {
+                client->setCompression(compression);
 
                 // Save config
-                config.withConfig([&](json& conf) { conf["servers"][_this->devConfName]["compression"] = _this->compression; });
+                config.withConfig([&](json& conf) { conf["servers"][devConfName]["compression"] = compression; });
             }
 
             bool dummy = true;
@@ -197,20 +201,20 @@ private:
             style::endDisabled();
 
             // Calculate datarate
-            _this->frametimeCounter += ImGui::GetIO().DeltaTime;
-            if (_this->frametimeCounter >= 0.2f) {
-                _this->datarate = ((float)_this->client->bytes / (_this->frametimeCounter * 1024.0f * 1024.0f)) * 8;
-                _this->frametimeCounter = 0;
-                _this->client->bytes = 0;
+            frametimeCounter += ImGui::GetIO().DeltaTime;
+            if (frametimeCounter >= 0.2f) {
+                datarate = ((float)client->bytes / (frametimeCounter * 1024.0f * 1024.0f)) * 8;
+                frametimeCounter = 0;
+                client->bytes = 0;
             }
 
             ImGui::TextUnformatted("Status:");
             ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Connected (%.3f Mbit/s)", _this->datarate);
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Connected (%.3f Mbit/s)", datarate);
 
             ImGui::CollapsingHeader("Source [REMOTE]", ImGuiTreeNodeFlags_DefaultOpen);
 
-            _this->client->showMenu();
+            client->showMenu();
         }
         else {
             ImGui::TextUnformatted("Status:");
@@ -273,8 +277,6 @@ private:
     std::string devConfName = "";
 
     dsp::stream<dsp::complex_t> stream;
-    SourceManager::SourceHandler handler;
-
     OptionList<std::string, dsp::compression::PCMType> sampleTypeList;
     int sampleTypeId;
     bool compression = false;
@@ -283,18 +285,10 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    def["hostname"] = "localhost";
-    def["port"] = 5259;
-    def["servers"] = json::object();
-    config.setPath(core::args["root"].s() + "/sdrpp_server_source_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "sdrpp_server_source_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new SDRPPServerSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(SDRPPServerSourceModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (SDRPPServerSourceModule*)instance;

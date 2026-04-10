@@ -226,16 +226,12 @@ private:
         ImGui::Columns(2, CONCAT("RecorderModeColumns##_", _this->name), false);
         if (ImGui::RadioButton(CONCAT("Baseband##_recorder_mode_", _this->name), _this->recMode == RECORDER_MODE_BASEBAND)) {
             _this->recMode = RECORDER_MODE_BASEBAND;
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["mode"] = _this->recMode;
-            });
+            _this->cfg->set("mode", _this->recMode);
         }
         ImGui::NextColumn();
         if (ImGui::RadioButton(CONCAT("Audio##_recorder_mode_", _this->name), _this->recMode == RECORDER_MODE_AUDIO)) {
             _this->recMode = RECORDER_MODE_AUDIO;
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["mode"] = _this->recMode;
-            });
+            _this->cfg->set("mode", _this->recMode);
         }
         ImGui::Columns(1, CONCAT("EndRecorderModeColumns##_", _this->name), false);
         ImGui::EndGroup();
@@ -243,34 +239,26 @@ private:
         // Recording path
         if (_this->folderSelect.render("##_recorder_fold_" + _this->name)) {
             if (_this->folderSelect.pathIsValid()) {
-                config.withConfig([&](json& conf) {
-                    conf[_this->name]["recPath"] = _this->folderSelect.path;
-                });
+                _this->cfg->set("recPath", _this->folderSelect.path);
             }
         }
 
         ImGui::LeftLabel("Name template");
         ImGui::FillWidth();
         if (ImGui::InputText(CONCAT("##_recorder_name_template_", _this->name), _this->nameTemplate, 1023)) {
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["nameTemplate"] = _this->nameTemplate;
-            });
+            _this->cfg->set("nameTemplate", std::string(_this->nameTemplate));
         }
 
         ImGui::LeftLabel("Container");
         ImGui::FillWidth();
         if (ImGui::Combo(CONCAT("##_recorder_container_", _this->name), &_this->containerId, _this->containers.txt)) {
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["container"] = _this->containers.key(_this->containerId);
-            });
+            _this->cfg->set("container", _this->containers.key(_this->containerId));
         }
 
         ImGui::LeftLabel("Sample type");
         ImGui::FillWidth();
         if (ImGui::Combo(CONCAT("##_recorder_st_", _this->name), &_this->sampleTypeId, _this->sampleTypes.txt)) {
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["sampleType"] = _this->sampleTypes.key(_this->sampleTypeId);
-            });
+            _this->cfg->set("sampleType", _this->sampleTypes.key(_this->sampleTypeId));
         }
 
         if (_this->recording) { style::endDisabled(); }
@@ -282,9 +270,7 @@ private:
             ImGui::FillWidth();
             if (ImGui::Combo(CONCAT("##_recorder_stream_", _this->name), &_this->streamId, _this->audioStreams.txt)) {
                 _this->selectStream(_this->audioStreams.value(_this->streamId));
-                config.withConfig([&](json& conf) {
-                    conf[_this->name]["audioStream"] = _this->audioStreams.key(_this->streamId);
-                });
+                _this->cfg->set("audioStream", _this->audioStreams.key(_this->streamId));
             }
             if (_this->recording) { style::endDisabled(); }
 
@@ -297,23 +283,17 @@ private:
             ImGui::FillWidth();
             if (ImGui::SliderFloat(CONCAT("##_recorder_vol_", _this->name), &_this->audioVolume, 0, 1, "")) {
                 _this->volume.setVolume(_this->audioVolume);
-                config.withConfig([&](json& conf) {
-                    conf[_this->name]["audioVolume"] = _this->audioVolume;
-                });
+                _this->cfg->set("audioVolume", _this->audioVolume);
             }
 
             if (_this->recording) { style::beginDisabled(); }
             if (ImGui::Checkbox(CONCAT("Stereo##_recorder_stereo_", _this->name), &_this->stereo)) {
-                config.withConfig([&](json& conf) {
-                    conf[_this->name]["stereo"] = _this->stereo;
-                });
+                _this->cfg->set("stereo", _this->stereo);
             }
             if (_this->recording) { style::endDisabled(); }
 
             if (ImGui::Checkbox(CONCAT("Ignore silence##_recorder_ignore_silence_", _this->name), &_this->ignoreSilence)) {
-                config.withConfig([&](json& conf) {
-                    conf[_this->name]["ignoreSilence"] = _this->ignoreSilence;
-                });
+                _this->cfg->set("ignoreSilence", _this->ignoreSilence);
             }
         }
 

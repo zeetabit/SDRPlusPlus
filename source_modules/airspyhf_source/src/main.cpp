@@ -1,7 +1,10 @@
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <gui/style.h>
 #include <config.h>
@@ -23,25 +26,29 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "airspyhf_source",
+    /* Description:     */ "Airspy HF+ source module for SDR++",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 1, 0,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
+};
+
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 const char* AGG_MODES_STR = "Off\0Low\0High\0";
 
-class AirspyHFSourceModule : public ModuleManager::Instance {
+class AirspyHFSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    AirspyHFSourceModule(std::string name) {
+    AirspyHFSourceModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
         sampleRate = 768000.0;
-
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
 
         refresh();
 
@@ -49,11 +56,11 @@ public:
         config.readConfig([&](const json& conf) { devSerial = conf["device"]; });
         selectByString(devSerial);
 
-        sigpath::sourceManager.registerSource("Airspy HF+", &handler);
+        sigpath::sourceManager.registerSource("Airspy HF+", static_cast<ISource*>(this));
     }
 
     ~AirspyHFSourceModule() {
-        stop(this);
+        stop();
         sigpath::sourceManager.unregisterSource("Airspy HF+");
     }
 
@@ -76,6 +83,9 @@ public:
     bool isEnabled() {
         return enabled;
     }
+
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
 
     void refresh() {
         devList.clear();
@@ -220,138 +230,131 @@ private:
         return std::string(buf);
     }
 
-    static void menuSelected(void* ctx) {
-        AirspyHFSourceModule* _this = (AirspyHFSourceModule*)ctx;
-        core::setInputSampleRate(_this->sampleRate);
-        flog::info("AirspyHFSourceModule '{0}': Menu Select!", _this->name);
+    void onSelect() override {
+        core::setInputSampleRate(sampleRate);
+        flog::info("AirspyHFSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        AirspyHFSourceModule* _this = (AirspyHFSourceModule*)ctx;
-        flog::info("AirspyHFSourceModule '{0}': Menu Deselect!", _this->name);
+    void onDeselect() override {
+        flog::info("AirspyHFSourceModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        AirspyHFSourceModule* _this = (AirspyHFSourceModule*)ctx;
-        if (_this->running) { return; }
-        if (_this->selectedSerial == 0) {
+    void start() override {
+        if (running) { return; }
+        if (selectedSerial == 0) {
             flog::error("Tried to start AirspyHF+ source with null serial");
             return;
         }
 
 #ifndef __ANDROID__
-            int err = airspyhf_open_sn(&_this->openDev, _this->selectedSerial);
+            int err = airspyhf_open_sn(&openDev, selectedSerial);
 #else
-            int err = airspyhf_open_fd(&_this->openDev, _this->devFd);
+            int err = airspyhf_open_fd(&openDev, devFd);
 #endif
         if (err != 0) {
             char buf[1024];
-            sprintf(buf, "%016" PRIX64, _this->selectedSerial);
+            sprintf(buf, "%016" PRIX64, selectedSerial);
             flog::error("Could not open Airspy HF+ {0}", buf);
             return;
         }
 
-        airspyhf_set_samplerate(_this->openDev, _this->sampleRateList[_this->srId]);
-        airspyhf_set_freq(_this->openDev, _this->freq);
-        airspyhf_set_hf_agc(_this->openDev, (_this->agcMode != 0));
-        if (_this->agcMode > 0) {
-            airspyhf_set_hf_agc_threshold(_this->openDev, _this->agcMode - 1);
+        airspyhf_set_samplerate(openDev, sampleRateList[srId]);
+        airspyhf_set_freq(openDev, freq);
+        airspyhf_set_hf_agc(openDev, (agcMode != 0));
+        if (agcMode > 0) {
+            airspyhf_set_hf_agc_threshold(openDev, agcMode - 1);
         }
-        airspyhf_set_hf_att(_this->openDev, _this->atten / 6.0f);
-        airspyhf_set_hf_lna(_this->openDev, _this->hfLNA);
+        airspyhf_set_hf_att(openDev, atten / 6.0f);
+        airspyhf_set_hf_lna(openDev, hfLNA);
 
-        airspyhf_start(_this->openDev, callback, _this);
+        airspyhf_start(openDev, callback, this);
 
-        _this->running = true;
-        flog::info("AirspyHFSourceModule '{0}': Start!", _this->name);
+        running = true;
+        flog::info("AirspyHFSourceModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        AirspyHFSourceModule* _this = (AirspyHFSourceModule*)ctx;
-        if (!_this->running) { return; }
-        _this->running = false;
-        _this->stream.stopWriter();
-        airspyhf_close(_this->openDev);
-        _this->stream.clearWriteStop();
-        flog::info("AirspyHFSourceModule '{0}': Stop!", _this->name);
+    void stop() override {
+        if (!running) { return; }
+        running = false;
+        stream.stopWriter();
+        airspyhf_close(openDev);
+        stream.clearWriteStop();
+        flog::info("AirspyHFSourceModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
-        AirspyHFSourceModule* _this = (AirspyHFSourceModule*)ctx;
-        if (_this->running) {
-            airspyhf_set_freq(_this->openDev, freq);
+    void tune(double freq) override {
+        if (running) {
+            airspyhf_set_freq(openDev, freq);
         }
-        _this->freq = freq;
-        flog::info("AirspyHFSourceModule '{0}': Tune: {1}!", _this->name, freq);
+        freq = freq;
+        flog::info("AirspyHFSourceModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        AirspyHFSourceModule* _this = (AirspyHFSourceModule*)ctx;
-
-        if (_this->running) { SmGui::BeginDisabled(); }
+    void drawMenu() override {
+        if (running) { SmGui::BeginDisabled(); }
 
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Combo(CONCAT("##_airspyhf_dev_sel_", _this->name), &_this->devId, _this->devListTxt.c_str())) {
-            _this->selectBySerial(_this->devList[_this->devId]);
-            core::setInputSampleRate(_this->sampleRate);
-            if (_this->selectedSerStr != "") {
-                config.withConfig([&](json& conf) { conf["device"] = _this->selectedSerStr; });
+        if (SmGui::Combo(CONCAT("##_airspyhf_dev_sel_", name), &devId, devListTxt.c_str())) {
+            selectBySerial(devList[devId]);
+            core::setInputSampleRate(sampleRate);
+            if (selectedSerStr != "") {
+                config.withConfig([&](json& conf) { conf["device"] = selectedSerStr; });
             }
         }
 
-        if (SmGui::Combo(CONCAT("##_airspyhf_sr_sel_", _this->name), &_this->srId, _this->sampleRateListTxt.c_str())) {
-            _this->sampleRate = _this->sampleRateList[_this->srId];
-            core::setInputSampleRate(_this->sampleRate);
-            if (_this->selectedSerStr != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["sampleRate"] = _this->sampleRate; });
+        if (SmGui::Combo(CONCAT("##_airspyhf_sr_sel_", name), &srId, sampleRateListTxt.c_str())) {
+            sampleRate = sampleRateList[srId];
+            core::setInputSampleRate(sampleRate);
+            if (selectedSerStr != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerStr]["sampleRate"] = sampleRate; });
             }
         }
 
         SmGui::SameLine();
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Button(CONCAT("Refresh##_airspyhf_refr_", _this->name))) {
-            _this->refresh();
+        if (SmGui::Button(CONCAT("Refresh##_airspyhf_refr_", name))) {
+            refresh();
             std::string devSerial;
             config.readConfig([&](const json& conf) { devSerial = conf["device"]; });
-            _this->selectByString(devSerial);
-            core::setInputSampleRate(_this->sampleRate);
+            selectByString(devSerial);
+            core::setInputSampleRate(sampleRate);
         }
 
-        if (_this->running) { SmGui::EndDisabled(); }
+        if (running) { SmGui::EndDisabled(); }
 
         SmGui::LeftLabel("AGC Mode");
         SmGui::FillWidth();
-        if (SmGui::Combo(CONCAT("##_airspyhf_agc_", _this->name), &_this->agcMode, AGG_MODES_STR)) {
-            if (_this->running) {
-                airspyhf_set_hf_agc(_this->openDev, (_this->agcMode != 0));
-                if (_this->agcMode > 0) {
-                    airspyhf_set_hf_agc_threshold(_this->openDev, _this->agcMode - 1);
+        if (SmGui::Combo(CONCAT("##_airspyhf_agc_", name), &agcMode, AGG_MODES_STR)) {
+            if (running) {
+                airspyhf_set_hf_agc(openDev, (agcMode != 0));
+                if (agcMode > 0) {
+                    airspyhf_set_hf_agc_threshold(openDev, agcMode - 1);
                 }
             }
-            if (_this->selectedSerStr != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["agcMode"] = _this->agcMode; });
+            if (selectedSerStr != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerStr]["agcMode"] = agcMode; });
             }
         }
 
         SmGui::LeftLabel("Attenuation");
         SmGui::FillWidth();
-        if (SmGui::SliderFloatWithSteps(CONCAT("##_airspyhf_attn_", _this->name), &_this->atten, 0, 48, 6, SmGui::FMT_STR_FLOAT_DB_NO_DECIMAL)) {
-            if (_this->running) {
-                airspyhf_set_hf_att(_this->openDev, _this->atten / 6.0f);
+        if (SmGui::SliderFloatWithSteps(CONCAT("##_airspyhf_attn_", name), &atten, 0, 48, 6, SmGui::FMT_STR_FLOAT_DB_NO_DECIMAL)) {
+            if (running) {
+                airspyhf_set_hf_att(openDev, atten / 6.0f);
             }
-            if (_this->selectedSerStr != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["attenuation"] = _this->atten; });
+            if (selectedSerStr != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerStr]["attenuation"] = atten; });
             }
         }
 
-        if (SmGui::Checkbox(CONCAT("HF LNA##_airspyhf_lna_", _this->name), &_this->hfLNA)) {
-            if (_this->running) {
-                airspyhf_set_hf_lna(_this->openDev, _this->hfLNA);
+        if (SmGui::Checkbox(CONCAT("HF LNA##_airspyhf_lna_", name), &hfLNA)) {
+            if (running) {
+                airspyhf_set_hf_lna(openDev, hfLNA);
             }
-            if (_this->selectedSerStr != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["lna"] = _this->hfLNA; });
+            if (selectedSerStr != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerStr]["lna"] = hfLNA; });
             }
         }
     }
@@ -368,7 +371,6 @@ private:
     bool enabled = true;
     dsp::stream<dsp::complex_t> stream;
     double sampleRate;
-    SourceManager::SourceHandler handler;
     bool running = false;
     double freq;
     uint64_t selectedSerial = 0;
@@ -390,17 +392,10 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    def["devices"] = json({});
-    def["device"] = "";
-    config.setPath(core::args["root"].s() + "/airspyhf_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "airspyhf_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new AirspyHFSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(AirspyHFSourceModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (AirspyHFSourceModule*)instance;

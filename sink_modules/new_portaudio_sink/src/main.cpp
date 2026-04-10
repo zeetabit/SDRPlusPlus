@@ -10,6 +10,8 @@
 #include <config.h>
 #include <algorithm>
 #include <core.h>
+#include <module_manifest.h>
+#include <module_config.h>
 
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
@@ -24,7 +26,14 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
+SDRPP_MOD_INFO_V2{
+    "new_portaudio_sink", "Audio sink module for SDR++", "Ryzerth;Maxime Biette", 0, 1, 0, 1,
+    SDRPP_API_VERSION, MOD_CAP_SINK, 0, nullptr,
+    nullptr, "new_audio_sink_config.json"
+};
+
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 class AudioSink : SinkManager::Sink {
 public:
@@ -388,7 +397,7 @@ private:
 
 class AudioSinkModule : public ModuleManager::Instance {
 public:
-    AudioSinkModule(std::string name) {
+    AudioSinkModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
         provider.create = create_sink;
         provider.ctx = this;
@@ -428,17 +437,12 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    config.setPath(core::args["root"].s() + "/new_audio_sink_config.json");
-    config.load(json::object());
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "new_audio_sink_config.json");
 }
 
-MOD_EXPORT void* _CREATE_INSTANCE_(std::string name) {
-    AudioSinkModule* instance = new AudioSinkModule(name);
-    return instance;
-}
+SDRPP_CREATE_INSTANCE_V2(AudioSinkModule)
 
-MOD_EXPORT void _DELETE_INSTANCE_(void* instance) {
+MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (AudioSinkModule*)instance;
 }
 

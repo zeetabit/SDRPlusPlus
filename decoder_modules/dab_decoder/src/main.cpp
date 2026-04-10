@@ -28,6 +28,7 @@ SDRPP_MOD_INFO{
 };
 
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 #define INPUT_SAMPLE_RATE   2.048e6
 #define VFO_BANDWIDTH       1.6e6

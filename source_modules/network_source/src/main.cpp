@@ -1,8 +1,11 @@
 #include <utils/net.h>
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <gui/style.h>
 #include <config.h>
@@ -20,7 +23,20 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "network_source",
+    /* Description:     */ "UDP/TCP Source Module",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 1, 0,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
+};
+
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 enum Protocol {
     PROTOCOL_TCP_SERVER,
@@ -42,21 +58,13 @@ const size_t SAMPLE_TYPE_SIZE[] {
     2*sizeof(float),
 };
 
-class NetworkSourceModule : public ModuleManager::Instance {
+class NetworkSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    NetworkSourceModule(std::string name) {
+    NetworkSourceModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
+        this->cfg = cfg;
 
         samplerate = 1000000.0;
-
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
 
         // Define protocols
         // protocols.define("TCP (Server)", PROTOCOL_TCP_SERVER);
@@ -70,38 +78,31 @@ public:
         sampleTypes.define("Float32", SAMPLE_TYPE_FLOAT32);
 
         // Load config
-        config.readConfig([&](const json& conf) {
-            if (conf[name].contains("samplerate")) {
-                samplerate = conf[name]["samplerate"];
-                tempSamplerate = samplerate;
-            }
-            if (conf[name].contains("protocol")) {
-                std::string protoStr = conf[name]["protocol"];
-                if (protocols.keyExists(protoStr)) { proto = protocols.value(protocols.keyId(protoStr)); }
-            }
-            if (conf[name].contains("sampleType")) {
-                std::string sampTypeStr = conf[name]["sampleType"];
-                if (sampleTypes.keyExists(sampTypeStr)) { sampType = sampleTypes.value(sampleTypes.keyId(sampTypeStr)); }
-            }
-            if (conf[name].contains("host")) {
-                std::string hostStr = conf[name]["host"];
-                strcpy(hostname, hostStr.c_str());
-            }
-            if (conf[name].contains("port")) {
-                port = conf[name]["port"];
-                port = std::clamp<int>(port, 1, 65535);
-            }
-        });
+        samplerate = cfg->get<int>("samplerate", samplerate);
+        tempSamplerate = samplerate;
+        {
+            std::string protoStr = cfg->get<std::string>("protocol", "TCP (Server)");
+            if (protocols.keyExists(protoStr)) { proto = protocols.value(protocols.keyId(protoStr)); }
+        }
+        {
+            std::string sampTypeStr = cfg->get<std::string>("sampleType", "Float32");
+            if (sampleTypes.keyExists(sampTypeStr)) { sampType = sampleTypes.value(sampleTypes.keyId(sampTypeStr)); }
+        }
+        {
+            std::string hostStr = cfg->get<std::string>("host", "localhost");
+            strcpy(hostname, hostStr.c_str());
+        }
+        port = std::clamp<int>(cfg->get<int>("port", 4992), 1, 65535);
 
         // Set menu IDs
         protoId = protocols.valueId(proto);
         sampTypeId = sampleTypes.valueId(sampType);
 
-        sigpath::sourceManager.registerSource("Network", &handler);
+        sigpath::sourceManager.registerSource("Network", static_cast<ISource*>(this));
     }
 
     ~NetworkSourceModule() {
-        stop(this);
+        stop();
         sigpath::sourceManager.unregisterSource("Network");
     }
 
@@ -119,6 +120,9 @@ public:
         return enabled;
     }
 
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
+
 private:
     std::string getSrScaled(double sr) {
         char buf[1024];
@@ -134,37 +138,34 @@ private:
         return std::string(buf);
     }
 
-    static void menuSelected(void* ctx) {
-        NetworkSourceModule* _this = (NetworkSourceModule*)ctx;
-        core::setInputSampleRate(_this->samplerate);
-        flog::info("NetworkSourceModule '{0}': Menu Select!", _this->name);
+    void onSelect() override {
+        core::setInputSampleRate(samplerate);
+        flog::info("NetworkSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        NetworkSourceModule* _this = (NetworkSourceModule*)ctx;
-        flog::info("NetworkSourceModule '{0}': Menu Deselect!", _this->name);
+    void onDeselect() override {
+        flog::info("NetworkSourceModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        NetworkSourceModule* _this = (NetworkSourceModule*)ctx;
-        if (_this->running) { return; }
+    void start() override {
+        if (running) { return; }
         
         // Depends on protocol
         try {
-            if (_this->proto == PROTOCOL_TCP_SERVER) {
+            if (proto == PROTOCOL_TCP_SERVER) {
                 // Create TCP listener
                 // TODO
 
                 // Start listen worker
                 // TODO
             }
-            else if (_this->proto == PROTOCOL_TCP_CLIENT) {
+            else if (proto == PROTOCOL_TCP_CLIENT) {
                 // Connect to TCP server
-                _this->sock = net::connect(_this->hostname, _this->port);
+                sock = net::connect(hostname, port);
             }
-            else if (_this->proto == PROTOCOL_UDP) {
+            else if (proto == PROTOCOL_UDP) {
                 // Open UDP socket
-                _this->sock = net::openudp("0.0.0.0", _this->port, _this->hostname, _this->port, true);
+                sock = net::openudp("0.0.0.0", port, hostname, port, true);
             }
         }
         catch (const std::exception& e) {
@@ -173,94 +174,90 @@ private:
         }
 
         // Start receive worker
-        _this->workerThread = std::thread(&NetworkSourceModule::worker, _this);
+        workerThread = std::thread(&NetworkSourceModule::worker, this);
 
-        _this->running = true;
-        flog::info("NetworkSourceModule '{0}': Start!", _this->name);
+        running = true;
+        flog::info("NetworkSourceModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        NetworkSourceModule* _this = (NetworkSourceModule*)ctx;
-        if (!_this->running) { return; }
+    void stop() override {
+        if (!running) { return; }
 
         // Stop listen worker
         // TODO
 
         // Close connection
-        if (_this->sock) { _this->sock->close(); }
+        if (sock) { sock->close(); }
 
         // Stop worker thread
-        _this->stream.stopWriter();
-        if (_this->workerThread.joinable()) { _this->workerThread.join(); }
-        _this->stream.clearWriteStop();
+        stream.stopWriter();
+        if (workerThread.joinable()) { workerThread.join(); }
+        stream.clearWriteStop();
 
-        _this->running = false;
-        flog::info("NetworkSourceModule '{0}': Stop!", _this->name);
+        running = false;
+        flog::info("NetworkSourceModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
-        NetworkSourceModule* _this = (NetworkSourceModule*)ctx;
-        if (_this->running) {
+    void tune(double freq) override {
+        if (running) {
             // Nothing for now
         }
-        _this->freq = freq;
-        flog::info("NetworkSourceModule '{0}': Tune: {1}!", _this->name, freq);
+        freq = freq;
+        flog::info("NetworkSourceModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        NetworkSourceModule* _this = (NetworkSourceModule*)ctx;
-
-        if (_this->running) { SmGui::BeginDisabled(); }
+    void drawMenu() override {
+        if (running) { SmGui::BeginDisabled(); }
 
         // Hostname and port field
-        if (SmGui::InputText(("##network_source_host_" + _this->name).c_str(), _this->hostname, sizeof(_this->hostname))) {
-            config.withConfig([&](json& conf) { conf[_this->name]["host"] = _this->hostname; });
+        if (SmGui::InputText(("##network_source_host_" + name).c_str(), hostname, sizeof(hostname))) {
+            cfg->set("host", std::string(hostname));
         }
         SmGui::SameLine();
         SmGui::FillWidth();
-        if (SmGui::InputInt(("##network_source_port_" + _this->name).c_str(), &_this->port, 0, 0)) {
-            _this->port = std::clamp<int>(_this->port, 1, 65535);
-            config.withConfig([&](json& conf) { conf[_this->name]["port"] = _this->port; });
+        if (SmGui::InputInt(("##network_source_port_" + name).c_str(), &port, 0, 0)) {
+            port = std::clamp<int>(port, 1, 65535);
+            cfg->set("port", port);
         }
 
         // Mode protocol selector
         SmGui::LeftLabel("Protocol");
         SmGui::FillWidth();
-        if (SmGui::Combo(("##network_source_proto_" + _this->name).c_str(), &_this->protoId, _this->protocols.txt)) {
-            _this->proto = _this->protocols.value(_this->protoId);
-            config.withConfig([&](json& conf) { conf[_this->name]["protocol"] = _this->protocols.key(_this->protoId); });
+        if (SmGui::Combo(("##network_source_proto_" + name).c_str(), &protoId, protocols.txt)) {
+            proto = protocols.value(protoId);
+            cfg->set("protocol", protocols.key(protoId));
         }
 
         // Sample type selector
         SmGui::LeftLabel("Sample type");
         SmGui::FillWidth();
-        if (SmGui::Combo(("##network_source_samp_" + _this->name).c_str(), &_this->sampTypeId, _this->sampleTypes.txt)) {
-            _this->sampType = _this->sampleTypes.value(_this->sampTypeId);
-            config.withConfig([&](json& conf) { conf[_this->name]["sampleType"] = _this->sampleTypes.key(_this->sampTypeId); });
+        if (SmGui::Combo(("##network_source_samp_" + name).c_str(), &sampTypeId, sampleTypes.txt)) {
+            sampType = sampleTypes.value(sampTypeId);
+            cfg->set("sampleType", sampleTypes.key(sampTypeId));
         }
 
         // Samplerate selector
         SmGui::LeftLabel("Samplerate");
         SmGui::FillWidth();
-        if (SmGui::InputInt(("##network_source_sr_" + _this->name).c_str(), &_this->tempSamplerate)) {
+        if (SmGui::InputInt(("##network_source_sr_" + name).c_str(), &tempSamplerate)) {
             // Prevent silly values from silly users
-            _this->tempSamplerate = std::max<int>(_this->tempSamplerate, 1000);
+            tempSamplerate = std::max<int>(tempSamplerate, 1000);
         }
-        bool applyEn = (!_this->running && _this->tempSamplerate != _this->samplerate);
+        bool applyEn = (!running && tempSamplerate != samplerate);
         if (!applyEn) { SmGui::BeginDisabled(); }
         SmGui::FillWidth();
-        if (SmGui::Button(("Apply##network_source_apply_" + _this->name).c_str())) {
-            _this->samplerate = _this->tempSamplerate;
-            core::setInputSampleRate(_this->samplerate);
-            config.withConfig([&](json& conf) { conf[_this->name]["samplerate"] = _this->samplerate; });
+        if (SmGui::Button(("Apply##network_source_apply_" + name).c_str())) {
+            samplerate = tempSamplerate;
+            core::setInputSampleRate(samplerate);
+            cfg->set("samplerate", samplerate);
         }
         if (!applyEn) { SmGui::EndDisabled(); }
 
-        if (_this->tempSamplerate != _this->samplerate) {
+        if (tempSamplerate != samplerate) {
             SmGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Warning: Samplerate not applied yet");
         }
 
-        if (_this->running) { SmGui::EndDisabled(); }
+        if (running) { SmGui::EndDisabled(); }
     }
 
     void worker() {
@@ -308,9 +305,9 @@ private:
     }
 
     std::string name;
+    ModuleConfig* cfg = nullptr;
     bool enabled = true;
     dsp::stream<dsp::complex_t> stream;
-    SourceManager::SourceHandler handler;
     bool running = false;
     double freq;
     
@@ -335,15 +332,10 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    config.setPath(core::args["root"].s() + "/network_source_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "network_source_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new NetworkSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(NetworkSourceModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (NetworkSourceModule*)instance;

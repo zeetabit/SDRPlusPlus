@@ -7,21 +7,21 @@ namespace demod {
     public:
         AM() {}
 
-        AM(std::string name, ConfigManager* config, dsp::stream<dsp::complex_t>* input, double bandwidth, double audioSR) {
-            init(name, config, input, bandwidth, audioSR);
+        AM(std::string name, ModuleConfig* cfg, dsp::stream<dsp::complex_t>* input, double bandwidth, double audioSR) {
+            init(name, cfg, input, bandwidth, audioSR);
         }
 
         ~AM() { stop(); }
 
-        void init(std::string name, ConfigManager* config, dsp::stream<dsp::complex_t>* input, double bandwidth, double audioSR) {
+        void init(std::string name, ModuleConfig* cfg, dsp::stream<dsp::complex_t>* input, double bandwidth, double audioSR) {
             this->name = name;
-            _config = config;
+            _cfg = cfg;
 
             // Load config
-            config->readConfig([&](const json& conf) {
-                if (conf[name][getName()].contains("agcAttack")) { agcAttack = conf[name][getName()]["agcAttack"]; }
-                if (conf[name][getName()].contains("agcDecay")) { agcDecay = conf[name][getName()]["agcDecay"]; }
-                if (conf[name][getName()].contains("carrierAgc")) { carrierAgc = conf[name][getName()]["carrierAgc"]; }
+            _cfg->read([&](const json& conf) {
+                if (conf.contains(getName()) && conf[getName()].contains("agcAttack")) { agcAttack = conf[getName()]["agcAttack"]; }
+                if (conf.contains(getName()) && conf[getName()].contains("agcDecay")) { agcDecay = conf[getName()]["agcDecay"]; }
+                if (conf.contains(getName()) && conf[getName()].contains("carrierAgc")) { carrierAgc = conf[getName()]["carrierAgc"]; }
             });
 
             // Define structure
@@ -36,19 +36,19 @@ namespace demod {
             float menuWidth = ImGui::GetContentRegionAvail().x;
             if (ImGui::Checkbox(("Carrier AGC##_radio_am_carrier_agc_" + name).c_str(), &carrierAgc)) {
                 demod.setAGCMode(carrierAgc ? dsp::demod::AM<dsp::stereo_t>::AGCMode::CARRIER : dsp::demod::AM<dsp::stereo_t>::AGCMode::AUDIO);
-                _config->withConfig([&](json& conf) { conf[name][getName()]["carrierAgc"] = carrierAgc; });
+                _cfg->with([&](json& conf) { conf[getName()]["carrierAgc"] = carrierAgc; });
             }
             ImGui::LeftLabel("AGC Attack");
             ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
             if (ImGui::SliderFloat(("##_radio_am_agc_attack_" + name).c_str(), &agcAttack, 1.0f, 200.0f)) {
                 demod.setAGCAttack(agcAttack / getIFSampleRate());
-                _config->withConfig([&](json& conf) { conf[name][getName()]["agcAttack"] = agcAttack; });
+                _cfg->with([&](json& conf) { conf[getName()]["agcAttack"] = agcAttack; });
             }
             ImGui::LeftLabel("AGC Decay");
             ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
             if (ImGui::SliderFloat(("##_radio_am_agc_decay_" + name).c_str(), &agcDecay, 1.0f, 20.0f)) {
                 demod.setAGCDecay(agcDecay / getIFSampleRate());
-                _config->withConfig([&](json& conf) { conf[name][getName()]["agcDecay"] = agcDecay; });
+                _cfg->with([&](json& conf) { conf[getName()]["agcDecay"] = agcDecay; });
             }
         }
 
@@ -81,7 +81,7 @@ namespace demod {
     private:
         dsp::demod::AM<dsp::stereo_t> demod;
 
-        ConfigManager* _config = NULL;
+        ModuleConfig* _cfg = NULL;
 
         float agcAttack = 50.0f;
         float agcDecay = 5.0f;

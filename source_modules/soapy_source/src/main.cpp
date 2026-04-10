@@ -2,9 +2,12 @@
 #include <imgui.h>
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <gui/widgets/stepped_slider.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <SoapySDR/Device.hpp>
 #include <SoapySDR/Modules.hpp>
 #include <SoapySDR/Logger.hpp>
@@ -22,11 +25,24 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
-ConfigManager config;
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "soapy_source",
+    /* Description:     */ "SoapySDR source module for SDR++",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 1, 5,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
+};
 
-class SoapyModule : public ModuleManager::Instance {
+ConfigManager config;
+SDRPP_MOD_CONFIG(config);
+
+class SoapyModule : public ModuleManager::Instance, public ISource {
 public:
-    SoapyModule(std::string name) {
+    SoapyModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
         //TODO: Make module tune on source select change (in sdrpp_core)
@@ -40,19 +56,11 @@ public:
         config.readConfig([&](const json& conf) { devName = conf["device"]; });
         selectDevice(devName);
 
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
-        sigpath::sourceManager.registerSource("SoapySDR", &handler);
+        sigpath::sourceManager.registerSource("SoapySDR", static_cast<ISource*>(this));
     }
 
     ~SoapyModule() {
-        stop(this);
+        stop();
         sigpath::sourceManager.unregisterSource("SoapySDR");
     }
 
@@ -69,6 +77,9 @@ public:
     bool isEnabled() {
         return enabled;
     }
+
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
 
     template <typename T>
     std::string to_string_with_precision(const T a_value, const int n = 6) {
@@ -296,145 +307,138 @@ private:
         config.withConfig([&](json& cconf) { cconf["devices"][devArgs["label"]] = conf; });
     }
 
-    static void menuSelected(void* ctx) {
-        SoapyModule* _this = (SoapyModule*)ctx;
-        flog::info("SoapyModule '{0}': Menu Select!", _this->name);
-        if (_this->devList.size() == 0) {
+    void onSelect() override {
+        flog::info("SoapyModule '{0}': Menu Select!", name);
+        if (devList.size() == 0) {
             return;
         }
-        core::setInputSampleRate(_this->sampleRate);
+        core::setInputSampleRate(sampleRate);
     }
 
-    static void menuDeselected(void* ctx) {
-        SoapyModule* _this = (SoapyModule*)ctx;
-        flog::info("SoapyModule '{0}': Menu Deselect!", _this->name);
+    void onDeselect() override {
+        flog::info("SoapyModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        SoapyModule* _this = (SoapyModule*)ctx;
-        if (_this->running) { return; }
-        if (_this->devId < 0) {
+    void start() override {
+        if (running) { return; }
+        if (devId < 0) {
             flog::error("No device available");
             return;
         }
 
         try {
-            _this->dev = SoapySDR::Device::make(_this->devArgs);
+            dev = SoapySDR::Device::make(devArgs);
         }
         catch (const std::exception& e) {
             flog::error("Failed to open device: {}", e.what());
             return;
         }
 
-        _this->dev->setSampleRate(SOAPY_SDR_RX, _this->channelId, _this->sampleRate);
+        dev->setSampleRate(SOAPY_SDR_RX, channelId, sampleRate);
 
-        _this->dev->setAntenna(SOAPY_SDR_RX, _this->channelId, _this->antennaList[_this->uiAntennaId]);
+        dev->setAntenna(SOAPY_SDR_RX, channelId, antennaList[uiAntennaId]);
 
-        if (_this->bandwidthList.size() > 2) {
-            if (_this->bandwidthList[_this->uiBandwidthId] == -1)
-                _this->dev->setBandwidth(SOAPY_SDR_RX, _this->channelId, _this->selectBwBySr(_this->sampleRates[_this->srId]));
+        if (bandwidthList.size() > 2) {
+            if (bandwidthList[uiBandwidthId] == -1)
+                dev->setBandwidth(SOAPY_SDR_RX, channelId, selectBwBySr(sampleRates[srId]));
             else
-                _this->dev->setBandwidth(SOAPY_SDR_RX, _this->channelId, _this->bandwidthList[_this->uiBandwidthId]);
+                dev->setBandwidth(SOAPY_SDR_RX, channelId, bandwidthList[uiBandwidthId]);
         }
 
-        if (_this->hasAgc) {
-            _this->dev->setGainMode(SOAPY_SDR_RX, _this->channelId, _this->agc);
+        if (hasAgc) {
+            dev->setGainMode(SOAPY_SDR_RX, channelId, agc);
         }
 
         int i = 0;
-        for (auto gain : _this->gainList) {
-            _this->dev->setGain(SOAPY_SDR_RX, _this->channelId, gain, _this->uiGains[i]);
+        for (auto gain : gainList) {
+            dev->setGain(SOAPY_SDR_RX, channelId, gain, uiGains[i]);
             i++;
         }
 
-        _this->dev->setFrequency(SOAPY_SDR_RX, _this->channelId, _this->freq);
+        dev->setFrequency(SOAPY_SDR_RX, channelId, freq);
 
-        _this->devStream = _this->dev->setupStream(SOAPY_SDR_RX, "CF32");
-        _this->dev->activateStream(_this->devStream);
-        _this->running = true;
-        _this->workerThread = std::thread(_worker, _this);
-        flog::info("SoapyModule '{0}': Start!", _this->name);
+        devStream = dev->setupStream(SOAPY_SDR_RX, "CF32");
+        dev->activateStream(devStream);
+        running = true;
+        workerThread = std::thread(_worker, this);
+        flog::info("SoapyModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        SoapyModule* _this = (SoapyModule*)ctx;
-        if (!_this->running) { return; }
-        _this->running = false;
-        _this->dev->deactivateStream(_this->devStream);
-        _this->dev->closeStream(_this->devStream);
-        _this->stream.stopWriter();
-        _this->workerThread.join();
-        _this->stream.clearWriteStop();
-        SoapySDR::Device::unmake(_this->dev);
+    void stop() override {
+        if (!running) { return; }
+        running = false;
+        dev->deactivateStream(devStream);
+        dev->closeStream(devStream);
+        stream.stopWriter();
+        workerThread.join();
+        stream.clearWriteStop();
+        SoapySDR::Device::unmake(dev);
 
-        flog::info("SoapyModule '{0}': Stop!", _this->name);
+        flog::info("SoapyModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
-        SoapyModule* _this = (SoapyModule*)ctx;
-        _this->freq = freq;
-        if (_this->running) {
-            _this->dev->setFrequency(SOAPY_SDR_RX, _this->channelId, freq);
+    void tune(double freq) override {
+        freq = freq;
+        if (running) {
+            dev->setFrequency(SOAPY_SDR_RX, channelId, freq);
         }
-        flog::info("SoapyModule '{0}': Tune: {1}!", _this->name, freq);
+        flog::info("SoapyModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        SoapyModule* _this = (SoapyModule*)ctx;
-
+    void drawMenu() override {
         // If no device is selected, draw only the refresh button
-        if (_this->devId < 0) {
+        if (devId < 0) {
             SmGui::FillWidth();
             SmGui::ForceSync();
-            if (SmGui::Button(CONCAT("Refresh##_dev_select_", _this->name))) {
-                _this->refresh();
+            if (SmGui::Button(CONCAT("Refresh##_dev_select_", name))) {
+                refresh();
                 std::string devName;
                 config.readConfig([&](const json& conf) { devName = conf["device"]; });
-                _this->selectDevice(devName);
+                selectDevice(devName);
             }
             return;
         }
 
-        if (_this->running) { SmGui::BeginDisabled(); }
+        if (running) { SmGui::BeginDisabled(); }
 
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Combo(CONCAT("##_dev_select_", _this->name), &_this->devId, _this->txtDevList.c_str())) {
-            _this->selectDevice(_this->devList[_this->devId]["label"]);
-            config.withConfig([&](json& conf) { conf["device"] = _this->devList[_this->devId]["label"]; });
+        if (SmGui::Combo(CONCAT("##_dev_select_", name), &devId, txtDevList.c_str())) {
+            selectDevice(devList[devId]["label"]);
+            config.withConfig([&](json& conf) { conf["device"] = devList[devId]["label"]; });
         }
 
-        if (SmGui::Combo(CONCAT("##_sr_select_", _this->name), &_this->srId, _this->txtSrList.c_str())) {
-            _this->selectSampleRate(_this->sampleRates[_this->srId]);
-            if (_this->bandwidthList.size() > 2 && _this->running && _this->bandwidthList[_this->uiBandwidthId] == -1)
-                _this->dev->setBandwidth(SOAPY_SDR_RX, _this->channelId, _this->selectBwBySr(_this->sampleRates[_this->srId]));
-            _this->saveCurrent();
+        if (SmGui::Combo(CONCAT("##_sr_select_", name), &srId, txtSrList.c_str())) {
+            selectSampleRate(sampleRates[srId]);
+            if (bandwidthList.size() > 2 && running && bandwidthList[uiBandwidthId] == -1)
+                dev->setBandwidth(SOAPY_SDR_RX, channelId, selectBwBySr(sampleRates[srId]));
+            saveCurrent();
         }
 
         SmGui::SameLine();
         SmGui::FillWidth();
-        if (SmGui::Button(CONCAT("Refresh##_dev_select_", _this->name))) {
-            _this->refresh();
+        if (SmGui::Button(CONCAT("Refresh##_dev_select_", name))) {
+            refresh();
             std::string devName;
             config.readConfig([&](const json& conf) { devName = conf["device"]; });
-            _this->selectDevice(devName);
+            selectDevice(devName);
         }
 
-        if (_this->running) { SmGui::EndDisabled(); }
+        if (running) { SmGui::EndDisabled(); }
 
-        if (_this->antennaList.size() > 1) {
+        if (antennaList.size() > 1) {
             SmGui::LeftLabel("Antenna");
             SmGui::FillWidth();
-            if (SmGui::Combo(CONCAT("##_antenna_select_", _this->name), &_this->uiAntennaId, _this->txtAntennaList.c_str())) {
-                if (_this->running)
-                    _this->dev->setAntenna(SOAPY_SDR_RX, _this->channelId, _this->antennaList[_this->uiAntennaId]);
-                _this->saveCurrent();
+            if (SmGui::Combo(CONCAT("##_antenna_select_", name), &uiAntennaId, txtAntennaList.c_str())) {
+                if (running)
+                    dev->setAntenna(SOAPY_SDR_RX, channelId, antennaList[uiAntennaId]);
+                saveCurrent();
             }
         }
 
         // float gainNameLen = 0;
         // float len;
-        // for (auto gain : _this->gainList) {
+        // for (auto gain : gainList) {
         //     len = ImGui::CalcTextSize((gain + " gain").c_str()).x;
         //     if (len > gainNameLen) {
         //         gainNameLen = len;
@@ -442,56 +446,56 @@ private:
         // }
         // gainNameLen += 5.0f;
 
-        if (_this->hasAgc) {
-            if (SmGui::Checkbox((std::string("AGC##_agc_sel_") + _this->name).c_str(), &_this->agc)) {
-                if (_this->running) { _this->dev->setGainMode(SOAPY_SDR_RX, _this->channelId, _this->agc); }
+        if (hasAgc) {
+            if (SmGui::Checkbox((std::string("AGC##_agc_sel_") + name).c_str(), &agc)) {
+                if (running) { dev->setGainMode(SOAPY_SDR_RX, channelId, agc); }
                 // When disabled, reset the gains
-                if (!_this->agc) {
+                if (!agc) {
                     int i = 0;
-                    for (auto gain : _this->gainList) {
-                        _this->dev->setGain(SOAPY_SDR_RX, _this->channelId, gain, _this->uiGains[i]);
+                    for (auto gain : gainList) {
+                        dev->setGain(SOAPY_SDR_RX, channelId, gain, uiGains[i]);
                         i++;
                     }
                 }
-                _this->saveCurrent();
+                saveCurrent();
             }
         }
 
         int i = 0;
         char buf[128];
-        for (auto gain : _this->gainList) {
+        for (auto gain : gainList) {
             sprintf(buf, "%s gain", gain.c_str());
             SmGui::LeftLabel(buf);
             // ImGui::SetCursorPosX(gainNameLen);
             // ImGui::SetNextItemWidth(menuWidth - gainNameLen);
-            float step = _this->gainRanges[i].step();
+            float step = gainRanges[i].step();
             bool res;
             SmGui::FillWidth();
             if (step == 0.0f) {
-                res = SmGui::SliderFloat((std::string("##_gain_sel_") + _this->name + gain).c_str(), &_this->uiGains[i], _this->gainRanges[i].minimum(), _this->gainRanges[i].maximum());
+                res = SmGui::SliderFloat((std::string("##_gain_sel_") + name + gain).c_str(), &uiGains[i], gainRanges[i].minimum(), gainRanges[i].maximum());
             }
             else {
-                res = SmGui::SliderFloatWithSteps((std::string("##_gain_sel_") + _this->name + gain).c_str(), &_this->uiGains[i], _this->gainRanges[i].minimum(), _this->gainRanges[i].maximum(), step);
+                res = SmGui::SliderFloatWithSteps((std::string("##_gain_sel_") + name + gain).c_str(), &uiGains[i], gainRanges[i].minimum(), gainRanges[i].maximum(), step);
             }
             if (res) {
-                if (_this->running) {
-                    _this->dev->setGain(SOAPY_SDR_RX, _this->channelId, gain, _this->uiGains[i]);
+                if (running) {
+                    dev->setGain(SOAPY_SDR_RX, channelId, gain, uiGains[i]);
                 }
-                _this->saveCurrent();
+                saveCurrent();
             }
             i++;
         }
-        if (_this->bandwidthList.size() > 2) {
+        if (bandwidthList.size() > 2) {
             SmGui::LeftLabel("Bandwidth");
             SmGui::FillWidth();
-            if (SmGui::Combo(CONCAT("##_bw_select_", _this->name), &_this->uiBandwidthId, _this->txtBwList.c_str())) {
-                if (_this->running) {
-                    if (_this->bandwidthList[_this->uiBandwidthId] == -1)
-                        _this->dev->setBandwidth(SOAPY_SDR_RX, _this->channelId, _this->selectBwBySr(_this->sampleRates[_this->srId]));
+            if (SmGui::Combo(CONCAT("##_bw_select_", name), &uiBandwidthId, txtBwList.c_str())) {
+                if (running) {
+                    if (bandwidthList[uiBandwidthId] == -1)
+                        dev->setBandwidth(SOAPY_SDR_RX, channelId, selectBwBySr(sampleRates[srId]));
                     else
-                        _this->dev->setBandwidth(SOAPY_SDR_RX, _this->channelId, _this->bandwidthList[_this->uiBandwidthId]);
+                        dev->setBandwidth(SOAPY_SDR_RX, channelId, bandwidthList[uiBandwidthId]);
                 }
-                _this->saveCurrent();
+                saveCurrent();
             }
         }
     }
@@ -514,7 +518,6 @@ private:
     bool enabled = true;
     dsp::stream<dsp::complex_t> stream;
     SoapySDR::Stream* devStream;
-    SourceManager::SourceHandler handler;
     SoapySDR::KwargsList devList;
     SoapySDR::Kwargs devArgs;
     SoapySDR::Device* dev;
@@ -543,17 +546,10 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    config.setPath(core::args["root"].s() + "/soapy_source_config.json");
-    json defConf;
-    defConf["device"] = "";
-    defConf["devices"] = json({});
-    config.load(defConf);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "soapy_source_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new SoapyModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(SoapyModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (SoapyModule*)instance;

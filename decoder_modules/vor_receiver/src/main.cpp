@@ -25,6 +25,7 @@ SDRPP_MOD_INFO{
 };
 
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 #define INPUT_SAMPLE_RATE VOR_IN_SR
 

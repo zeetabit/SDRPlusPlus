@@ -2,8 +2,11 @@
 #include <imgui.h>
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <gui/style.h>
 #include <config.h>
@@ -19,6 +22,18 @@ SDRPP_MOD_INFO{
     /* Author:          */ "Ryzerth",
     /* Version:         */ 0, 1, 0,
     /* Max instances    */ 1
+};
+
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "spyserver_source",
+    /* Description:     */ "SpyServer source module for SDR++",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 1, 0,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
 };
 
 const char* deviceTypesStr[] = {
@@ -45,10 +60,11 @@ const int streamFormatsBitCount[] = {
 };
 
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
-class SpyServerSourceModule : public ModuleManager::Instance {
+class SpyServerSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    SpyServerSourceModule(std::string name) {
+    SpyServerSourceModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
         config.readConfig([&](const json& conf) {
@@ -57,20 +73,11 @@ public:
             strcpy(hostname, host.c_str());
         });
 
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
-
-        sigpath::sourceManager.registerSource("SpyServer", &handler);
+        sigpath::sourceManager.registerSource("SpyServer", static_cast<ISource*>(this));
     }
 
     ~SpyServerSourceModule() {
-        stop(this);
+        stop();
         sigpath::sourceManager.unregisterSource("SpyServer");
     }
 
@@ -88,6 +95,9 @@ public:
         return enabled;
     }
 
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
+
 private:
     std::string getBandwdithScaled(double bw) {
         char buf[1024];
@@ -103,124 +113,117 @@ private:
         return std::string(buf);
     }
 
-    static void menuSelected(void* ctx) {
-        SpyServerSourceModule* _this = (SpyServerSourceModule*)ctx;
-        core::setInputSampleRate(_this->sampleRate);
-        gui::mainWindow.playButtonLocked = !(_this->client && _this->client->isOpen());
-        flog::info("SpyServerSourceModule '{0}': Menu Select!", _this->name);
+    void onSelect() override {
+        core::setInputSampleRate(sampleRate);
+        gui::mainWindow.playButtonLocked = !(client && client->isOpen());
+        flog::info("SpyServerSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        SpyServerSourceModule* _this = (SpyServerSourceModule*)ctx;
+    void onDeselect() override {
         gui::mainWindow.playButtonLocked = false;
-        flog::info("SpyServerSourceModule '{0}': Menu Deselect!", _this->name);
+        flog::info("SpyServerSourceModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        SpyServerSourceModule* _this = (SpyServerSourceModule*)ctx;
-        if (_this->running) { return; }
+    void start() override {
+        if (running) { return; }
         
         // Try to connect if not already connected
-        if (!_this->client) {
-            _this->tryConnect();
-            if (!_this->client) { return; }
+        if (!client) {
+            tryConnect();
+            if (!client) { return; }
         }
 
-        int srvBits = streamFormatsBitCount[_this->iqType];
-        _this->client->setSetting(SPYSERVER_SETTING_IQ_FORMAT, streamFormats[_this->iqType]);
-        _this->client->setSetting(SPYSERVER_SETTING_IQ_DECIMATION, _this->srId + _this->client->devInfo.MinimumIQDecimation);
-        _this->client->setSetting(SPYSERVER_SETTING_IQ_FREQUENCY, _this->freq);
-        _this->client->setSetting(SPYSERVER_SETTING_STREAMING_MODE, SPYSERVER_STREAM_MODE_IQ_ONLY);
-        _this->client->setSetting(SPYSERVER_SETTING_GAIN, _this->gain);
-        _this->client->setSetting(SPYSERVER_SETTING_IQ_DIGITAL_GAIN, _this->client->computeDigitalGain(srvBits, _this->gain, _this->srId + _this->client->devInfo.MinimumIQDecimation));
-        _this->client->startStream();
+        int srvBits = streamFormatsBitCount[iqType];
+        client->setSetting(SPYSERVER_SETTING_IQ_FORMAT, streamFormats[iqType]);
+        client->setSetting(SPYSERVER_SETTING_IQ_DECIMATION, srId + client->devInfo.MinimumIQDecimation);
+        client->setSetting(SPYSERVER_SETTING_IQ_FREQUENCY, freq);
+        client->setSetting(SPYSERVER_SETTING_STREAMING_MODE, SPYSERVER_STREAM_MODE_IQ_ONLY);
+        client->setSetting(SPYSERVER_SETTING_GAIN, gain);
+        client->setSetting(SPYSERVER_SETTING_IQ_DIGITAL_GAIN, client->computeDigitalGain(srvBits, gain, srId + client->devInfo.MinimumIQDecimation));
+        client->startStream();
 
-        _this->running = true;
-        flog::info("SpyServerSourceModule '{0}': Start!", _this->name);
+        running = true;
+        flog::info("SpyServerSourceModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        SpyServerSourceModule* _this = (SpyServerSourceModule*)ctx;
-        if (!_this->running) { return; }
+    void stop() override {
+        if (!running) { return; }
 
-        _this->client->stopStream();
+        client->stopStream();
 
-        _this->running = false;
-        flog::info("SpyServerSourceModule '{0}': Stop!", _this->name);
+        running = false;
+        flog::info("SpyServerSourceModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
-        SpyServerSourceModule* _this = (SpyServerSourceModule*)ctx;
-        if (_this->running) {
-            _this->client->setSetting(SPYSERVER_SETTING_IQ_FREQUENCY, freq);
+    void tune(double freq) override {
+        if (running) {
+            client->setSetting(SPYSERVER_SETTING_IQ_FREQUENCY, freq);
         }
-        _this->freq = freq;
-        flog::info("SpyServerSourceModule '{0}': Tune: {1}!", _this->name, freq);
+        freq = freq;
+        flog::info("SpyServerSourceModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        SpyServerSourceModule* _this = (SpyServerSourceModule*)ctx;
-
-        bool connected = (_this->client && _this->client->isOpen());
+    void drawMenu() override {
+        bool connected = (client && client->isOpen());
         gui::mainWindow.playButtonLocked = !connected;
 
         if (connected) { SmGui::BeginDisabled(); }
-        if (SmGui::InputText(CONCAT("##_spyserver_srv_host_", _this->name), _this->hostname, 1023)) {
-            config.withConfig([&](json& conf) { conf["hostname"] = _this->hostname; });
+        if (SmGui::InputText(CONCAT("##_spyserver_srv_host_", name), hostname, 1023)) {
+            config.withConfig([&](json& conf) { conf["hostname"] = hostname; });
         }
         SmGui::SameLine();
         SmGui::FillWidth();
-        if (SmGui::InputInt(CONCAT("##_spyserver_srv_port_", _this->name), &_this->port, 0, 0)) {
-            config.withConfig([&](json& conf) { conf["port"] = _this->port; });
+        if (SmGui::InputInt(CONCAT("##_spyserver_srv_port_", name), &port, 0, 0)) {
+            config.withConfig([&](json& conf) { conf["port"] = port; });
         }
         if (connected) { SmGui::EndDisabled(); }
 
-        if (_this->running) { SmGui::BeginDisabled(); }
+        if (running) { SmGui::BeginDisabled(); }
         SmGui::FillWidth();
         SmGui::ForceSync();
         if (!connected && SmGui::Button("Connect##spyserver_source")) {
-            _this->tryConnect();
+            tryConnect();
         }
         else if (connected && SmGui::Button("Disconnect##spyserver_source")) {
-            _this->client->close();
+            client->close();
         }
-        if (_this->running) { SmGui::EndDisabled(); }
+        if (running) { SmGui::EndDisabled(); }
 
 
         if (connected) {
-            if (_this->running) { style::beginDisabled(); }
+            if (running) { style::beginDisabled(); }
             SmGui::LeftLabel("Samplerate");
             SmGui::FillWidth();
-            if (SmGui::Combo("##spyserver_source_sr", &_this->srId, _this->sampleRatesTxt.c_str())) {
-                _this->sampleRate = _this->sampleRates[_this->srId];
-                core::setInputSampleRate(_this->sampleRate);
-                config.withConfig([&](json& conf) { conf["devices"][_this->devRef]["sampleRateId"] = _this->srId; });
+            if (SmGui::Combo("##spyserver_source_sr", &srId, sampleRatesTxt.c_str())) {
+                sampleRate = sampleRates[srId];
+                core::setInputSampleRate(sampleRate);
+                config.withConfig([&](json& conf) { conf["devices"][devRef]["sampleRateId"] = srId; });
             }
-            if (_this->running) { style::endDisabled(); }
+            if (running) { style::endDisabled(); }
 
             SmGui::LeftLabel("Sample bit depth");
             SmGui::FillWidth();
-            if (SmGui::Combo("##spyserver_source_type", &_this->iqType, streamFormatStr)) {
-                int srvBits = streamFormatsBitCount[_this->iqType];
-                _this->client->setSetting(SPYSERVER_SETTING_IQ_FORMAT, streamFormats[_this->iqType]);
-                _this->client->setSetting(SPYSERVER_SETTING_IQ_DIGITAL_GAIN, _this->client->computeDigitalGain(srvBits, _this->gain, _this->srId + _this->client->devInfo.MinimumIQDecimation));
+            if (SmGui::Combo("##spyserver_source_type", &iqType, streamFormatStr)) {
+                int srvBits = streamFormatsBitCount[iqType];
+                client->setSetting(SPYSERVER_SETTING_IQ_FORMAT, streamFormats[iqType]);
+                client->setSetting(SPYSERVER_SETTING_IQ_DIGITAL_GAIN, client->computeDigitalGain(srvBits, gain, srId + client->devInfo.MinimumIQDecimation));
 
-                config.withConfig([&](json& conf) { conf["devices"][_this->devRef]["sampleBitDepthId"] = _this->iqType; });
+                config.withConfig([&](json& conf) { conf["devices"][devRef]["sampleBitDepthId"] = iqType; });
             }
 
-            if (_this->client->devInfo.MaximumGainIndex) {
+            if (client->devInfo.MaximumGainIndex) {
                 SmGui::FillWidth();
-                if (SmGui::SliderInt("##spyserver_source_gain", (int*)&_this->gain, 0, _this->client->devInfo.MaximumGainIndex)) {
-                    int srvBits = streamFormatsBitCount[_this->iqType];
-                    _this->client->setSetting(SPYSERVER_SETTING_GAIN, _this->gain);
-                    _this->client->setSetting(SPYSERVER_SETTING_IQ_DIGITAL_GAIN, _this->client->computeDigitalGain(srvBits, _this->gain, _this->srId + _this->client->devInfo.MinimumIQDecimation));
-                    config.withConfig([&](json& conf) { conf["devices"][_this->devRef]["gainId"] = _this->gain; });
+                if (SmGui::SliderInt("##spyserver_source_gain", (int*)&gain, 0, client->devInfo.MaximumGainIndex)) {
+                    int srvBits = streamFormatsBitCount[iqType];
+                    client->setSetting(SPYSERVER_SETTING_GAIN, gain);
+                    client->setSetting(SPYSERVER_SETTING_IQ_DIGITAL_GAIN, client->computeDigitalGain(srvBits, gain, srId + client->devInfo.MinimumIQDecimation));
+                    config.withConfig([&](json& conf) { conf["devices"][devRef]["gainId"] = gain; });
                 }
             }
 
             SmGui::Text("Status:");
             SmGui::SameLine();
-            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Connected (%s)", deviceTypesStr[_this->client->devInfo.DeviceType]);
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Connected (%s)", deviceTypesStr[client->devInfo.DeviceType]);
         }
         else {
             SmGui::Text("Status:");
@@ -296,31 +299,14 @@ private:
     std::string devRef = "";
 
     dsp::stream<dsp::complex_t> stream;
-    SourceManager::SourceHandler handler;
-
     spyserver::SpyServerClient client;
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    def["hostname"] = "localhost";
-    def["port"] = 5555;
-    def["devices"] = json::object();
-    config.setPath(core::args["root"].s() + "/spyserver_config.json");
-    config.load(def);
-    config.enableAutoSave();
-
-    // Check config in case a user has a very old version
-    config.withConfig([&](json& conf) {
-        if (!conf.contains("hostname") || !conf.contains("port") || !conf.contains("devices")) {
-            conf = def;
-        }
-    });
+    sdrppInitModuleConfig(config, "spyserver_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new SpyServerSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(SpyServerSourceModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (SpyServerSourceModule*)instance;

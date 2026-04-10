@@ -1,7 +1,10 @@
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <gui/style.h>
 #include <gui/smgui.h>
@@ -21,7 +24,20 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "plutosdr_source",
+    /* Description:     */ "PlutoSDR source module for SDR++",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 2, 0,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
+};
+
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 const std::vector<const char*> deviceWhiteList = {
     "PlutoSDR",
@@ -29,9 +45,9 @@ const std::vector<const char*> deviceWhiteList = {
     "LibreSDR"
 };
 
-class PlutoSDRSourceModule : public ModuleManager::Instance {
+class PlutoSDRSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    PlutoSDRSourceModule(std::string name) {
+    PlutoSDRSourceModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
         // Define valid samplerates
@@ -60,19 +76,11 @@ public:
         select(devDesc);
 
         // Register source
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
-        sigpath::sourceManager.registerSource("PlutoSDR", &handler);
+        sigpath::sourceManager.registerSource("PlutoSDR", static_cast<ISource*>(this));
     }
 
     ~PlutoSDRSourceModule() {
-        stop(this);
+        stop();
         sigpath::sourceManager.unregisterSource("PlutoSDR");
     }
 
@@ -89,6 +97,9 @@ public:
     bool isEnabled() {
         return enabled;
     }
+
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
 
 private:
     std::string getBandwdithScaled(double bw) {
@@ -259,117 +270,110 @@ private:
         }
     }
 
-    static void menuSelected(void* ctx) {
-        PlutoSDRSourceModule* _this = (PlutoSDRSourceModule*)ctx;
-        core::setInputSampleRate(_this->samplerate);
-        flog::info("PlutoSDRSourceModule '{0}': Menu Select!", _this->name);
+    void onSelect() override {
+        core::setInputSampleRate(samplerate);
+        flog::info("PlutoSDRSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        PlutoSDRSourceModule* _this = (PlutoSDRSourceModule*)ctx;
-        flog::info("PlutoSDRSourceModule '{0}': Menu Deselect!", _this->name);
+    void onDeselect() override {
+        flog::info("PlutoSDRSourceModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        PlutoSDRSourceModule* _this = (PlutoSDRSourceModule*)ctx;
-        if (_this->running) { return; }
+    void start() override {
+        if (running) { return; }
 
         // If no device is selected, give up
-        if (_this->devDesc.empty() || _this->uri.empty()) { return; }
+        if (devDesc.empty() || uri.empty()) { return; }
 
         // Open context
-        _this->ctx = iio_create_context_from_uri(_this->uri.c_str());
-        if (_this->ctx == NULL) {
-            flog::error("Could not open pluto ({})", _this->uri);
+        ctx = iio_create_context_from_uri(uri.c_str());
+        if (ctx == NULL) {
+            flog::error("Could not open pluto ({})", uri);
             return;
         }
 
         // Get phy and device handle
-        _this->phy = iio_context_find_device(_this->ctx, "ad9361-phy");
-        if (_this->phy == NULL) {
+        phy = iio_context_find_device(ctx, "ad9361-phy");
+        if (phy == NULL) {
             flog::error("Could not connect to pluto phy");
-            iio_context_destroy(_this->ctx);
+            iio_context_destroy(ctx);
             return;
         }
-        _this->dev = iio_context_find_device(_this->ctx, "cf-ad9361-lpc");
-        if (_this->dev == NULL) {
+        dev = iio_context_find_device(ctx, "cf-ad9361-lpc");
+        if (dev == NULL) {
             flog::error("Could not connect to pluto dev");
-            iio_context_destroy(_this->ctx);
+            iio_context_destroy(ctx);
             return;
         }
 
         // Get RX channels
-        _this->rxChan = iio_device_find_channel(_this->phy, "voltage0", false);
-        _this->rxLO = iio_device_find_channel(_this->phy, "altvoltage0", true);
+        rxChan = iio_device_find_channel(phy, "voltage0", false);
+        rxLO = iio_device_find_channel(phy, "altvoltage0", true);
 
         // Enable RX LO and disable TX
-        iio_channel_attr_write_bool(iio_device_find_channel(_this->phy, "altvoltage1", true), "powerdown", true);
-        iio_channel_attr_write_bool(_this->rxLO, "powerdown", false);
+        iio_channel_attr_write_bool(iio_device_find_channel(phy, "altvoltage1", true), "powerdown", true);
+        iio_channel_attr_write_bool(rxLO, "powerdown", false);
 
         // Configure RX channel
-        iio_channel_attr_write(_this->rxChan, "rf_port_select", "A_BALANCED");
-        iio_channel_attr_write_longlong(_this->rxLO, "frequency", round(_this->freq));                              // Freq
-        iio_channel_attr_write_bool(_this->rxChan, "filter_fir_en", true);                                          // Digital filter
-        iio_channel_attr_write_longlong(_this->rxChan, "sampling_frequency", round(_this->samplerate));             // Sample rate
-        iio_channel_attr_write_double(_this->rxChan, "hardwaregain", _this->gain);                                  // Gain
-        iio_channel_attr_write(_this->rxChan, "gain_control_mode", _this->gainModes.value(_this->gmId).c_str());    // Gain mode
-        _this->setBandwidth(_this->bandwidth);
+        iio_channel_attr_write(rxChan, "rf_port_select", "A_BALANCED");
+        iio_channel_attr_write_longlong(rxLO, "frequency", round(freq));                              // Freq
+        iio_channel_attr_write_bool(rxChan, "filter_fir_en", true);                                          // Digital filter
+        iio_channel_attr_write_longlong(rxChan, "sampling_frequency", round(samplerate));             // Sample rate
+        iio_channel_attr_write_double(rxChan, "hardwaregain", gain);                                  // Gain
+        iio_channel_attr_write(rxChan, "gain_control_mode", gainModes.value(gmId).c_str());    // Gain mode
+        setBandwidth(bandwidth);
         
         // Configure the ADC filters
-        ad9361_set_bb_rate(_this->phy, round(_this->samplerate));
+        ad9361_set_bb_rate(phy, round(samplerate));
 
         // Start worker thread
-        _this->running = true;
-        _this->workerThread = std::thread(worker, _this);
-        flog::info("PlutoSDRSourceModule '{0}': Start!", _this->name);
+        running = true;
+        workerThread = std::thread(worker, this);
+        flog::info("PlutoSDRSourceModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        PlutoSDRSourceModule* _this = (PlutoSDRSourceModule*)ctx;
-        if (!_this->running) { return; }
+    void stop() override {
+        if (!running) { return; }
 
         // Stop worker thread
-        _this->running = false;
-        _this->stream.stopWriter();
-        _this->workerThread.join();
-        _this->stream.clearWriteStop();
+        running = false;
+        stream.stopWriter();
+        workerThread.join();
+        stream.clearWriteStop();
 
         // Close device
-        if (_this->ctx != NULL) {
-            iio_context_destroy(_this->ctx);
-            _this->ctx = NULL;
+        if (ctx != NULL) {
+            iio_context_destroy(ctx);
+            ctx = NULL;
         }
 
-        flog::info("PlutoSDRSourceModule '{0}': Stop!", _this->name);
+        flog::info("PlutoSDRSourceModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
-        PlutoSDRSourceModule* _this = (PlutoSDRSourceModule*)ctx;
-        _this->freq = freq;
-        if (_this->running) {
+    void tune(double freq) override {
+        freq = freq;
+        if (running) {
             // Tune device
-            iio_channel_attr_write_longlong(_this->rxLO, "frequency", round(freq));
+            iio_channel_attr_write_longlong(rxLO, "frequency", round(freq));
         }
-        flog::info("PlutoSDRSourceModule '{0}': Tune: {1}!", _this->name, freq);
+        flog::info("PlutoSDRSourceModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        PlutoSDRSourceModule* _this = (PlutoSDRSourceModule*)ctx;
-
-        if (_this->running) { SmGui::BeginDisabled(); }
+    void drawMenu() override {
+        if (running) { SmGui::BeginDisabled(); }
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Combo("##plutosdr_dev_sel", &_this->devId, _this->devices.txt)) {
-            _this->select(_this->devices.key(_this->devId));
-            core::setInputSampleRate(_this->samplerate);
-            config.withConfig([&](json& conf) { conf["device"] = _this->devices.key(_this->devId); });
+        if (SmGui::Combo("##plutosdr_dev_sel", &devId, devices.txt)) {
+            select(devices.key(devId));
+            core::setInputSampleRate(samplerate);
+            config.withConfig([&](json& conf) { conf["device"] = devices.key(devId); });
         }
 
-        if (SmGui::Combo(CONCAT("##_pluto_sr_", _this->name), &_this->srId, _this->samplerates.txt)) {
-            _this->samplerate = _this->samplerates.value(_this->srId);
-            core::setInputSampleRate(_this->samplerate);
-            if (!_this->devDesc.empty()) {
-                config.withConfig([&](json& conf) { conf["devices"][_this->devDesc]["samplerate"] = _this->samplerate; });
+        if (SmGui::Combo(CONCAT("##_pluto_sr_", name), &srId, samplerates.txt)) {
+            samplerate = samplerates.value(srId);
+            core::setInputSampleRate(samplerate);
+            if (!devDesc.empty()) {
+                config.withConfig([&](json& conf) { conf["devices"][devDesc]["samplerate"] = samplerate; });
             }
         }
 
@@ -377,49 +381,49 @@ private:
         SmGui::SameLine();
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Button(CONCAT("Refresh##_pluto_refr_", _this->name))) {
-            _this->refresh();
-            _this->select(_this->devDesc);
-            core::setInputSampleRate(_this->samplerate);
+        if (SmGui::Button(CONCAT("Refresh##_pluto_refr_", name))) {
+            refresh();
+            select(devDesc);
+            core::setInputSampleRate(samplerate);
         }
-        if (_this->running) { SmGui::EndDisabled(); }
+        if (running) { SmGui::EndDisabled(); }
 
         SmGui::LeftLabel("Bandwidth");
         SmGui::FillWidth();
-        if (SmGui::Combo(CONCAT("##_pluto_bw_", _this->name), &_this->bwId, _this->bandwidths.txt)) {
-            _this->bandwidth = _this->bandwidths.value(_this->bwId);
-            if (_this->running) {
-                _this->setBandwidth(_this->bandwidth);
+        if (SmGui::Combo(CONCAT("##_pluto_bw_", name), &bwId, bandwidths.txt)) {
+            bandwidth = bandwidths.value(bwId);
+            if (running) {
+                setBandwidth(bandwidth);
             }
-            if (!_this->devDesc.empty()) {
-                config.withConfig([&](json& conf) { conf["devices"][_this->devDesc]["bandwidth"] = _this->bandwidth; });
+            if (!devDesc.empty()) {
+                config.withConfig([&](json& conf) { conf["devices"][devDesc]["bandwidth"] = bandwidth; });
             }
         }
 
         SmGui::LeftLabel("Gain Mode");
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Combo(CONCAT("##_pluto_gainmode_select_", _this->name), &_this->gmId, _this->gainModes.txt)) {
-            if (_this->running) {
-                iio_channel_attr_write(_this->rxChan, "gain_control_mode", _this->gainModes.value(_this->gmId).c_str());
+        if (SmGui::Combo(CONCAT("##_pluto_gainmode_select_", name), &gmId, gainModes.txt)) {
+            if (running) {
+                iio_channel_attr_write(rxChan, "gain_control_mode", gainModes.value(gmId).c_str());
             }
-            if (!_this->devDesc.empty()) {
-                config.withConfig([&](json& conf) { conf["devices"][_this->devDesc]["gainMode"] = _this->gainModes.key(_this->gmId); });
+            if (!devDesc.empty()) {
+                config.withConfig([&](json& conf) { conf["devices"][devDesc]["gainMode"] = gainModes.key(gmId); });
             }
         }
 
         SmGui::LeftLabel("Gain");
-        if (_this->gmId) { SmGui::BeginDisabled(); }
+        if (gmId) { SmGui::BeginDisabled(); }
         SmGui::FillWidth();
-        if (SmGui::SliderFloatWithSteps(CONCAT("##_pluto_gain__", _this->name), &_this->gain, -1.0f, 73.0f, 1.0f, SmGui::FMT_STR_FLOAT_DB_NO_DECIMAL)) {
-            if (_this->running) {
-                iio_channel_attr_write_double(_this->rxChan, "hardwaregain", _this->gain);
+        if (SmGui::SliderFloatWithSteps(CONCAT("##_pluto_gain__", name), &gain, -1.0f, 73.0f, 1.0f, SmGui::FMT_STR_FLOAT_DB_NO_DECIMAL)) {
+            if (running) {
+                iio_channel_attr_write_double(rxChan, "hardwaregain", gain);
             }
-            if (!_this->devDesc.empty()) {
-                config.withConfig([&](json& conf) { conf["devices"][_this->devDesc]["gain"] = _this->gain; });
+            if (!devDesc.empty()) {
+                config.withConfig([&](json& conf) { conf["devices"][devDesc]["gain"] = gain; });
             }
         }
-        if (_this->gmId) { SmGui::EndDisabled(); }
+        if (gmId) { SmGui::EndDisabled(); }
     }
 
     void setBandwidth(int bw) {
@@ -481,7 +485,6 @@ private:
     std::string name;
     bool enabled = true;
     dsp::stream<dsp::complex_t> stream;
-    SourceManager::SourceHandler handler;
     std::thread workerThread;
     iio_context* ctx = NULL;
     iio_device* phy = NULL;
@@ -510,24 +513,10 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json defConf = {};
-    defConf["device"] = "";
-    defConf["devices"] = {};
-    config.setPath(core::args["root"].s() + "/plutosdr_source_config.json");
-    config.load(defConf);
-    config.enableAutoSave();
-
-    // Reset the configuration if the old format is still used
-    config.withConfig([&](json& conf) {
-        if (!conf.contains("device") || !conf.contains("devices")) {
-            conf = defConf;
-        }
-    });
+    sdrppInitModuleConfig(config, "plutosdr_source_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new PlutoSDRSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(PlutoSDRSourceModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (PlutoSDRSourceModule*)instance;

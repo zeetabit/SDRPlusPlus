@@ -1,8 +1,11 @@
 #include <imgui.h>
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <gui/style.h>
 #include <config.h>
@@ -25,7 +28,20 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "bladerf_source",
+    /* Description:     */ "BladeRF source module for SDR++",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 1, 0,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
+};
+
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 enum BladeRFType {
     BLADERF_TYPE_UNKNOWN,
@@ -33,9 +49,9 @@ enum BladeRFType {
     BLADERF_TYPE_V2
 };
 
-class BladeRFSourceModule : public ModuleManager::Instance {
+class BladeRFSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    BladeRFSourceModule(std::string name) {
+    BladeRFSourceModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
         // Define clocks
@@ -44,15 +60,6 @@ public:
 
         sampleRate = 1000000.0;
 
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
-
         refresh();
 
         // Select device here
@@ -60,11 +67,11 @@ public:
         config.readConfig([&](const json& conf) { serial = conf["device"]; });
         selectBySerial(serial);
 
-        sigpath::sourceManager.registerSource("BladeRF", &handler);
+        sigpath::sourceManager.registerSource("BladeRF", static_cast<ISource*>(this));
     }
 
     ~BladeRFSourceModule() {
-        stop(this);
+        stop();
         sigpath::sourceManager.unregisterSource("BladeRF");
     }
 
@@ -81,6 +88,9 @@ public:
     bool isEnabled() {
         return enabled;
     }
+
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
 
     void refresh() {
         devListTxt = "";
@@ -345,116 +355,109 @@ private:
         return std::string(buf);
     }
 
-    static void menuSelected(void* ctx) {
-        BladeRFSourceModule* _this = (BladeRFSourceModule*)ctx;
-        core::setInputSampleRate(_this->sampleRate);
-        flog::info("BladeRFSourceModule '{0}': Menu Select!", _this->name);
+    void onSelect() override {
+        core::setInputSampleRate(sampleRate);
+        flog::info("BladeRFSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        BladeRFSourceModule* _this = (BladeRFSourceModule*)ctx;
-        flog::info("BladeRFSourceModule '{0}': Menu Deselect!", _this->name);
+    void onDeselect() override {
+        flog::info("BladeRFSourceModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        BladeRFSourceModule* _this = (BladeRFSourceModule*)ctx;
-        if (_this->running) { return; }
-        if (_this->devCount <= 0) { return; }
+    void start() override {
+        if (running) { return; }
+        if (devCount <= 0) { return; }
 
         // Open device
-        bladerf_devinfo info = _this->devInfoList[_this->devId];
-        int ret = bladerf_open_with_devinfo(&_this->openDev, &info);
+        bladerf_devinfo info = devInfoList[devId];
+        int ret = bladerf_open_with_devinfo(&openDev, &info);
         if (ret != 0) {
             flog::error("Could not open device {0}", info.serial);
             return;
         }
 
         // Calculate buffer size, must be a multiple of 1024
-        _this->bufferSize = _this->sampleRate / 200.0;
-        _this->bufferSize /= 1024;
-        _this->bufferSize *= 1024;
-        if (_this->bufferSize < 1024) { _this->bufferSize = 1024; }
+        bufferSize = sampleRate / 200.0;
+        bufferSize /= 1024;
+        bufferSize *= 1024;
+        if (bufferSize < 1024) { bufferSize = 1024; }
 
         // Setup device parameters
-        _this->setClockSource(_this->clocks[_this->clkId]);
-        bladerf_set_sample_rate(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->sampleRate, NULL);
-        bladerf_set_frequency(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->freq);
-        bladerf_set_bandwidth(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), (_this->bwId == _this->bandwidths.size()) ? std::clamp<uint64_t>(_this->sampleRate, _this->bwRange->min, _this->bwRange->max) : _this->bandwidths[_this->bwId], NULL);
-        bladerf_set_gain_mode(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->gainModes[_this->gainMode].mode);
+        setClockSource(clocks[clkId]);
+        bladerf_set_sample_rate(openDev, BLADERF_CHANNEL_RX(chanId), sampleRate, NULL);
+        bladerf_set_frequency(openDev, BLADERF_CHANNEL_RX(chanId), freq);
+        bladerf_set_bandwidth(openDev, BLADERF_CHANNEL_RX(chanId), (bwId == bandwidths.size()) ? std::clamp<uint64_t>(sampleRate, bwRange->min, bwRange->max) : bandwidths[bwId], NULL);
+        bladerf_set_gain_mode(openDev, BLADERF_CHANNEL_RX(chanId), gainModes[gainMode].mode);
 
-        if (_this->selectedBladeType == BLADERF_TYPE_V2) {
-            bladerf_set_bias_tee(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->biasT);
+        if (selectedBladeType == BLADERF_TYPE_V2) {
+            bladerf_set_bias_tee(openDev, BLADERF_CHANNEL_RX(chanId), biasT);
         }
 
         // If gain mode is manual, set the gain
-        if (_this->gainModes[_this->gainMode].mode == BLADERF_GAIN_MANUAL) {
-            bladerf_set_gain(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->overallGain);
+        if (gainModes[gainMode].mode == BLADERF_GAIN_MANUAL) {
+            bladerf_set_gain(openDev, BLADERF_CHANNEL_RX(chanId), overallGain);
         }
 
-        _this->streamingEnabled = true;
+        streamingEnabled = true;
 
         // Setup synchronous transfer
-        bladerf_sync_config(_this->openDev, BLADERF_RX_X1, BLADERF_FORMAT_SC16_Q11, 16, _this->bufferSize, 8, 3500);
+        bladerf_sync_config(openDev, BLADERF_RX_X1, BLADERF_FORMAT_SC16_Q11, 16, bufferSize, 8, 3500);
 
         // Enable streaming
-        bladerf_enable_module(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), true);
+        bladerf_enable_module(openDev, BLADERF_CHANNEL_RX(chanId), true);
 
-        _this->running = true;
-        _this->workerThread = std::thread(&BladeRFSourceModule::worker, _this);
+        running = true;
+        workerThread = std::thread(&BladeRFSourceModule::worker, this);
 
-        flog::info("BladeRFSourceModule '{0}': Start!", _this->name);
+        flog::info("BladeRFSourceModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        BladeRFSourceModule* _this = (BladeRFSourceModule*)ctx;
-        if (!_this->running) { return; }
-        _this->running = false;
-        _this->stream.stopWriter();
+    void stop() override {
+        if (!running) { return; }
+        running = false;
+        stream.stopWriter();
 
-        _this->streamingEnabled = false;
+        streamingEnabled = false;
         // Wait for read worker to terminate
-        if (_this->workerThread.joinable()) {
-            _this->workerThread.join();
+        if (workerThread.joinable()) {
+            workerThread.join();
         }
 
         // Disable streaming
-        bladerf_enable_module(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), false);
+        bladerf_enable_module(openDev, BLADERF_CHANNEL_RX(chanId), false);
 
         // Close device
-        bladerf_close(_this->openDev);
+        bladerf_close(openDev);
 
-        _this->stream.clearWriteStop();
-        flog::info("BladeRFSourceModule '{0}': Stop!", _this->name);
+        stream.clearWriteStop();
+        flog::info("BladeRFSourceModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
-        BladeRFSourceModule* _this = (BladeRFSourceModule*)ctx;
-        _this->freq = freq;
-        if (_this->running) {
-            bladerf_set_frequency(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->freq);
+    void tune(double freq) override {
+        freq = freq;
+        if (running) {
+            bladerf_set_frequency(openDev, BLADERF_CHANNEL_RX(chanId), freq);
         }
-        flog::info("BladeRFSourceModule '{0}': Tune: {1}!", _this->name, freq);
+        flog::info("BladeRFSourceModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        BladeRFSourceModule* _this = (BladeRFSourceModule*)ctx;
-
-        if (_this->running) { SmGui::BeginDisabled(); }
+    void drawMenu() override {
+        if (running) { SmGui::BeginDisabled(); }
 
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Combo(CONCAT("##_balderf_dev_sel_", _this->name), &_this->devId, _this->devListTxt.c_str())) {
-            bladerf_devinfo info = _this->devInfoList[_this->devId];
-            _this->selectByInfo(&info);
-            core::setInputSampleRate(_this->sampleRate);
-            config.withConfig([&](json& conf) { conf["device"] = _this->selectedSerial; });
+        if (SmGui::Combo(CONCAT("##_balderf_dev_sel_", name), &devId, devListTxt.c_str())) {
+            bladerf_devinfo info = devInfoList[devId];
+            selectByInfo(&info);
+            core::setInputSampleRate(sampleRate);
+            config.withConfig([&](json& conf) { conf["device"] = selectedSerial; });
         }
 
-        if (SmGui::Combo(CONCAT("##_balderf_sr_sel_", _this->name), &_this->srId, _this->sampleRatesTxt.c_str())) {
-            _this->sampleRate = _this->sampleRates[_this->srId];
-            core::setInputSampleRate(_this->sampleRate);
-            if (_this->selectedSerial != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["sampleRate"] = _this->sampleRates[_this->srId]; });
+        if (SmGui::Combo(CONCAT("##_balderf_sr_sel_", name), &srId, sampleRatesTxt.c_str())) {
+            sampleRate = sampleRates[srId];
+            core::setInputSampleRate(sampleRate);
+            if (selectedSerial != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["sampleRate"] = sampleRates[srId]; });
             }
         }
 
@@ -462,43 +465,43 @@ private:
         SmGui::SameLine();
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Button(CONCAT("Refresh##_balderf_refr_", _this->name))) {
-            _this->refresh();
-            _this->selectBySerial(_this->selectedSerial, false);
-            core::setInputSampleRate(_this->sampleRate);
+        if (SmGui::Button(CONCAT("Refresh##_balderf_refr_", name))) {
+            refresh();
+            selectBySerial(selectedSerial, false);
+            core::setInputSampleRate(sampleRate);
         }
 
         // Channel selection (only show if more than one channel)
-        if (_this->channelCount > 1) {
+        if (channelCount > 1) {
             SmGui::LeftLabel("RX Channel");
             SmGui::FillWidth();
-            SmGui::Combo(CONCAT("##_balderf_ch_sel_", _this->name), &_this->chanId, _this->channelNamesTxt.c_str());
-            if (_this->selectedSerial != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["channelId"] = _this->chanId; });
+            SmGui::Combo(CONCAT("##_balderf_ch_sel_", name), &chanId, channelNamesTxt.c_str());
+            if (selectedSerial != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["channelId"] = chanId; });
             }
         }
 
-        if (_this->running) { SmGui::EndDisabled(); }
+        if (running) { SmGui::EndDisabled(); }
 
         SmGui::LeftLabel("Bandwidth");
         SmGui::FillWidth();
-        if (SmGui::Combo(CONCAT("##_balderf_bw_sel_", _this->name), &_this->bwId, _this->bandwidthsTxt.c_str())) {
-            if (_this->running) {
-                bladerf_set_bandwidth(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), (_this->bwId == _this->bandwidths.size()) ? std::clamp<uint64_t>(_this->sampleRate, _this->bwRange->min, _this->bwRange->max) : _this->bandwidths[_this->bwId], NULL);
+        if (SmGui::Combo(CONCAT("##_balderf_bw_sel_", name), &bwId, bandwidthsTxt.c_str())) {
+            if (running) {
+                bladerf_set_bandwidth(openDev, BLADERF_CHANNEL_RX(chanId), (bwId == bandwidths.size()) ? std::clamp<uint64_t>(sampleRate, bwRange->min, bwRange->max) : bandwidths[bwId], NULL);
             }
-            if (_this->selectedSerial != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["bandwidth"] = _this->bwId; });
+            if (selectedSerial != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["bandwidth"] = bwId; });
             }
         }
 
         SmGui::LeftLabel("Clock Source");
         SmGui::FillWidth();
-        if (SmGui::Combo(CONCAT("##_balderf_clk_sel_", _this->name), &_this->clkId, _this->clocks.txt)) {
-            if (_this->running) {
-                _this->setClockSource(_this->clocks[_this->clkId]);
+        if (SmGui::Combo(CONCAT("##_balderf_clk_sel_", name), &clkId, clocks.txt)) {
+            if (running) {
+                setClockSource(clocks[clkId]);
             }
-            if (_this->selectedSerial != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["clock"] = _this->clocks.key(_this->clkId); });
+            if (selectedSerial != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["clock"] = clocks.key(clkId); });
             }
         }
 
@@ -506,43 +509,43 @@ private:
         SmGui::LeftLabel("Gain control mode");
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Combo(CONCAT("##_balderf_gm_sel_", _this->name), &_this->gainMode, _this->gainModesTxt.c_str()) && _this->selectedSerial != "") {
-            if (_this->running) {
-                bladerf_set_gain_mode(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->gainModes[_this->gainMode].mode);
+        if (SmGui::Combo(CONCAT("##_balderf_gm_sel_", name), &gainMode, gainModesTxt.c_str()) && selectedSerial != "") {
+            if (running) {
+                bladerf_set_gain_mode(openDev, BLADERF_CHANNEL_RX(chanId), gainModes[gainMode].mode);
             }
             // if switched to manual, reset gains
-            if (_this->gainModes[_this->gainMode].mode == BLADERF_GAIN_MANUAL && _this->running) {
-                bladerf_set_gain(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->overallGain);
+            if (gainModes[gainMode].mode == BLADERF_GAIN_MANUAL && running) {
+                bladerf_set_gain(openDev, BLADERF_CHANNEL_RX(chanId), overallGain);
             }
-            if (_this->selectedSerial != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["gainMode"] = _this->gainModeNames[_this->gainMode]; });
+            if (selectedSerial != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["gainMode"] = gainModeNames[gainMode]; });
             }
         }
 
-        if (_this->selectedSerial != "") {
-            if (_this->gainModes[_this->gainMode].mode != BLADERF_GAIN_MANUAL) { SmGui::BeginDisabled(); }
+        if (selectedSerial != "") {
+            if (gainModes[gainMode].mode != BLADERF_GAIN_MANUAL) { SmGui::BeginDisabled(); }
         }
         SmGui::LeftLabel("Gain");
         SmGui::FillWidth();
-        if (SmGui::SliderInt("##_balderf_oag_sel_", &_this->overallGain, (_this->gainRange != NULL) ? _this->gainRange->min : 0, (_this->gainRange != NULL) ? _this->gainRange->max : 60)) {
-            if (_this->running) {
-                flog::info("Setting gain to {0}", _this->overallGain);
-                bladerf_set_gain(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->overallGain);
+        if (SmGui::SliderInt("##_balderf_oag_sel_", &overallGain, (gainRange != NULL) ? gainRange->min : 0, (gainRange != NULL) ? gainRange->max : 60)) {
+            if (running) {
+                flog::info("Setting gain to {0}", overallGain);
+                bladerf_set_gain(openDev, BLADERF_CHANNEL_RX(chanId), overallGain);
             }
-            if (_this->selectedSerial != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["overallGain"] = _this->overallGain; });
+            if (selectedSerial != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["overallGain"] = overallGain; });
             }
         }
-        if (_this->selectedSerial != "") {
-            if (_this->gainModes[_this->gainMode].mode != BLADERF_GAIN_MANUAL) { SmGui::EndDisabled(); }
+        if (selectedSerial != "") {
+            if (gainModes[gainMode].mode != BLADERF_GAIN_MANUAL) { SmGui::EndDisabled(); }
         }
 
-        if (_this->selectedBladeType == BLADERF_TYPE_V2) {
-            if (SmGui::Checkbox("Bias-T##_balderf_biast_", &_this->biasT)) {
-                if (_this->running) {
-                    bladerf_set_bias_tee(_this->openDev, BLADERF_CHANNEL_RX(_this->chanId), _this->biasT);
+        if (selectedBladeType == BLADERF_TYPE_V2) {
+            if (SmGui::Checkbox("Bias-T##_balderf_biast_", &biasT)) {
+                if (running) {
+                    bladerf_set_bias_tee(openDev, BLADERF_CHANNEL_RX(chanId), biasT);
                 }
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["biasT"] = _this->biasT; });
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["biasT"] = biasT; });
             }
         }
     }
@@ -578,7 +581,6 @@ private:
     bool enabled = true;
     dsp::stream<dsp::complex_t> stream;
     double sampleRate;
-    SourceManager::SourceHandler handler;
     bool running = false;
     double freq;
     int devId = 0;
@@ -625,17 +627,10 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    def["devices"] = json({});
-    def["device"] = "";
-    config.setPath(core::args["root"].s() + "/bladerf_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "bladerf_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new BladeRFSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(BladeRFSourceModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (BladeRFSourceModule*)instance;

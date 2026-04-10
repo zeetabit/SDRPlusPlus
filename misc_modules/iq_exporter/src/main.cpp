@@ -1,6 +1,8 @@
 #include <utils/net.h>
 #include <imgui.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <gui/style.h>
 #include <utils/optionlist.h>
@@ -20,7 +22,15 @@ SDRPP_MOD_INFO{
     /* Max instances    */ -1
 };
 
+SDRPP_MOD_INFO_V2{
+    "iq_exporter", "Export raw IQ through TCP or UDP", "Ryzerth", 0, 1, 0, -1,
+    SDRPP_API_VERSION, MOD_CAP_MISC, 0, nullptr,
+    R"j({"mode":"Baseband","samplerate":1000000,"protocol":"TCP (Server)","sampleType":"Float32","packetSize":8192,"host":"localhost","port":1234,"running":false})j",
+    "iq_exporter_config.json"
+};
+
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 enum Mode {
     MODE_NONE = -1,
@@ -43,8 +53,9 @@ enum SampleType {
 
 class IQExporterModule : public ModuleManager::Instance {
 public:
-    IQExporterModule(std::string name) {
+    IQExporterModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
+        this->cfg = cfg;
 
         // Define operating modes
         modes.define("Baseband", MODE_BASEBAND);
@@ -82,36 +93,23 @@ public:
             packetSizes.define(i, buf, i);
         }
 
-        // Load config (defaults defined here, written to config on first run)
+        // Load config
         bool autoStart = false;
         Mode nMode = MODE_BASEBAND;
-        config.withConfig([&](json& conf) {
-            if (!conf.contains(name)) {
-                conf[name]["mode"] = "Baseband";
-                conf[name]["samplerate"] = 1000000;
-                conf[name]["protocol"] = "TCP (Server)";
-                conf[name]["sampleType"] = "Float32";
-                conf[name]["packetSize"] = 8192;
-                conf[name]["host"] = "localhost";
-                conf[name]["port"] = 1234;
-                conf[name]["running"] = false;
-            }
-            json& c = conf[name];
-            std::string modeStr = c.value("mode", std::string("Baseband"));
-            if (modes.keyExists(modeStr)) { nMode = modes.value(modes.keyId(modeStr)); }
-            int sr = c.value("samplerate", 1000000);
-            if (samplerates.keyExists(sr)) { samplerate = samplerates.value(samplerates.keyId(sr)); }
-            std::string protoStr = c.value("protocol", std::string("TCP (Server)"));
-            if (protocols.keyExists(protoStr)) { proto = protocols.value(protocols.keyId(protoStr)); }
-            std::string sampTypeStr = c.value("sampleType", std::string("Float32"));
-            if (sampleTypes.keyExists(sampTypeStr)) { sampType = sampleTypes.value(sampleTypes.keyId(sampTypeStr)); }
-            int size = c.value("packetSize", 8192);
-            if (packetSizes.keyExists(size)) { packetSize = packetSizes.value(packetSizes.keyId(size)); }
-            std::string hostStr = c.value("host", std::string("localhost"));
-            strcpy(hostname, hostStr.c_str());
-            port = std::clamp<int>(c.value("port", 1234), 1, 65535);
-            autoStart = c.value("running", false);
-        });
+        std::string modeStr = cfg->get<std::string>("mode", "Baseband");
+        if (modes.keyExists(modeStr)) { nMode = modes.value(modes.keyId(modeStr)); }
+        int sr = cfg->get<int>("samplerate", 1000000);
+        if (samplerates.keyExists(sr)) { samplerate = samplerates.value(samplerates.keyId(sr)); }
+        std::string protoStr = cfg->get<std::string>("protocol", "TCP (Server)");
+        if (protocols.keyExists(protoStr)) { proto = protocols.value(protocols.keyId(protoStr)); }
+        std::string sampTypeStr = cfg->get<std::string>("sampleType", "Float32");
+        if (sampleTypes.keyExists(sampTypeStr)) { sampType = sampleTypes.value(sampleTypes.keyId(sampTypeStr)); }
+        int size = cfg->get<int>("packetSize", 8192);
+        if (packetSizes.keyExists(size)) { packetSize = packetSizes.value(packetSizes.keyId(size)); }
+        std::string hostStr = cfg->get<std::string>("host", "localhost");
+        strcpy(hostname, hostStr.c_str());
+        port = std::clamp<int>(cfg->get<int>("port", 1234), 1, 65535);
+        autoStart = cfg->get<bool>("running", false);
 
         // Set menu IDs
         modeId = modes.valueId(nMode);
@@ -285,9 +283,7 @@ private:
         ImGui::FillWidth();
         if (ImGui::Combo(("##iq_exporter_mode_" + _this->name).c_str(), &_this->modeId, _this->modes.txt)) {
             _this->setMode(_this->modes.value(_this->modeId));
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["mode"] = _this->modes.key(_this->modeId);
-            });
+            _this->cfg->set("mode", _this->modes.key(_this->modeId));
         }
 
         // In VFO mode, show samplerate selector
@@ -300,9 +296,7 @@ private:
                     _this->vfo->setBandwidthLimits(_this->samplerate, _this->samplerate, true);
                     _this->vfo->setSampleRate(_this->samplerate, _this->samplerate);
                 }
-                config.withConfig([&](json& conf) {
-                    conf[_this->name]["samplerate"] = _this->samplerates.key(_this->srId);
-                });
+                _this->cfg->set("samplerate", _this->samplerates.key(_this->srId));
             }
         }
 
@@ -311,9 +305,7 @@ private:
         ImGui::FillWidth();
         if (ImGui::Combo(("##iq_exporter_proto_" + _this->name).c_str(), &_this->protoId, _this->protocols.txt)) {
             _this->proto = _this->protocols.value(_this->protoId);
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["protocol"] = _this->protocols.key(_this->protoId);
-            });
+            _this->cfg->set("protocol", _this->protocols.key(_this->protoId));
         }
 
         // Sample type selector
@@ -322,9 +314,7 @@ private:
         if (ImGui::Combo(("##iq_exporter_samp_" + _this->name).c_str(), &_this->sampTypeId, _this->sampleTypes.txt)) {
             _this->sampType = _this->sampleTypes.value(_this->sampTypeId);
             _this->reshape.setKeep(_this->packetSize/_this->sampleSize());
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["sampleType"] = _this->sampleTypes.key(_this->sampTypeId);
-            });
+            _this->cfg->set("sampleType", _this->sampleTypes.key(_this->sampTypeId));
         }
 
         // Packet size selector
@@ -333,24 +323,18 @@ private:
         if (ImGui::Combo(("##iq_exporter_pkt_sz_" + _this->name).c_str(), &_this->packetSizeId, _this->packetSizes.txt)) {
             _this->packetSize = _this->packetSizes.value(_this->packetSizeId);
             _this->reshape.setKeep(_this->packetSize/_this->sampleSize());
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["packetSize"] = _this->packetSizes.key(_this->packetSizeId);
-            });
+            _this->cfg->set("packetSize", _this->packetSizes.key(_this->packetSizeId));
         }
 
         // Hostname and port field
         if (ImGui::InputText(("##iq_exporter_host_" + _this->name).c_str(), _this->hostname, sizeof(_this->hostname))) {
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["host"] = _this->hostname;
-            });
+            _this->cfg->set("host", std::string(_this->hostname));
         }
         ImGui::SameLine();
         ImGui::FillWidth();
         if (ImGui::InputInt(("##iq_exporter_port_" + _this->name).c_str(), &_this->port, 0, 0)) {
             _this->port = std::clamp<int>(_this->port, 1, 65535);
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["port"] = _this->port;
-            });
+            _this->cfg->set("port", _this->port);
         }
 
         if (_this->running) { ImGui::EndDisabled(); }
@@ -359,17 +343,13 @@ private:
         if (_this->running || (!_this->enabled && _this->wasRunning)) {
             if (ImGui::Button(("Stop##iq_exporter_stop_" + _this->name).c_str(), ImVec2(menuWidth, 0))) {
                 _this->stop();
-                config.withConfig([&](json& conf) {
-                    conf[_this->name]["running"] = false;
-                });
+                _this->cfg->set("running", false);
             }
         }
         else {
             if (ImGui::Button(("Start##iq_exporter_start_" + _this->name).c_str(), ImVec2(menuWidth, 0))) {
                 _this->start();
-                config.withConfig([&](json& conf) {
-                    conf[_this->name]["running"] = true;
-                });
+                _this->cfg->set("running", true);
             }
         }
 
@@ -522,6 +502,7 @@ private:
     }
 
     std::string name;
+    ModuleConfig* cfg = nullptr;
     bool enabled = true;
 
     Mode mode = MODE_NONE;
@@ -563,18 +544,12 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    std::string root = (std::string)core::args["root"];
-    config.setPath(root + "/iq_exporter_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "iq_exporter_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new IQExporterModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(IQExporterModule);
 
-MOD_EXPORT void _DELETE_INSTANCE_(void* instance) {
+MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (IQExporterModule*)instance;
 }
 

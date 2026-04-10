@@ -1,6 +1,8 @@
 #include <utils/proto/rigctl.h>
 #include <imgui.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <gui/style.h>
 #include <signal_path/signal_path.h>
@@ -20,29 +22,27 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
+SDRPP_MOD_INFO_V2{
+    "rigctl_client", "Client for the RigCTL protocol", "Ryzerth", 0, 1, 0, 1,
+    SDRPP_API_VERSION, MOD_CAP_MISC, 0, nullptr,
+    R"({"host":"localhost","port":4532,"ifFreq":0.0})",
+    "rigctl_client_config.json"
+};
+
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 class RigctlClientModule : public ModuleManager::Instance {
 public:
-    RigctlClientModule(std::string name) {
+    RigctlClientModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
+        this->cfg = cfg;
 
-        // Load default
-        strcpy(host, "127.0.0.1");
-
-        // Load config (defaults defined here, written to config on first run)
-        config.withConfig([&](json& conf) {
-            if (!conf.contains(name)) {
-                conf[name]["host"] = "localhost";
-                conf[name]["port"] = 4532;
-                conf[name]["ifFreq"] = 0.0;
-            }
-            json& c = conf[name];
-            std::string h = c.value("host", std::string("localhost"));
-            strcpy(host, h.c_str());
-            port = std::clamp<int>(c.value("port", 4532), 1, 65535);
-            ifFreq = c.value("ifFreq", 0.0);
-        });
+        // Load config
+        std::string h = cfg->get<std::string>("host", "localhost");
+        strcpy(host, h.c_str());
+        port = std::clamp<int>(cfg->get<int>("port", 4532), 1, 65535);
+        ifFreq = cfg->get<double>("ifFreq", 0.0);
 
         _retuneHandler.ctx = this;
         _retuneHandler.handler = retuneHandler;
@@ -113,16 +113,12 @@ private:
 
         if (_this->running) { style::beginDisabled(); }
         if (ImGui::InputText(CONCAT("##_rigctl_cli_host_", _this->name), _this->host, 1023)) {
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["host"] = std::string(_this->host);
-            });
+            _this->cfg->set("host", std::string(_this->host));
         }
         ImGui::SameLine();
         ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
         if (ImGui::InputInt(CONCAT("##_rigctl_cli_port_", _this->name), &_this->port, 0, 0)) {
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["port"] = _this->port;
-            });
+            _this->cfg->set("port", _this->port);
         }
         if (_this->running) { style::endDisabled(); }
 
@@ -132,9 +128,7 @@ private:
             if (_this->running) {
                 sigpath::sourceManager.setPanadapterIF(_this->ifFreq);
             }
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["ifFreq"] = _this->ifFreq;
-            });
+            _this->cfg->set("ifFreq", _this->ifFreq);
         }
 
         ImGui::FillWidth();
@@ -167,6 +161,7 @@ private:
     }
 
     std::string name;
+    ModuleConfig* cfg = nullptr;
     bool enabled = true;
     bool running = false;
     std::recursive_mutex mtx;
@@ -181,16 +176,12 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    config.setPath(core::args["root"].s() + "/rigctl_client_config.json");
-    config.load(json::object());
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "rigctl_client_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new RigctlClientModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(RigctlClientModule);
 
-MOD_EXPORT void _DELETE_INSTANCE_(void* instance) {
+MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (RigctlClientModule*)instance;
 }
 

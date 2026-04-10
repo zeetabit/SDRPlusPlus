@@ -1,4 +1,6 @@
 #include "radio_module.h"
+#include <module_manifest.h>
+#include <module_config.h>
 
 SDRPP_MOD_INFO{
     /* Name:            */ "radio",
@@ -8,18 +10,29 @@ SDRPP_MOD_INFO{
     /* Max instances    */ -1
 };
 
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "radio",
+    /* Description:     */ "Analog radio decoder",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 2, 0, 0,
+    /* Max instances    */ -1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_DECODER,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr,
+    /* Config defaults  */ R"({"selectedDemodId":1})",
+    /* Config file      */ "radio_config.json"
+};
+
+SDRPP_MOD_CONFIG(config)
+
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    config.setPath(core::args["root"].s() + "/radio_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "radio_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new RadioModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(RadioModule)
 
-MOD_EXPORT void _DELETE_INSTANCE_(void* instance) {
+MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (RadioModule*)instance;
 }
 

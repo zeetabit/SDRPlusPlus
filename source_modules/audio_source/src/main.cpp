@@ -1,7 +1,10 @@
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <gui/style.h>
 #include <config.h>
@@ -20,7 +23,20 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "audio_source",
+    /* Description:     */ "Audio source module for SDR++",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 1, 0,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
+};
+
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 struct DeviceInfo {
     RtAudio::DeviceInfo info;
@@ -30,9 +46,9 @@ struct DeviceInfo {
     }
 };
 
-class AudioSourceModule : public ModuleManager::Instance {
+class AudioSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    AudioSourceModule(std::string name) {
+    AudioSourceModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
 #if RTAUDIO_VERSION_MAJOR >= 6
@@ -40,15 +56,6 @@ public:
 #endif
 
         sampleRate = 48000.0;
-
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
 
         // Refresh devices
         refresh();
@@ -62,11 +69,11 @@ public:
         });
         select(device);
         
-        sigpath::sourceManager.registerSource("Audio", &handler);
+        sigpath::sourceManager.registerSource("Audio", static_cast<ISource*>(this));
     }
 
     ~AudioSourceModule() {
-        stop(this);
+        stop();
         sigpath::sourceManager.unregisterSource("Audio");
     }
 
@@ -83,6 +90,9 @@ public:
     bool isEnabled() {
         return enabled;
     }
+
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
 
     void refresh() {
         devices.clear();
@@ -170,93 +180,87 @@ private:
         return std::string(buf);
     }
 
-    static void menuSelected(void* ctx) {
-        AudioSourceModule* _this = (AudioSourceModule*)ctx;
-        core::setInputSampleRate(_this->sampleRate);
-        flog::info("AudioSourceModule '{0}': Menu Select!", _this->name);
+    void onSelect() override {
+        core::setInputSampleRate(sampleRate);
+        flog::info("AudioSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        AudioSourceModule* _this = (AudioSourceModule*)ctx;
-        flog::info("AudioSourceModule '{0}': Menu Deselect!", _this->name);
+    void onDeselect() override {
+        flog::info("AudioSourceModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        AudioSourceModule* _this = (AudioSourceModule*)ctx;
-        if (_this->running) { return; }
+    void start() override {
+        if (running) { return; }
 
         // If no device is selected, give up
-        if (_this->selectedDevice.empty()) { return; }
+        if (selectedDevice.empty()) { return; }
         
         // Stream options
         RtAudio::StreamParameters parameters;
-        parameters.deviceId = _this->devices[_this->devId].id;
+        parameters.deviceId = devices[devId].id;
         parameters.nChannels = 2;
-        unsigned int bufferFrames = _this->sampleRate / 200;
+        unsigned int bufferFrames = sampleRate / 200;
         RtAudio::StreamOptions opts;
         opts.flags = RTAUDIO_MINIMIZE_LATENCY;
         opts.streamName = "SDR++ Audio Source";
 
         // Open and start stream
         try {
-            _this->audio.openStream(NULL, &parameters, RTAUDIO_FLOAT32, _this->sampleRate, &bufferFrames, callback, _this, &opts);
-            _this->audio.startStream();
-            _this->running = true;
+            audio.openStream(NULL, &parameters, RTAUDIO_FLOAT32, sampleRate, &bufferFrames, callback, this, &opts);
+            audio.startStream();
+            running = true;
         }
         catch (const std::exception& e) {
             flog::error("Error opening audio device: {}", e.what());
         }
         
-        flog::info("AudioSourceModule '{}': Start!", _this->name);
+        flog::info("AudioSourceModule '{}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        AudioSourceModule* _this = (AudioSourceModule*)ctx;
-        if (!_this->running) { return; }
-        _this->running = false;
+    void stop() override {
+        if (!running) { return; }
+        running = false;
         
-        _this->audio.stopStream();
-        _this->audio.closeStream();
+        audio.stopStream();
+        audio.closeStream();
 
-        flog::info("AudioSourceModule '{0}': Stop!", _this->name);
+        flog::info("AudioSourceModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
+    void tune(double freq) override {
         // Not possible
     }
 
-    static void menuHandler(void* ctx) {
-        AudioSourceModule* _this = (AudioSourceModule*)ctx;
-
-        if (_this->running) { SmGui::BeginDisabled(); }
+    void drawMenu() override {
+        if (running) { SmGui::BeginDisabled(); }
 
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Combo(CONCAT("##_audio_dev_sel_", _this->name), &_this->devId, _this->devices.txt)) {
-            std::string dev = _this->devices.key(_this->devId);
-            _this->select(dev);
-            core::setInputSampleRate(_this->sampleRate);
+        if (SmGui::Combo(CONCAT("##_audio_dev_sel_", name), &devId, devices.txt)) {
+            std::string dev = devices.key(devId);
+            select(dev);
+            core::setInputSampleRate(sampleRate);
             config.withConfig([&](json& conf) { conf["device"] = dev; });
         }
 
-        if (SmGui::Combo(CONCAT("##_audio_sr_sel_", _this->name), &_this->srId, _this->sampleRates.txt)) {
-            _this->sampleRate = _this->sampleRates[_this->srId];
-            core::setInputSampleRate(_this->sampleRate);
-            if (!_this->selectedDevice.empty()) {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedDevice]["sampleRate"] = _this->sampleRate; });
+        if (SmGui::Combo(CONCAT("##_audio_sr_sel_", name), &srId, sampleRates.txt)) {
+            sampleRate = sampleRates[srId];
+            core::setInputSampleRate(sampleRate);
+            if (!selectedDevice.empty()) {
+                config.withConfig([&](json& conf) { conf["devices"][selectedDevice]["sampleRate"] = sampleRate; });
             }
         }
 
         SmGui::SameLine();
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Button(CONCAT("Refresh##_audio_refr_", _this->name))) {
-            _this->refresh();
-            _this->select(_this->selectedDevice);
-            core::setInputSampleRate(_this->sampleRate);
+        if (SmGui::Button(CONCAT("Refresh##_audio_refr_", name))) {
+            refresh();
+            select(selectedDevice);
+            core::setInputSampleRate(sampleRate);
         }
 
-        if (_this->running) { SmGui::EndDisabled(); }
+        if (running) { SmGui::EndDisabled(); }
     }
 
     static int callback(void* outputBuffer, void* inputBuffer, unsigned int nBufferFrames, double streamTime, RtAudioStreamStatus status, void* userData) {
@@ -286,7 +290,6 @@ private:
     bool enabled = true;
     dsp::stream<dsp::complex_t> stream;
     double sampleRate;
-    SourceManager::SourceHandler handler;
     bool running = false;
     
     OptionList<std::string, DeviceInfo> devices;
@@ -299,17 +302,10 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    def["devices"] = json({});
-    def["device"] = "";
-    config.setPath(core::args["root"].s() + "/audio_source_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "audio_source_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new AudioSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(AudioSourceModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (AudioSourceModule*)instance;

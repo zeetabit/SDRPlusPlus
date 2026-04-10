@@ -1,8 +1,11 @@
 #include "hermes.h"
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <gui/style.h>
 #include <config.h>
@@ -21,11 +24,24 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
-ConfigManager config;
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "hermes_source",
+    /* Description:     */ "Hermes Lite 2 source module for SDR++",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 1, 1,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
+};
 
-class HermesSourceModule : public ModuleManager::Instance {
+ConfigManager config;
+SDRPP_MOD_CONFIG(config);
+
+class HermesSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    HermesSourceModule(std::string name) {
+    HermesSourceModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
         // Define samplerates
@@ -40,20 +56,11 @@ public:
 
         sampleRate = 384000.0;
 
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
-
-        sigpath::sourceManager.registerSource("Hermes", &handler);
+        sigpath::sourceManager.registerSource("Hermes", static_cast<ISource*>(this));
     }
 
     ~HermesSourceModule() {
-        stop(this);
+        stop();
         sigpath::sourceManager.unregisterSource("Hermes");
     }
 
@@ -70,6 +77,9 @@ public:
     bool isEnabled() {
         return enabled;
     }
+
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
 
     // TODO: Implement select functions
 
@@ -120,119 +130,111 @@ private:
         sampleRate = samplerates.key(srId);
     }
 
-    static void menuSelected(void* ctx) {
-        HermesSourceModule* _this = (HermesSourceModule*)ctx;
-
-        if (_this->firstSelect) {
-            _this->firstSelect = false;
+    void onSelect() override {
+        if (firstSelect) {
+            firstSelect = false;
 
             // Refresh
-            _this->refresh();
+            refresh();
 
             // Select device
-            config.readConfig([&](const json& conf) { _this->selectedMac = conf["device"]; });
-            _this->selectMac(_this->selectedMac);
+            config.readConfig([&](const json& conf) { selectedMac = conf["device"]; });
+            selectMac(selectedMac);
         }
 
-        core::setInputSampleRate(_this->sampleRate);
-        flog::info("HermesSourceModule '{0}': Menu Select!", _this->name);
+        core::setInputSampleRate(sampleRate);
+        flog::info("HermesSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        HermesSourceModule* _this = (HermesSourceModule*)ctx;
-        flog::info("HermesSourceModule '{0}': Menu Deselect!", _this->name);
+    void onDeselect() override {
+        flog::info("HermesSourceModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        HermesSourceModule* _this = (HermesSourceModule*)ctx;
-        if (_this->running || _this->selectedMac.empty()) { return; }
+    void start() override {
+        if (running || selectedMac.empty()) { return; }
         
         // TODO: Implement start
-        _this->dev = hermes::open(_this->devices[_this->devId].addr);
+        dev = hermes::open(devices[devId].addr);
 
         // TODO: STOP USING A LINK, FIND A BETTER WAY
-        _this->lnk.setInput(&_this->dev->out);
-        _this->lnk.start();
-        _this->dev->start();
+        lnk.setInput(&dev->out);
+        lnk.start();
+        dev->start();
 
         // TODO: Check if the USB commands are accepted before start
-        _this->dev->setSamplerate(_this->samplerates[_this->srId]);
-        _this->dev->setFrequency(_this->freq);
-        _this->dev->setGain(_this->gain);
+        dev->setSamplerate(samplerates[srId]);
+        dev->setFrequency(freq);
+        dev->setGain(gain);
 
-        _this->running = true;
-        flog::info("HermesSourceModule '{0}': Start!", _this->name);
+        running = true;
+        flog::info("HermesSourceModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        HermesSourceModule* _this = (HermesSourceModule*)ctx;
-        if (!_this->running) { return; }
-        _this->running = false;
+    void stop() override {
+        if (!running) { return; }
+        running = false;
         
         // TODO: Implement stop
-        _this->dev->stop();
-        _this->dev->close();
-        _this->lnk.stop();
+        dev->stop();
+        dev->close();
+        lnk.stop();
 
-        flog::info("HermesSourceModule '{0}': Stop!", _this->name);
+        flog::info("HermesSourceModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
-        HermesSourceModule* _this = (HermesSourceModule*)ctx;
-        if (_this->running) {
+    void tune(double freq) override {
+        if (running) {
             // TODO: Check if dev exists
-            _this->dev->setFrequency(freq);
+            dev->setFrequency(freq);
         }
-        _this->freq = freq;
-        flog::info("HermesSourceModule '{0}': Tune: {1}!", _this->name, freq);
+        freq = freq;
+        flog::info("HermesSourceModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        HermesSourceModule* _this = (HermesSourceModule*)ctx;
-
-        if (_this->running) { SmGui::BeginDisabled(); }
+    void drawMenu() override {
+        if (running) { SmGui::BeginDisabled(); }
 
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Combo(CONCAT("##_hermes_dev_sel_", _this->name), &_this->devId, _this->devices.txt)) {
-            _this->selectMac(_this->devices.key(_this->devId));
-            core::setInputSampleRate(_this->sampleRate);
-            if (!_this->selectedMac.empty()) {
-                config.withConfig([&](json& conf) { conf["device"] = _this->devices.key(_this->devId); });
+        if (SmGui::Combo(CONCAT("##_hermes_dev_sel_", name), &devId, devices.txt)) {
+            selectMac(devices.key(devId));
+            core::setInputSampleRate(sampleRate);
+            if (!selectedMac.empty()) {
+                config.withConfig([&](json& conf) { conf["device"] = devices.key(devId); });
             }
         }
 
-        if (SmGui::Combo(CONCAT("##_hermes_sr_sel_", _this->name), &_this->srId, _this->samplerates.txt)) {
-            _this->sampleRate = _this->samplerates.key(_this->srId);
-            core::setInputSampleRate(_this->sampleRate);
-            if (!_this->selectedMac.empty()) {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedMac]["samplerate"] = _this->samplerates.key(_this->srId); });
+        if (SmGui::Combo(CONCAT("##_hermes_sr_sel_", name), &srId, samplerates.txt)) {
+            sampleRate = samplerates.key(srId);
+            core::setInputSampleRate(sampleRate);
+            if (!selectedMac.empty()) {
+                config.withConfig([&](json& conf) { conf["devices"][selectedMac]["samplerate"] = samplerates.key(srId); });
             }
         }
 
         SmGui::SameLine();
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Button(CONCAT("Refresh##_hermes_refr_", _this->name))) {
-            _this->refresh();
+        if (SmGui::Button(CONCAT("Refresh##_hermes_refr_", name))) {
+            refresh();
             std::string mac;
             config.readConfig([&](const json& conf) { mac = conf["device"]; });
-            _this->selectMac(mac);
-            core::setInputSampleRate(_this->sampleRate);
+            selectMac(mac);
+            core::setInputSampleRate(sampleRate);
         }
 
-        if (_this->running) { SmGui::EndDisabled(); }
+        if (running) { SmGui::EndDisabled(); }
 
         // TODO: Device parameters
 
         SmGui::LeftLabel("LNA Gain");
         SmGui::FillWidth();
-        if (SmGui::SliderInt("##hermes_source_lna_gain", &_this->gain, 0, 60)) {
-            if (_this->running) {
-                _this->dev->setGain(_this->gain);
+        if (SmGui::SliderInt("##hermes_source_lna_gain", &gain, 0, 60)) {
+            if (running) {
+                dev->setGain(gain);
             }
-            if (!_this->selectedMac.empty()) {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedMac]["gain"] = _this->gain; });
+            if (!selectedMac.empty()) {
+                config.withConfig([&](json& conf) { conf["devices"][selectedMac]["gain"] = gain; });
             }
         }
     }
@@ -242,7 +244,6 @@ private:
     dsp::stream<dsp::complex_t> stream;
     dsp::routing::StreamLink<dsp::complex_t> lnk;
     double sampleRate;
-    SourceManager::SourceHandler handler;
     bool running = false;
     std::string selectedMac = "";
 
@@ -261,17 +262,10 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    def["devices"] = json({});
-    def["device"] = "";
-    config.setPath(core::args["root"].s() + "/hermes_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "hermes_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new HermesSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(HermesSourceModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (HermesSourceModule*)instance;

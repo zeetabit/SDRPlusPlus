@@ -2,8 +2,11 @@
 #include <imgui.h>
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <gui/style.h>
 #include <config.h>
@@ -21,21 +24,25 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "rfspace_source",
+    /* Description:     */ "RFspace source module for SDR++",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 1, 1,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
+};
+
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
-class RFSpaceSourceModule : public ModuleManager::Instance {
+class RFSpaceSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    RFSpaceSourceModule(std::string name) {
+    RFSpaceSourceModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
-
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
 
         // Load config
         config.readConfig([&](const json& conf) {
@@ -44,11 +51,11 @@ public:
             port = conf["port"];
         });
 
-        sigpath::sourceManager.registerSource("RFspace", &handler);
+        sigpath::sourceManager.registerSource("RFspace", static_cast<ISource*>(this));
     }
 
     ~RFSpaceSourceModule() {
-        stop(this);
+        stop();
         sigpath::sourceManager.unregisterSource("RFspace");
     }
 
@@ -66,6 +73,9 @@ public:
         return enabled;
     }
 
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
+
 private:
     std::string getBandwdithScaled(double bw) {
         char buf[1024];
@@ -81,121 +91,114 @@ private:
         return std::string(buf);
     }
 
-    static void menuSelected(void* ctx) {
-        RFSpaceSourceModule* _this = (RFSpaceSourceModule*)ctx;
-        core::setInputSampleRate(_this->sampleRate);
-        gui::mainWindow.playButtonLocked = !(_this->client && _this->client->isOpen());
-        flog::info("RFSpaceSourceModule '{0}': Menu Select!", _this->name);
+    void onSelect() override {
+        core::setInputSampleRate(sampleRate);
+        gui::mainWindow.playButtonLocked = !(client && client->isOpen());
+        flog::info("RFSpaceSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        RFSpaceSourceModule* _this = (RFSpaceSourceModule*)ctx;
+    void onDeselect() override {
         gui::mainWindow.playButtonLocked = false;
-        flog::info("RFSpaceSourceModule '{0}': Menu Deselect!", _this->name);
+        flog::info("RFSpaceSourceModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        RFSpaceSourceModule* _this = (RFSpaceSourceModule*)ctx;
-        if (_this->running) { return; }
+    void start() override {
+        if (running) { return; }
 
         // TODO: Set configuration here
-        if (_this->client) { _this->client->start(rfspace::RFSPACE_SAMP_FORMAT_COMPLEX, rfspace::RFSPACE_SAMP_FORMAT_16BIT); }
+        if (client) { client->start(rfspace::RFSPACE_SAMP_FORMAT_COMPLEX, rfspace::RFSPACE_SAMP_FORMAT_16BIT); }
 
-        _this->running = true;
-        flog::info("RFSpaceSourceModule '{0}': Start!", _this->name);
+        running = true;
+        flog::info("RFSpaceSourceModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        RFSpaceSourceModule* _this = (RFSpaceSourceModule*)ctx;
-        if (!_this->running) { return; }
+    void stop() override {
+        if (!running) { return; }
 
-        if (_this->client) { _this->client->stop(); }
+        if (client) { client->stop(); }
 
-        _this->running = false;
-        flog::info("RFSpaceSourceModule '{0}': Stop!", _this->name);
+        running = false;
+        flog::info("RFSpaceSourceModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
-        RFSpaceSourceModule* _this = (RFSpaceSourceModule*)ctx;
-        if (_this->running && _this->client) {
-            _this->client->setFrequency(freq);
+    void tune(double freq) override {
+        if (running && client) {
+            client->setFrequency(freq);
         }
-        _this->freq = freq;
-        flog::info("RFSpaceSourceModule '{0}': Tune: {1}!", _this->name, freq);
+        freq = freq;
+        flog::info("RFSpaceSourceModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        RFSpaceSourceModule* _this = (RFSpaceSourceModule*)ctx;
-
-        bool connected = (_this->client && _this->client->isOpen());
+    void drawMenu() override {
+        bool connected = (client && client->isOpen());
         gui::mainWindow.playButtonLocked = !connected;
 
         if (connected) { SmGui::BeginDisabled(); }
-        if (SmGui::InputText(CONCAT("##_rfspace_srv_host_", _this->name), _this->hostname, 1023)) {
-            config.withConfig([&](json& conf) { conf["hostname"] = _this->hostname; });
+        if (SmGui::InputText(CONCAT("##_rfspace_srv_host_", name), hostname, 1023)) {
+            config.withConfig([&](json& conf) { conf["hostname"] = hostname; });
         }
         SmGui::SameLine();
         SmGui::FillWidth();
-        if (SmGui::InputInt(CONCAT("##_rfspace_srv_port_", _this->name), &_this->port, 0, 0)) {
-            config.withConfig([&](json& conf) { conf["port"] = _this->port; });
+        if (SmGui::InputInt(CONCAT("##_rfspace_srv_port_", name), &port, 0, 0)) {
+            config.withConfig([&](json& conf) { conf["port"] = port; });
         }
         if (connected) { SmGui::EndDisabled(); }
 
-        if (_this->running) { SmGui::BeginDisabled(); }
+        if (running) { SmGui::BeginDisabled(); }
         SmGui::FillWidth();
         SmGui::ForceSync();
         if (!connected && SmGui::Button("Connect##rfspace_source")) {
             try {
-                if (_this->client) { _this->client.reset(); }
-                _this->client = rfspace::connect(_this->hostname, _this->port, &_this->stream);
-                _this->deviceInit();
+                if (client) { client.reset(); }
+                client = rfspace::connect(hostname, port, &stream);
+                deviceInit();
             }
             catch (const std::exception& e) {
                 flog::error("Could not connect to SDR: {}", e.what());
             }
         }
         else if (connected && SmGui::Button("Disconnect##rfspace_source")) {
-            _this->client->close();
+            client->close();
         }
-        if (_this->running) { SmGui::EndDisabled(); }
+        if (running) { SmGui::EndDisabled(); }
 
 
         if (connected) {
-            if (_this->running) { SmGui::BeginDisabled(); }
+            if (running) { SmGui::BeginDisabled(); }
 
             SmGui::LeftLabel("Samplerate");
             SmGui::FillWidth();
-            if (SmGui::Combo("##rfspace_source_samp_rate", &_this->srId, _this->sampleRates.txt)) {
-                _this->sampleRate = _this->sampleRates[_this->srId];
-                _this->client->setSampleRate(_this->sampleRate);
-                core::setInputSampleRate(_this->sampleRate);
+            if (SmGui::Combo("##rfspace_source_samp_rate", &srId, sampleRates.txt)) {
+                sampleRate = sampleRates[srId];
+                client->setSampleRate(sampleRate);
+                core::setInputSampleRate(sampleRate);
                 
-                config.withConfig([&](json& conf) { conf["devices"][_this->devConfName]["sampleRate"] = _this->sampleRates.key(_this->srId); });
+                config.withConfig([&](json& conf) { conf["devices"][devConfName]["sampleRate"] = sampleRates.key(srId); });
             }
 
-            if (_this->running) { SmGui::EndDisabled(); }
+            if (running) { SmGui::EndDisabled(); }
 
-            if (_this->client->deviceId == rfspace::RFSPACE_DEV_ID_CLOUD_IQ) {
+            if (client->deviceId == rfspace::RFSPACE_DEV_ID_CLOUD_IQ) {
                 SmGui::LeftLabel("Antenna Port");
                 SmGui::FillWidth();
-                if (SmGui::Combo("##rfspace_source_rf_port", &_this->rfPortId, _this->rfPorts.txt)) {
-                    _this->client->setPort(_this->rfPorts[_this->rfPortId]);
+                if (SmGui::Combo("##rfspace_source_rf_port", &rfPortId, rfPorts.txt)) {
+                    client->setPort(rfPorts[rfPortId]);
 
-                    config.withConfig([&](json& conf) { conf["devices"][_this->devConfName]["rfPort"] = _this->rfPorts.key(_this->rfPortId); });
+                    config.withConfig([&](json& conf) { conf["devices"][devConfName]["rfPort"] = rfPorts.key(rfPortId); });
                 }
             }
 
             SmGui::LeftLabel("Gain");
             SmGui::FillWidth();
-            if (SmGui::SliderFloatWithSteps("##rfspace_source_gain", &_this->gain, -30, 0, 10, SmGui::FMT_STR_FLOAT_DB_NO_DECIMAL)) {
-                _this->client->setGain(_this->gain);
+            if (SmGui::SliderFloatWithSteps("##rfspace_source_gain", &gain, -30, 0, 10, SmGui::FMT_STR_FLOAT_DB_NO_DECIMAL)) {
+                client->setGain(gain);
 
-                config.withConfig([&](json& conf) { conf["devices"][_this->devConfName]["gain"] = _this->gain; });
+                config.withConfig([&](json& conf) { conf["devices"][devConfName]["gain"] = gain; });
             }
 
             SmGui::Text("Status:");
             SmGui::SameLine();
-            SmGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), _this->connectedStr.c_str());
+            SmGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), connectedStr.c_str());
         }
         else {
             SmGui::Text("Status:");
@@ -303,31 +306,14 @@ private:
     };
 
     dsp::stream<dsp::complex_t> stream;
-    SourceManager::SourceHandler handler;
-
     std::shared_ptr<rfspace::Client> client;
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    def["hostname"] = "192.168.0.111";
-    def["port"] = 50000;
-    def["devices"] = json::object();
-    config.setPath(core::args["root"].s() + "/rfspace_source_config.json");
-    config.load(def);
-    config.enableAutoSave();
-
-    // Check config in case a user has a very old version
-    config.withConfig([&](json& conf) {
-        if (!conf.contains("hostname") || !conf.contains("port") || !conf.contains("devices")) {
-            conf = def;
-        }
-    });
+    sdrppInitModuleConfig(config, "rfspace_source_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new RFSpaceSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(RFSpaceSourceModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (RFSpaceSourceModule*)instance;

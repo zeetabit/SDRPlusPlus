@@ -1,8 +1,11 @@
 #include <imgui.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <gui/smgui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <utils/optionlist.h>
 #include <atomic>
@@ -16,7 +19,20 @@ SDRPP_MOD_INFO{
     /* Max instances    */ -1
 };
 
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "fobossdr_source",
+    /* Description:     */ "FobosSDR Source Module",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 1, 0,
+    /* Max instances    */ -1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
+};
+
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
@@ -26,24 +42,15 @@ ConfigManager config;
 #define FOBOS_VGA_GAIN_MIN  0
 #define FOBOS_VGA_GAIN_MAX  31
 
-class FobosSDRSourceModule : public ModuleManager::Instance {
+class FobosSDRSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    FobosSDRSourceModule(std::string name) {
+    FobosSDRSourceModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
         sampleRate = 50000000.0;
 
         // Initialize the DDC
         ddc.init(&ddcIn, 50e6, 50e6, 50e6, 0.0);
-
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &ddc.out;
 
         // Refresh devices
         refresh();
@@ -53,7 +60,7 @@ public:
         config.readConfig([&](const json& conf) { devSerial = conf["device"]; });
         select(devSerial);
 
-        sigpath::sourceManager.registerSource("FobosSDR", &handler);
+        sigpath::sourceManager.registerSource("FobosSDR", static_cast<ISource*>(this));
     }
 
     ~FobosSDRSourceModule() {
@@ -73,6 +80,9 @@ public:
     bool isEnabled() {
         return enabled;
     }
+
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &ddc.out; }
 
     enum Port {
         PORT_RF,
@@ -239,197 +249,190 @@ private:
         core::setInputSampleRate(sampleRate);
     }
 
-    static void menuSelected(void* ctx) {
-        FobosSDRSourceModule* _this = (FobosSDRSourceModule*)ctx;
-        core::setInputSampleRate(_this->sampleRate);
-        flog::info("FobosSDRSourceModule '{0}': Menu Select!", _this->name);
+    void onSelect() override {
+        core::setInputSampleRate(sampleRate);
+        flog::info("FobosSDRSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        FobosSDRSourceModule* _this = (FobosSDRSourceModule*)ctx;
-        flog::info("FobosSDRSourceModule '{0}': Menu Deselect!", _this->name);
+    void onDeselect() override {
+        flog::info("FobosSDRSourceModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        FobosSDRSourceModule* _this = (FobosSDRSourceModule*)ctx;
-        if (_this->running) { return; }
+    void start() override {
+        if (running) { return; }
 
         // Open the device
-        int err = fobos_rx_open(&_this->openDev, _this->selectedDevId);
+        int err = fobos_rx_open(&openDev, selectedDevId);
         if (err) {
             flog::error("Failed to open device: {}", err);
             return;
         }
 
         // Get the selected port
-        _this->port = _this->ports[_this->portId];
+        port = ports[portId];
 
         // Configure the device
         double actualSr, actualFreq;
-        fobos_rx_set_samplerate(_this->openDev, (_this->sampleRate >= 50e6) ? _this->sampleRate : 50e6, &actualSr);
-        fobos_rx_set_frequency(_this->openDev, _this->freq, &actualFreq);
-        fobos_rx_set_direct_sampling(_this->openDev, _this->port != PORT_RF);
-        fobos_rx_set_clk_source(_this->openDev, _this->clockSources[_this->clkSrcId]);
-        fobos_rx_set_lna_gain(_this->openDev, _this->lnaGain);
-        fobos_rx_set_vga_gain(_this->openDev, _this->vgaGain);
+        fobos_rx_set_samplerate(openDev, (sampleRate >= 50e6) ? sampleRate : 50e6, &actualSr);
+        fobos_rx_set_frequency(openDev, freq, &actualFreq);
+        fobos_rx_set_direct_sampling(openDev, port != PORT_RF);
+        fobos_rx_set_clk_source(openDev, clockSources[clkSrcId]);
+        fobos_rx_set_lna_gain(openDev, lnaGain);
+        fobos_rx_set_vga_gain(openDev, vgaGain);
 
         // Configure the DDC
-        if (_this->port == PORT_RF && _this->sampleRate >= 50e6) {
+        if (port == PORT_RF && sampleRate >= 50e6) {
             // Set the frequency
-            fobos_rx_set_frequency(_this->openDev, _this->freq, &actualFreq);
+            fobos_rx_set_frequency(openDev, freq, &actualFreq);
         }
-        else if (_this->port == PORT_RF) {
+        else if (port == PORT_RF) {
             // Set the frequency
-            fobos_rx_set_frequency(_this->openDev, _this->freq, &actualFreq);
+            fobos_rx_set_frequency(openDev, freq, &actualFreq);
 
             // Configure and start the DDC for decimation only
-            _this->ddc.setInSamplerate(actualSr);
-            _this->ddc.setOutSamplerate(_this->sampleRate, _this->sampleRate);
-            _this->ddc.setOffset(0.0);
-            _this->ddc.start();
+            ddc.setInSamplerate(actualSr);
+            ddc.setOutSamplerate(sampleRate, sampleRate);
+            ddc.setOffset(0.0);
+            ddc.start();
         }
         else {
             // Configure and start the DDC
-            _this->ddc.setInSamplerate(actualSr);
-            _this->ddc.setOutSamplerate(_this->sampleRate, _this->sampleRate);
-            _this->ddc.setOffset(_this->freq);
-            _this->ddc.start();
+            ddc.setInSamplerate(actualSr);
+            ddc.setOutSamplerate(sampleRate, sampleRate);
+            ddc.setOffset(freq);
+            ddc.start();
         }
 
         // Compute buffer size (Lower than usual, but it's a workaround for their API having broken streaming)
-        _this->bufferSize = _this->sampleRate / 400.0;
+        bufferSize = sampleRate / 400.0;
 
         // Start streaming
-        err = fobos_rx_start_sync(_this->openDev, _this->bufferSize);
+        err = fobos_rx_start_sync(openDev, bufferSize);
         if (err) {
             flog::error("Failed to start stream: {}", err);
             return;
         }
 
         // Start worker
-        _this->run = true;
-        _this->workerThread = std::thread(&FobosSDRSourceModule::worker, _this);
+        run = true;
+        workerThread = std::thread(&FobosSDRSourceModule::worker, this);
         
-        _this->running = true;
-        flog::info("FobosSDRSourceModule '{0}': Start!", _this->name);
+        running = true;
+        flog::info("FobosSDRSourceModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        FobosSDRSourceModule* _this = (FobosSDRSourceModule*)ctx;
-        if (!_this->running) { return; }
-        _this->running = false;
+    void stop() override {
+        if (!running) { return; }
+        running = false;
 
         // Stop worker
-        _this->run = false;
-        if (_this->port == PORT_RF && _this->sampleRate >= 50e6) {
-            _this->ddc.out.stopWriter();
-            if (_this->workerThread.joinable()) { _this->workerThread.join(); }
-            _this->ddc.out.clearWriteStop();
+        run = false;
+        if (port == PORT_RF && sampleRate >= 50e6) {
+            ddc.out.stopWriter();
+            if (workerThread.joinable()) { workerThread.join(); }
+            ddc.out.clearWriteStop();
         }
         else {
-            _this->ddcIn.stopWriter();
-            if (_this->workerThread.joinable()) { _this->workerThread.join(); }
-            _this->ddcIn.clearWriteStop();
+            ddcIn.stopWriter();
+            if (workerThread.joinable()) { workerThread.join(); }
+            ddcIn.clearWriteStop();
         }
 
         // Stop streaming
-        fobos_rx_stop_sync(_this->openDev);
+        fobos_rx_stop_sync(openDev);
 
         // Stop the DDC
-        _this->ddc.stop();
+        ddc.stop();
 
         // Close the device
-        fobos_rx_close(_this->openDev);
+        fobos_rx_close(openDev);
 
-        flog::info("FobosSDRSourceModule '{0}': Stop!", _this->name);
+        flog::info("FobosSDRSourceModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
-        FobosSDRSourceModule* _this = (FobosSDRSourceModule*)ctx;
-        if (_this->running) {
-            if (_this->port == PORT_RF) {
+    void tune(double freq) override {
+        if (running) {
+            if (port == PORT_RF) {
                 double actual; // Dummy, don't care
-                fobos_rx_set_frequency(_this->openDev, freq, &actual);
+                fobos_rx_set_frequency(openDev, freq, &actual);
             }
             else {
-                _this->ddc.setOffset(freq);
+                ddc.setOffset(freq);
             }
         }
-        _this->freq = freq;
-        flog::info("FobosSDRSourceModule '{0}': Tune: {1}!", _this->name, freq);
+        freq = freq;
+        flog::info("FobosSDRSourceModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        FobosSDRSourceModule* _this = (FobosSDRSourceModule*)ctx;
-        
-        if (_this->running) { SmGui::BeginDisabled(); }
+    void drawMenu() override {
+        if (running) { SmGui::BeginDisabled(); }
 
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Combo(CONCAT("##_fobossdr_dev_sel_", _this->name), &_this->devId, _this->devices.txt)) {
-            _this->select(_this->devices.key(_this->devId));
-            core::setInputSampleRate(_this->sampleRate);
-            config.withConfig([&](json& conf) { conf["device"] = _this->selectedSerial; });
+        if (SmGui::Combo(CONCAT("##_fobossdr_dev_sel_", name), &devId, devices.txt)) {
+            select(devices.key(devId));
+            core::setInputSampleRate(sampleRate);
+            config.withConfig([&](json& conf) { conf["device"] = selectedSerial; });
         }
 
-        if (SmGui::Combo(CONCAT("##_fobossdr_sr_sel_", _this->name), &_this->srId, _this->samplerates.txt)) {
-            _this->sampleRate = _this->samplerates.value(_this->srId);
-            core::setInputSampleRate(_this->sampleRate);
-            if (!_this->selectedSerial.empty()) {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["samplerate"] = _this->samplerates.key(_this->srId); });
+        if (SmGui::Combo(CONCAT("##_fobossdr_sr_sel_", name), &srId, samplerates.txt)) {
+            sampleRate = samplerates.value(srId);
+            core::setInputSampleRate(sampleRate);
+            if (!selectedSerial.empty()) {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["samplerate"] = samplerates.key(srId); });
             }
         }
 
         SmGui::SameLine();
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Button(CONCAT("Refresh##_fobossdr_refr_", _this->name))) {
-            _this->refresh();
-            _this->select(_this->selectedSerial);
-            core::setInputSampleRate(_this->sampleRate);
+        if (SmGui::Button(CONCAT("Refresh##_fobossdr_refr_", name))) {
+            refresh();
+            select(selectedSerial);
+            core::setInputSampleRate(sampleRate);
         }
 
         SmGui::LeftLabel("Antenna Port");
         SmGui::FillWidth();
-        if (SmGui::Combo(CONCAT("##_fobossdr_port_", _this->name), &_this->portId, _this->ports.txt)) {
-            if (!_this->selectedSerial.empty()) {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["port"] = _this->ports.key(_this->portId); });
+        if (SmGui::Combo(CONCAT("##_fobossdr_port_", name), &portId, ports.txt)) {
+            if (!selectedSerial.empty()) {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["port"] = ports.key(portId); });
             }
         }
 
-        if (_this->running) { SmGui::EndDisabled(); }
+        if (running) { SmGui::EndDisabled(); }
 
         SmGui::LeftLabel("Clock Source");
         SmGui::FillWidth();
-        if (SmGui::Combo(CONCAT("##_fobossdr_clk_", _this->name), &_this->clkSrcId, _this->clockSources.txt)) {
-            if (_this->running) {
-                fobos_rx_set_clk_source(_this->openDev, _this->clockSources[_this->clkSrcId]);
+        if (SmGui::Combo(CONCAT("##_fobossdr_clk_", name), &clkSrcId, clockSources.txt)) {
+            if (running) {
+                fobos_rx_set_clk_source(openDev, clockSources[clkSrcId]);
             }
-            if (!_this->selectedSerial.empty()) {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["clkSrc"] = _this->clockSources.key(_this->clkSrcId); });
+            if (!selectedSerial.empty()) {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["clkSrc"] = clockSources.key(clkSrcId); });
             }
         }
 
-        if (_this->port == PORT_RF) {
+        if (port == PORT_RF) {
             SmGui::LeftLabel("LNA Gain");
             SmGui::FillWidth();
-            if (SmGui::SliderInt(CONCAT("##_fobossdr_lna_gain_", _this->name), &_this->lnaGain, FOBOS_LNA_GAIN_MIN, FOBOS_LNA_GAIN_MAX)) {
-                if (_this->running) {
-                    fobos_rx_set_lna_gain(_this->openDev, _this->lnaGain);
+            if (SmGui::SliderInt(CONCAT("##_fobossdr_lna_gain_", name), &lnaGain, FOBOS_LNA_GAIN_MIN, FOBOS_LNA_GAIN_MAX)) {
+                if (running) {
+                    fobos_rx_set_lna_gain(openDev, lnaGain);
                 }
-                if (!_this->selectedSerial.empty()) {
-                    config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["lnaGain"] = _this->lnaGain; });
+                if (!selectedSerial.empty()) {
+                    config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["lnaGain"] = lnaGain; });
                 }
             }
 
             SmGui::LeftLabel("VGA Gain");
             SmGui::FillWidth();
-            if (SmGui::SliderInt(CONCAT("##_fobossdr_vga_gain_", _this->name), &_this->vgaGain, FOBOS_VGA_GAIN_MIN, FOBOS_VGA_GAIN_MAX)) {
-                if (_this->running) {
-                    fobos_rx_set_vga_gain(_this->openDev, _this->vgaGain);
+            if (SmGui::SliderInt(CONCAT("##_fobossdr_vga_gain_", name), &vgaGain, FOBOS_VGA_GAIN_MIN, FOBOS_VGA_GAIN_MAX)) {
+                if (running) {
+                    fobos_rx_set_vga_gain(openDev, vgaGain);
                 }
-                if (!_this->selectedSerial.empty()) {
-                    config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["vgaGain"] = _this->vgaGain; });
+                if (!selectedSerial.empty()) {
+                    config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["vgaGain"] = vgaGain; });
                 }
             }
         }
@@ -496,7 +499,6 @@ private:
     std::string name;
     bool enabled = true;
     double sampleRate;
-    SourceManager::SourceHandler handler;
     bool running = false;
     double freq;
 
@@ -525,19 +527,12 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    def["devices"] = json({});
-    def["device"] = "";
-    config.setPath(core::args["root"].s() + "/fobossdr_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "fobossdr_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new FobosSDRSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(FobosSDRSourceModule)
 
-MOD_EXPORT void _DELETE_INSTANCE_(void* instance) {
+MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (FobosSDRSourceModule*)instance;
 }
 

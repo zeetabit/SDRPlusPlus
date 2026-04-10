@@ -3,6 +3,7 @@
 #include <utils/flog.h>
 #include <module.h>
 #include <module_manifest.h>
+#include <module_config.h>
 #include <utils/service_registry.h>
 #include <utils/radio_control.h>
 #include <gui/gui.h>
@@ -40,10 +41,11 @@ SDRPP_MOD_INFO_V2{
 };
 
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 class FileSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    FileSourceModule(std::string name) : fileSelect("", { "Wav IQ Files (*.wav)", "*.wav", "All Files", "*" }) {
+    FileSourceModule(std::string name, ModuleConfig* cfg) : fileSelect("", { "Wav IQ Files (*.wav)", "*.wav", "All Files", "*" }) {
         this->name = name;
 
         if (core::args["server"].b()) { return; }
@@ -210,18 +212,12 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    def["path"] = "";
-    config.setPath(core::args["root"].s() + "/file_source_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "file_source_config.json");
 }
 
-MOD_EXPORT void* _CREATE_INSTANCE_(std::string name) {
-    return new FileSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(FileSourceModule)
 
-MOD_EXPORT void _DELETE_INSTANCE_(void* instance) {
+MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (FileSourceModule*)instance;
 }
 

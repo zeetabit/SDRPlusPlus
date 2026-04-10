@@ -5,6 +5,7 @@
 #include <gui/style.h>
 #include <signal_path/signal_path.h>
 #include <config.h>
+#include <module_config.h>
 #include <dsp/chain.h>
 #include <dsp/noise_reduction/noise_blanker.h>
 #include <dsp/noise_reduction/fm_if.h>
@@ -61,8 +62,9 @@ private:
 class RadioModule : public ModuleManager::Instance {
     friend class RadioControlAdapter;
 public:
-    RadioModule(std::string name) {
+    RadioModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
+        this->cfg = cfg;
 
         // Initialize option lists
         deempModes.define("None", DEEMP_MODE_NONE);
@@ -90,13 +92,8 @@ public:
         }
         ctcssTones.define(-1, "Any", dsp::noise_reduction::CTCSS_TONE_ANY);
 
-        // Initialize the config if it doesn't exist
-        config.withConfig([&](json& conf) {
-            if (!conf.contains(name) || !conf[name].contains("selectedDemodId")) {
-                conf[name]["selectedDemodId"] = 1;
-            }
-            selectedDemodID = conf[name]["selectedDemodId"];
-        });
+        // Read selected demod from config (V2: uses ModuleConfig)
+        selectedDemodID = cfg->get<int>("selectedDemodId", 1);
 
         // Initialize the VFO
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, 0, 200000, 200000, 50000, 200000, false);
@@ -269,7 +266,7 @@ private:
         if (ImGui::InputInt(("##_radio_snap_" + _this->name).c_str(), &_this->snapInterval, 1, 100)) {
             if (_this->snapInterval < 1) { _this->snapInterval = 1; }
             _this->vfo->setSnapInterval(_this->snapInterval);
-            config.withConfig([&](json& conf) { conf[_this->name][_this->selectedDemod->getName()]["snapInterval"] = _this->snapInterval; });
+            _this->cfg->with([&](json& conf) { conf[_this->selectedDemod->getName()]["snapInterval"] = _this->snapInterval; });
         }
 
         // Deemphasis mode
@@ -405,18 +402,18 @@ private:
 
         // Default config
         double bw = demod->getDefaultBandwidth();
-        config.withConfig([&](json& conf) {
-            if (!conf[name].contains(demod->getName())) {
-                conf[name][demod->getName()]["bandwidth"] = bw;
-                conf[name][demod->getName()]["snapInterval"] = demod->getDefaultSnapInterval();
-                conf[name][demod->getName()]["squelchLevel"] = MIN_SQUELCH;
-                conf[name][demod->getName()]["squelchEnabled"] = false;
+        cfg->with([&](json& conf) {
+            if (!conf.contains(demod->getName())) {
+                conf[demod->getName()]["bandwidth"] = bw;
+                conf[demod->getName()]["snapInterval"] = demod->getDefaultSnapInterval();
+                conf[demod->getName()]["squelchLevel"] = MIN_SQUELCH;
+                conf[demod->getName()]["squelchEnabled"] = false;
             }
         });
         bw = std::clamp<double>(bw, demod->getMinBandwidth(), demod->getMaxBandwidth());
 
         // Initialize
-        demod->init(name, &config, ifChain.out, bw, stream.getSampleRate());
+        demod->init(name, cfg, ifChain.out, bw, stream.getSampleRate());
 
         return demod;
     }
@@ -431,7 +428,7 @@ private:
         selectDemod(demod);
 
         // Save config
-        config.withConfig([&](json& conf) { conf[name]["selectedDemodId"] = id; });
+        cfg->set("selectedDemodId", (int)id);
     }
 
     void selectDemod(demod::Demodulator* demod) {
@@ -474,8 +471,8 @@ private:
         nbEnabled = false;
         nbLevel = 0.0f;
         double ifSamplerate = selectedDemod->getIFSampleRate();
-        config.withConfig([&](json& conf) {
-            auto& demodConf = conf[name][selectedDemod->getName()];
+        cfg->with([&](json& conf) {
+            auto& demodConf = conf[selectedDemod->getName()];
             if (demodConf.contains("bandwidth")) {
                 bandwidth = demodConf["bandwidth"];
                 bandwidth = std::clamp<double>(bandwidth, minBandwidth, maxBandwidth);
@@ -585,7 +582,7 @@ private:
         vfo->setBandwidth(bandwidth);
         selectedDemod->setBandwidth(bandwidth);
 
-        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["bandwidth"] = bandwidth; });
+        cfg->with([&](json& conf) { conf[selectedDemod->getName()]["bandwidth"] = bandwidth; });
     }
 
     void setAudioSampleRate(double sr) {
@@ -628,7 +625,7 @@ private:
         afChain.setBlockEnabled(&hpf, enabled, [=](dsp::stream<dsp::stereo_t>* out){ stream.setInput(out); });
 
         // Save config
-        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["highPass"] = enabled; });
+        cfg->with([&](json& conf) { conf[selectedDemod->getName()]["highPass"] = enabled; });
     }
 
     void setDeemphasisMode(DeemphasisMode mode) {
@@ -639,7 +636,7 @@ private:
         afChain.setBlockEnabled(&deemp, deempEnabled, [=](dsp::stream<dsp::stereo_t>* out){ stream.setInput(out); });
 
         // Save config
-        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["deempMode"] = deempModes.key(deempId); });
+        cfg->with([&](json& conf) { conf[selectedDemod->getName()]["deempMode"] = deempModes.key(deempId); });
     }
 
     void setNBEnabled(bool enable) {
@@ -648,7 +645,7 @@ private:
         ifChain.setBlockEnabled(&nb, nbEnabled, [=](dsp::stream<dsp::complex_t>* out){ selectedDemod->setInput(out); });
 
         // Save config
-        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["noiseBlankerEnabled"] = nbEnabled; });
+        cfg->with([&](json& conf) { conf[selectedDemod->getName()]["noiseBlankerEnabled"] = nbEnabled; });
     }
 
     void setNBLevel(float level) {
@@ -657,7 +654,7 @@ private:
         if (!selectedDemod) { return; }
 
         // Save config
-        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["noiseBlankerLevel"] = nbLevel; });
+        cfg->with([&](json& conf) { conf[selectedDemod->getName()]["noiseBlankerLevel"] = nbLevel; });
     }
 
     void setSquelchMode(SquelchMode mode) {
@@ -704,7 +701,7 @@ private:
         }
 
         // Save config
-        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["squelchMode"] = squelchModes.key(squelchModeId); });
+        cfg->with([&](json& conf) { conf[selectedDemod->getName()]["squelchMode"] = squelchModes.key(squelchModeId); });
     }
 
     void setSquelchLevel(float level) {
@@ -713,7 +710,7 @@ private:
         if (!selectedDemod) { return; }
 
         // Save config
-        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["squelchLevel"] = squelchLevel; });
+        cfg->with([&](json& conf) { conf[selectedDemod->getName()]["squelchLevel"] = squelchLevel; });
     }
 
     void setCTCSSTone(dsp::noise_reduction::CTCSSTone tone) {
@@ -729,7 +726,7 @@ private:
         if (!selectedDemod) { return; }
 
         // Save config
-        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["ctcssTone"] = ctcssTones.key(ctcssToneId); });
+        cfg->with([&](json& conf) { conf[selectedDemod->getName()]["ctcssTone"] = ctcssTones.key(ctcssToneId); });
     }
 
     void setFMIFNREnabled(bool enabled) {
@@ -738,7 +735,7 @@ private:
         ifChain.setBlockEnabled(&fmnr, FMIFNREnabled, [=](dsp::stream<dsp::complex_t>* out){ selectedDemod->setInput(out); });
 
         // Save config
-        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["FMIFNREnabled"] = FMIFNREnabled; });
+        cfg->with([&](json& conf) { conf[selectedDemod->getName()]["FMIFNREnabled"] = FMIFNREnabled; });
     }
 
     void setIFNRPreset(IFNRPreset preset) {
@@ -754,7 +751,7 @@ private:
         fmnr.setBins(ifnrTaps[preset]);
 
         // Save config
-        config.withConfig([&](json& conf) { conf[name][selectedDemod->getName()]["fmifnrPreset"] = ifnrPresets.key(fmIFPresetId); });
+        cfg->with([&](json& conf) { conf[selectedDemod->getName()]["fmifnrPreset"] = ifnrPresets.key(fmIFPresetId); });
     }
 
     static void vfoUserChangedBandwidthHandler(double newBw, void* ctx) {
@@ -908,6 +905,7 @@ private:
 
     bool enabled = true;
 
+    ModuleConfig* cfg = NULL;
     RadioControlAdapter* radioControl = nullptr;
 };
 

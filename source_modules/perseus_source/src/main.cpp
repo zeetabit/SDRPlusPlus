@@ -1,7 +1,10 @@
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <gui/style.h>
 #include <config.h>
@@ -20,25 +23,29 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "perseus_source",
+    /* Description:     */ "Perseus SDR source module for SDR++",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 1, 0,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
+};
+
 #define MAX_SAMPLERATE_COUNT    128
 
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
-class PerseusSourceModule : public ModuleManager::Instance {
+class PerseusSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    PerseusSourceModule(std::string name) {
+    PerseusSourceModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
         sampleRate = 768000;
-
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
 
         perseus_set_debug(9);
 
@@ -48,11 +55,11 @@ public:
         config.readConfig([&](const json& conf) { serial = conf["device"]; });
         select(serial);
 
-        sigpath::sourceManager.registerSource("Perseus", &handler);
+        sigpath::sourceManager.registerSource("Perseus", static_cast<ISource*>(this));
     }
 
     ~PerseusSourceModule() {
-        stop(this);
+        stop();
         sigpath::sourceManager.unregisterSource("Perseus");
         if (libInit) { perseus_exit(); }
     }
@@ -70,6 +77,9 @@ public:
     bool isEnabled() {
         return enabled;
     }
+
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
 
     void refresh() {
         // Re-initialize driver
@@ -229,162 +239,155 @@ private:
         return std::string(buf);
     }
 
-    static void menuSelected(void* ctx) {
-        PerseusSourceModule* _this = (PerseusSourceModule*)ctx;
-        core::setInputSampleRate(_this->sampleRate);
-        flog::info("PerseusSourceModule '{0}': Menu Select!", _this->name);
+    void onSelect() override {
+        core::setInputSampleRate(sampleRate);
+        flog::info("PerseusSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        PerseusSourceModule* _this = (PerseusSourceModule*)ctx;
-        flog::info("PerseusSourceModule '{0}': Menu Deselect!", _this->name);
+    void onDeselect() override {
+        flog::info("PerseusSourceModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        PerseusSourceModule* _this = (PerseusSourceModule*)ctx;
-        if (_this->running) { return; }
-        if (_this->selectedSerial.empty()) {
+    void start() override {
+        if (running) { return; }
+        if (selectedSerial.empty()) {
             flog::error("No device is selected");
             return;
         }
         
         // Open device
-        _this->openDev = perseus_open(_this->selectedPerseusId);
-        if (!_this->openDev) {
-            flog::error("Failed to open device {}: {}", _this->selectedPerseusId, perseus_errorstr());
+        openDev = perseus_open(selectedPerseusId);
+        if (!openDev) {
+            flog::error("Failed to open device {}: {}", selectedPerseusId, perseus_errorstr());
             return;
         }
 
         // Load firmware
-        int err = perseus_firmware_download(_this->openDev, NULL);
+        int err = perseus_firmware_download(openDev, NULL);
         if (err) {
             flog::error("Could not upload firmware to device: {}", perseus_errorstr());
-            perseus_close(_this->openDev);
+            perseus_close(openDev);
             return;
         }
 
         // Set samplerate
-        err = perseus_set_sampling_rate(_this->openDev, _this->sampleRate);
+        err = perseus_set_sampling_rate(openDev, sampleRate);
         if (err) {
             flog::error("Could not set samplerate: {}", perseus_errorstr());
-            perseus_close(_this->openDev);
+            perseus_close(openDev);
             return;
         }
 
         // Set options
-        perseus_set_adc(_this->openDev, _this->dithering, _this->preamp);
-        perseus_set_attenuator_in_db(_this->openDev, _this->atten);
-        perseus_set_ddc_center_freq(_this->openDev, _this->freq, _this->preselector);
+        perseus_set_adc(openDev, dithering, preamp);
+        perseus_set_attenuator_in_db(openDev, atten);
+        perseus_set_ddc_center_freq(openDev, freq, preselector);
 
         // Start stream
-        int idealBufferSize = _this->sampleRate / 200;
+        int idealBufferSize = sampleRate / 200;
         int multipleOf1024 = std::clamp<int>(idealBufferSize / 1024, 1, 2);
         int bufferSize = multipleOf1024 * 1024;
         int bufferBytes = bufferSize*6;
-        err = perseus_start_async_input(_this->openDev, bufferBytes, callback, _this);
+        err = perseus_start_async_input(openDev, bufferBytes, callback, this);
         if (err) {
             flog::error("Could not start stream: {}", perseus_errorstr());
-            perseus_close(_this->openDev);
+            perseus_close(openDev);
             return;
         }
 
-        _this->running = true;
-        flog::info("PerseusSourceModule '{0}': Start!", _this->name);
+        running = true;
+        flog::info("PerseusSourceModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        PerseusSourceModule* _this = (PerseusSourceModule*)ctx;
-        if (!_this->running) { return; }
-        _this->running = false;
+    void stop() override {
+        if (!running) { return; }
+        running = false;
 
         // Stop stream
-        _this->stream.stopWriter();
-        perseus_stop_async_input(_this->openDev);
-        _this->stream.clearWriteStop();
+        stream.stopWriter();
+        perseus_stop_async_input(openDev);
+        stream.clearWriteStop();
 
         // Close device
-        perseus_close(_this->openDev);
+        perseus_close(openDev);
 
-        flog::info("PerseusSourceModule '{0}': Stop!", _this->name);
+        flog::info("PerseusSourceModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
-        PerseusSourceModule* _this = (PerseusSourceModule*)ctx;
-        if (_this->running) {
-            perseus_set_ddc_center_freq(_this->openDev, freq, _this->preselector);
+    void tune(double freq) override {
+        if (running) {
+            perseus_set_ddc_center_freq(openDev, freq, preselector);
         }
-        _this->freq = freq;
-        flog::info("PerseusSourceModule '{0}': Tune: {1}!", _this->name, freq);
+        freq = freq;
+        flog::info("PerseusSourceModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        PerseusSourceModule* _this = (PerseusSourceModule*)ctx;
-
-        if (_this->running) { SmGui::BeginDisabled(); }
+    void drawMenu() override {
+        if (running) { SmGui::BeginDisabled(); }
 
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Combo(CONCAT("##_airspyhf_dev_sel_", _this->name), &_this->devId, _this->devList.txt)) {
-            std::string serial = _this->devList.key(_this->devId);
-            _this->select(serial);
-            core::setInputSampleRate(_this->sampleRate);
+        if (SmGui::Combo(CONCAT("##_airspyhf_dev_sel_", name), &devId, devList.txt)) {
+            std::string serial = devList.key(devId);
+            select(serial);
+            core::setInputSampleRate(sampleRate);
             config.withConfig([&](json& conf) { conf["device"] = serial; });
         }
 
-        if (SmGui::Combo(CONCAT("##_airspyhf_sr_sel_", _this->name), &_this->srId, _this->srList.txt)) {
-            _this->sampleRate = _this->srList[_this->srId];
-            core::setInputSampleRate(_this->sampleRate);
-            if (!_this->selectedSerial.empty()) {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["samplerate"] = _this->sampleRate; });
+        if (SmGui::Combo(CONCAT("##_airspyhf_sr_sel_", name), &srId, srList.txt)) {
+            sampleRate = srList[srId];
+            core::setInputSampleRate(sampleRate);
+            if (!selectedSerial.empty()) {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["samplerate"] = sampleRate; });
             }
         }
 
         SmGui::SameLine();
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Button(CONCAT("Refresh##_airspyhf_refr_", _this->name))) {
-            _this->refresh();
-            _this->select(_this->selectedSerial);
-            core::setInputSampleRate(_this->sampleRate);
+        if (SmGui::Button(CONCAT("Refresh##_airspyhf_refr_", name))) {
+            refresh();
+            select(selectedSerial);
+            core::setInputSampleRate(sampleRate);
         }
 
-        if (_this->running) { SmGui::EndDisabled(); }
+        if (running) { SmGui::EndDisabled(); }
 
         SmGui::LeftLabel("Attenuation");
         SmGui::FillWidth();
-        if (SmGui::SliderFloatWithSteps(CONCAT("##_airspyhf_atten_", _this->name), &_this->atten, 0, 30, 10, SmGui::FMT_STR_FLOAT_DB_NO_DECIMAL)) {
-            if (_this->running) {
-                perseus_set_attenuator_in_db(_this->openDev, _this->atten);
+        if (SmGui::SliderFloatWithSteps(CONCAT("##_airspyhf_atten_", name), &atten, 0, 30, 10, SmGui::FMT_STR_FLOAT_DB_NO_DECIMAL)) {
+            if (running) {
+                perseus_set_attenuator_in_db(openDev, atten);
             }
-            if (!_this->selectedSerial.empty()) {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["attenuation"] = _this->atten; });
-            }
-        }
-
-        if (SmGui::Checkbox(CONCAT("Preamp##_airspyhf_preamp_", _this->name), &_this->preamp)) {
-            if (_this->running) {
-                perseus_set_adc(_this->openDev, _this->dithering, _this->preamp);
-            }
-            if (!_this->selectedSerial.empty()) {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["preamp"] = _this->preamp; });
+            if (!selectedSerial.empty()) {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["attenuation"] = atten; });
             }
         }
 
-        if (SmGui::Checkbox(CONCAT("Dithering##_airspyhf_dither_", _this->name), &_this->dithering)) {
-            if (_this->running) {
-                perseus_set_adc(_this->openDev, _this->dithering, _this->preamp);
+        if (SmGui::Checkbox(CONCAT("Preamp##_airspyhf_preamp_", name), &preamp)) {
+            if (running) {
+                perseus_set_adc(openDev, dithering, preamp);
             }
-            if (!_this->selectedSerial.empty()) {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["dithering"] = _this->dithering; });
+            if (!selectedSerial.empty()) {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["preamp"] = preamp; });
             }
         }
 
-        if (SmGui::Checkbox(CONCAT("Preselector##_airspyhf_presel_", _this->name), &_this->preselector)) {
-            if (_this->running) {
-                perseus_set_ddc_center_freq(_this->openDev, _this->freq, _this->preselector);
+        if (SmGui::Checkbox(CONCAT("Dithering##_airspyhf_dither_", name), &dithering)) {
+            if (running) {
+                perseus_set_adc(openDev, dithering, preamp);
             }
-            if (!_this->selectedSerial.empty()) {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["preselector"] = _this->preselector; });
+            if (!selectedSerial.empty()) {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["dithering"] = dithering; });
+            }
+        }
+
+        if (SmGui::Checkbox(CONCAT("Preselector##_airspyhf_presel_", name), &preselector)) {
+            if (running) {
+                perseus_set_ddc_center_freq(openDev, freq, preselector);
+            }
+            if (!selectedSerial.empty()) {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["preselector"] = preselector; });
             }
         }
     }
@@ -414,7 +417,6 @@ private:
     bool enabled = true;
     dsp::stream<dsp::complex_t> stream;
     int sampleRate;
-    SourceManager::SourceHandler handler;
     bool running = false;
     double freq;
     int devId = 0;
@@ -433,17 +435,10 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    def["devices"] = json({});
-    def["device"] = "";
-    config.setPath(core::args["root"].s() + "/perseus_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "perseus_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new PerseusSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(PerseusSourceModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (PerseusSourceModule*)instance;

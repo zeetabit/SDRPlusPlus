@@ -1,7 +1,10 @@
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <gui/style.h>
 #include <config.h>
@@ -19,36 +22,40 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
-ConfigManager config;
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "limesdr_source",
+    /* Description:     */ "LimeSDR source module for SDR++",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 1, 0,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
+};
 
-class LimeSDRSourceModule : public ModuleManager::Instance {
+ConfigManager config;
+SDRPP_MOD_CONFIG(config);
+
+class LimeSDRSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    LimeSDRSourceModule(std::string name) {
+    LimeSDRSourceModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
         // Init limesuite if needed
 
         sampleRate = 10000000.0;
 
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
-
         refresh();
 
         // Select device from config
         selectFirst();
 
-        sigpath::sourceManager.registerSource("LimeSDR", &handler);
+        sigpath::sourceManager.registerSource("LimeSDR", static_cast<ISource*>(this));
     }
 
     ~LimeSDRSourceModule() {
-        stop(this);
+        stop();
         sigpath::sourceManager.unregisterSource("LimeSDR");
     }
 
@@ -65,6 +72,9 @@ public:
     bool isEnabled() {
         return enabled;
     }
+
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
 
     void refresh() {
         devCount = LMS_GetDeviceList(devList);
@@ -303,111 +313,104 @@ private:
         return bandwidths[bandwidths.size() - 1];
     }
 
-    static void menuSelected(void* ctx) {
-        LimeSDRSourceModule* _this = (LimeSDRSourceModule*)ctx;
-        core::setInputSampleRate(_this->sampleRate);
-        flog::info("LimeSDRSourceModule '{0}': Menu Select!", _this->name);
+    void onSelect() override {
+        core::setInputSampleRate(sampleRate);
+        flog::info("LimeSDRSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        LimeSDRSourceModule* _this = (LimeSDRSourceModule*)ctx;
-        flog::info("LimeSDRSourceModule '{0}': Menu Deselect!", _this->name);
+    void onDeselect() override {
+        flog::info("LimeSDRSourceModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        LimeSDRSourceModule* _this = (LimeSDRSourceModule*)ctx;
-        if (_this->running) { return; }
-        if (_this->selectedDevName.empty()) { return; }
+    void start() override {
+        if (running) { return; }
+        if (selectedDevName.empty()) { return; }
 
         // Open device
-        _this->openDev = NULL;
-        LMS_Open(&_this->openDev, _this->devList[_this->devId], NULL);
-        int err = LMS_Init(_this->openDev);
+        openDev = NULL;
+        LMS_Open(&openDev, devList[devId], NULL);
+        int err = LMS_Init(openDev);
 
         // On open fail, retry (work around for LimeSuite bug)
         if (err) {
-            LMS_Close(_this->openDev);
-            LMS_Open(&_this->openDev, _this->devList[_this->devId], NULL);
-            if (err = LMS_Init(_this->openDev)) {
+            LMS_Close(openDev);
+            LMS_Open(&openDev, devList[devId], NULL);
+            if (err = LMS_Init(openDev)) {
                 flog::error("Failed to re-initialize device ({})", err);
                 return;
             }
         }
 
-        flog::warn("Channel count: {0}", LMS_GetNumChannels(_this->openDev, false));
+        flog::warn("Channel count: {0}", LMS_GetNumChannels(openDev, false));
 
         // Set options
-        LMS_EnableChannel(_this->openDev, false, _this->chanId, true);
-        LMS_SetAntenna(_this->openDev, false, _this->chanId, _this->antennaId);
-        LMS_SetSampleRate(_this->openDev, _this->sampleRate, 0);
-        LMS_SetLOFrequency(_this->openDev, false, _this->chanId, _this->freq);
-        LMS_SetGaindB(_this->openDev, false, _this->chanId, _this->gain);
-        LMS_SetLPFBW(_this->openDev, false, _this->chanId, (_this->bwId == _this->bandwidths.size()) ? _this->getBestBandwidth(_this->sampleRate) : _this->bandwidths[_this->bwId]);
-        LMS_SetLPF(_this->openDev, false, _this->chanId, true);
+        LMS_EnableChannel(openDev, false, chanId, true);
+        LMS_SetAntenna(openDev, false, chanId, antennaId);
+        LMS_SetSampleRate(openDev, sampleRate, 0);
+        LMS_SetLOFrequency(openDev, false, chanId, freq);
+        LMS_SetGaindB(openDev, false, chanId, gain);
+        LMS_SetLPFBW(openDev, false, chanId, (bwId == bandwidths.size()) ? getBestBandwidth(sampleRate) : bandwidths[bwId]);
+        LMS_SetLPF(openDev, false, chanId, true);
 
         // Setup and start stream
-        int sampCount = _this->sampleRate / 200;
-        _this->devStream.isTx = false;
-        _this->devStream.channel = _this->chanId;
-        _this->devStream.fifoSize = sampCount; // TODO: Check what it's actually supposed to be
-        _this->devStream.throughputVsLatency = 0.5f;
-        _this->devStream.dataFmt = _this->devStream.LMS_FMT_F32;
-        LMS_SetupStream(_this->openDev, &_this->devStream);
+        int sampCount = sampleRate / 200;
+        devStream.isTx = false;
+        devStream.channel = chanId;
+        devStream.fifoSize = sampCount; // TODO: Check what it's actually supposed to be
+        devStream.throughputVsLatency = 0.5f;
+        devStream.dataFmt = devStream.LMS_FMT_F32;
+        LMS_SetupStream(openDev, &devStream);
 
         // Start stream
-        _this->streamRunning = true;
-        LMS_StartStream(&_this->devStream);
-        _this->workerThread = std::thread(&LimeSDRSourceModule::worker, _this);
+        streamRunning = true;
+        LMS_StartStream(&devStream);
+        workerThread = std::thread(&LimeSDRSourceModule::worker, this);
 
 
-        _this->running = true;
-        flog::info("LimeSDRSourceModule '{0}': Start!", _this->name);
+        running = true;
+        flog::info("LimeSDRSourceModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        LimeSDRSourceModule* _this = (LimeSDRSourceModule*)ctx;
-        if (!_this->running) { return; }
-        _this->running = false;
+    void stop() override {
+        if (!running) { return; }
+        running = false;
 
-        _this->streamRunning = false;
-        if (_this->workerThread.joinable()) { _this->workerThread.join(); }
+        streamRunning = false;
+        if (workerThread.joinable()) { workerThread.join(); }
 
-        LMS_StopStream(&_this->devStream);
-        LMS_DestroyStream(_this->openDev, &_this->devStream);
-        LMS_EnableChannel(_this->openDev, false, _this->chanId, false);
+        LMS_StopStream(&devStream);
+        LMS_DestroyStream(openDev, &devStream);
+        LMS_EnableChannel(openDev, false, chanId, false);
 
-        LMS_Close(_this->openDev);
+        LMS_Close(openDev);
 
-        flog::info("LimeSDRSourceModule '{0}': Stop!", _this->name);
+        flog::info("LimeSDRSourceModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
-        LimeSDRSourceModule* _this = (LimeSDRSourceModule*)ctx;
-        _this->freq = freq;
-        if (_this->running) {
-            LMS_SetLOFrequency(_this->openDev, false, _this->chanId, freq);
+    void tune(double freq) override {
+        freq = freq;
+        if (running) {
+            LMS_SetLOFrequency(openDev, false, chanId, freq);
         }
-        flog::info("LimeSDRSourceModule '{0}': Tune: {1}!", _this->name, freq);
+        flog::info("LimeSDRSourceModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        LimeSDRSourceModule* _this = (LimeSDRSourceModule*)ctx;
-
-        if (_this->running) { SmGui::BeginDisabled(); }
+    void drawMenu() override {
+        if (running) { SmGui::BeginDisabled(); }
 
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Combo("##limesdr_dev_sel", &_this->devId, _this->devListTxt.c_str())) {
-            _this->selectByInfoStr(_this->devList[_this->devId]);
-            core::setInputSampleRate(_this->sampleRate);
-            config.withConfig([&](json& conf) { conf["device"] = _this->selectedDevName; });
+        if (SmGui::Combo("##limesdr_dev_sel", &devId, devListTxt.c_str())) {
+            selectByInfoStr(devList[devId]);
+            core::setInputSampleRate(sampleRate);
+            config.withConfig([&](json& conf) { conf["device"] = selectedDevName; });
         }
 
-        if (SmGui::Combo(CONCAT("##_limesdr_sr_sel_", _this->name), &_this->srId, _this->sampleRatesTxt.c_str())) {
-            _this->sampleRate = _this->sampleRates[_this->srId];
-            core::setInputSampleRate(_this->sampleRate);
-            if (_this->selectedDevName != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedDevName]["sampleRate"] = _this->sampleRates[_this->srId]; });
+        if (SmGui::Combo(CONCAT("##_limesdr_sr_sel_", name), &srId, sampleRatesTxt.c_str())) {
+            sampleRate = sampleRates[srId];
+            core::setInputSampleRate(sampleRate);
+            if (selectedDevName != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedDevName]["sampleRate"] = sampleRates[srId]; });
             }
         }
 
@@ -415,52 +418,52 @@ private:
         SmGui::SameLine();
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Button(CONCAT("Refresh##_limesdr_refr_", _this->name))) {
-            _this->refresh();
-            _this->selectByName(_this->selectedDevName);
-            core::setInputSampleRate(_this->sampleRate);
+        if (SmGui::Button(CONCAT("Refresh##_limesdr_refr_", name))) {
+            refresh();
+            selectByName(selectedDevName);
+            core::setInputSampleRate(sampleRate);
         }
 
-        if (_this->channelCount > 1) {
+        if (channelCount > 1) {
             SmGui::LeftLabel("RX Channel");
             SmGui::FillWidth();
-            if (SmGui::Combo("##limesdr_ch_sel", &_this->chanId, _this->channelNamesTxt.c_str()) && _this->selectedDevName != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedDevName]["channel"] = _this->chanId; });
+            if (SmGui::Combo("##limesdr_ch_sel", &chanId, channelNamesTxt.c_str()) && selectedDevName != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedDevName]["channel"] = chanId; });
             }
         }
 
-        if (_this->running) { SmGui::EndDisabled(); }
+        if (running) { SmGui::EndDisabled(); }
 
         SmGui::LeftLabel("Antenna");
         SmGui::FillWidth();
-        if (SmGui::Combo("##limesdr_ant_sel", &_this->antennaId, _this->antennaListTxt.c_str())) {
-            if (_this->running) {
-                LMS_SetAntenna(_this->openDev, false, _this->chanId, _this->antennaId);
+        if (SmGui::Combo("##limesdr_ant_sel", &antennaId, antennaListTxt.c_str())) {
+            if (running) {
+                LMS_SetAntenna(openDev, false, chanId, antennaId);
             }
-            if (_this->selectedDevName != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedDevName]["antenna"] = _this->antennaNameList[_this->antennaId]; });
+            if (selectedDevName != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedDevName]["antenna"] = antennaNameList[antennaId]; });
             }
         }
 
         SmGui::LeftLabel("Bandwidth");
         SmGui::FillWidth();
-        if (SmGui::Combo("##limesdr_bw_sel", &_this->bwId, _this->bandwidthsTxt.c_str())) {
-            if (_this->running) {
-                LMS_SetLPFBW(_this->openDev, false, _this->chanId, (_this->bwId == _this->bandwidths.size()) ? _this->getBestBandwidth(_this->sampleRate) : _this->bandwidths[_this->bwId]);
+        if (SmGui::Combo("##limesdr_bw_sel", &bwId, bandwidthsTxt.c_str())) {
+            if (running) {
+                LMS_SetLPFBW(openDev, false, chanId, (bwId == bandwidths.size()) ? getBestBandwidth(sampleRate) : bandwidths[bwId]);
             }
-            if (_this->selectedDevName != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedDevName]["bandwidth"] = _this->bwId; });
+            if (selectedDevName != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedDevName]["bandwidth"] = bwId; });
             }
         }
 
         SmGui::LeftLabel("Gain");
         SmGui::FillWidth();
-        if (SmGui::SliderInt("##limesdr_gain_sel", &_this->gain, 0, 73, SmGui::FMT_STR_INT_DB)) {
-            if (_this->running) {
-                LMS_SetGaindB(_this->openDev, false, _this->chanId, _this->gain);
+        if (SmGui::SliderInt("##limesdr_gain_sel", &gain, 0, 73, SmGui::FMT_STR_INT_DB)) {
+            if (running) {
+                LMS_SetGaindB(openDev, false, chanId, gain);
             }
-            if (_this->selectedDevName != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedDevName]["gain"] = _this->gain; });
+            if (selectedDevName != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedDevName]["gain"] = gain; });
             }
         }
     }
@@ -477,7 +480,6 @@ private:
     std::string name;
     dsp::stream<dsp::complex_t> stream;
     double sampleRate;
-    SourceManager::SourceHandler handler;
     bool running = false;
     bool enabled = true;
     bool streamRunning = false;
@@ -517,17 +519,10 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    def["devices"] = json({});
-    def["device"] = "";
-    config.setPath(core::args["root"].s() + "/limesdr_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "limesdr_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new LimeSDRSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(LimeSDRSourceModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (LimeSDRSourceModule*)instance;

@@ -1,7 +1,10 @@
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <gui/style.h>
 #include <config.h>
@@ -25,7 +28,20 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "hackrf_source",
+    /* Description:     */ "HackRF source module for SDR++",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 1, 0,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
+};
+
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 const char* AGG_MODES_STR = "Off\0Low\0High\0";
 
@@ -78,9 +94,9 @@ const char* bandwidthsTxt = "1.75MHz\0"
                             "28MHz\0"
                             "Auto\0";
 
-class HackRFSourceModule : public ModuleManager::Instance {
+class HackRFSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    HackRFSourceModule(std::string name) {
+    HackRFSourceModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
         hackrf_init();
@@ -89,26 +105,17 @@ public:
         sampleRate = 2000000;
         srId = 6;
 
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
-
         refresh();
 
         std::string confSerial;
         config.readConfig([&](const json& conf) { confSerial = conf["device"]; });
         selectBySerial(confSerial);
 
-        sigpath::sourceManager.registerSource("HackRF", &handler);
+        sigpath::sourceManager.registerSource("HackRF", static_cast<ISource*>(this));
     }
 
     ~HackRFSourceModule() {
-        stop(this);
+        stop();
         hackrf_exit();
         sigpath::sourceManager.unregisterSource("HackRF");
     }
@@ -126,6 +133,9 @@ public:
     bool isEnabled() {
         return enabled;
     }
+
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
 
     void refresh() {
         devList.clear();
@@ -222,15 +232,13 @@ public:
     }
 
 private:
-    static void menuSelected(void* ctx) {
-        HackRFSourceModule* _this = (HackRFSourceModule*)ctx;
-        core::setInputSampleRate(_this->sampleRate);
-        flog::info("HackRFSourceModule '{0}': Menu Select!", _this->name);
+    void onSelect() override {
+        core::setInputSampleRate(sampleRate);
+        flog::info("HackRFSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        HackRFSourceModule* _this = (HackRFSourceModule*)ctx;
-        flog::info("HackRFSourceModule '{0}': Menu Deselect!", _this->name);
+    void onDeselect() override {
+        flog::info("HackRFSourceModule '{0}': Menu Deselect!", name);
     }
 
     int bandwidthIdToBw(int id) {
@@ -238,130 +246,125 @@ private:
         return bandwidths[id];
     }
 
-    static void start(void* ctx) {
-        HackRFSourceModule* _this = (HackRFSourceModule*)ctx;
-        if (_this->running) { return; }
-        if (_this->selectedSerial == "") {
+    void start() override {
+        if (running) { return; }
+        if (selectedSerial == "") {
             flog::error("Tried to start HackRF source with empty serial");
             return;
         }
 
 #ifndef __ANDROID__
-        hackrf_error err = (hackrf_error)hackrf_open_by_serial(_this->selectedSerial.c_str(), &_this->openDev);
+        hackrf_error err = (hackrf_error)hackrf_open_by_serial(selectedSerial.c_str(), &openDev);
 #else
-        hackrf_error err = (hackrf_error)hackrf_open_by_fd(_this->devFd, &_this->openDev);
+        hackrf_error err = (hackrf_error)hackrf_open_by_fd(devFd, &openDev);
 #endif
         if (err != HACKRF_SUCCESS) {
-            flog::error("Could not open HackRF {0}: {1}", _this->selectedSerial, hackrf_error_name(err));
+            flog::error("Could not open HackRF {0}: {1}", selectedSerial, hackrf_error_name(err));
             return;
         }
 
-        hackrf_set_sample_rate(_this->openDev, _this->sampleRate);
-        hackrf_set_baseband_filter_bandwidth(_this->openDev, _this->bandwidthIdToBw(_this->bwId));
-        hackrf_set_freq(_this->openDev, _this->freq);
+        hackrf_set_sample_rate(openDev, sampleRate);
+        hackrf_set_baseband_filter_bandwidth(openDev, bandwidthIdToBw(bwId));
+        hackrf_set_freq(openDev, freq);
 
-        hackrf_set_antenna_enable(_this->openDev, _this->biasT);
-        hackrf_set_amp_enable(_this->openDev, _this->amp);
-        hackrf_set_lna_gain(_this->openDev, _this->lna);
-        hackrf_set_vga_gain(_this->openDev, _this->vga);
+        hackrf_set_antenna_enable(openDev, biasT);
+        hackrf_set_amp_enable(openDev, amp);
+        hackrf_set_lna_gain(openDev, lna);
+        hackrf_set_vga_gain(openDev, vga);
 
-        hackrf_start_rx(_this->openDev, callback, _this);
+        hackrf_start_rx(openDev, callback, this);
 
-        _this->running = true;
-        flog::info("HackRFSourceModule '{0}': Start!", _this->name);
+        running = true;
+        flog::info("HackRFSourceModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        HackRFSourceModule* _this = (HackRFSourceModule*)ctx;
-        if (!_this->running) { return; }
-        _this->running = false;
-        _this->stream.stopWriter();
+    void stop() override {
+        if (!running) { return; }
+        running = false;
+        stream.stopWriter();
         // TODO: Stream stop
-        hackrf_error err = (hackrf_error)hackrf_close(_this->openDev);
+        hackrf_error err = (hackrf_error)hackrf_close(openDev);
         if (err != HACKRF_SUCCESS) {
-            flog::error("Could not close HackRF {0}: {1}", _this->selectedSerial, hackrf_error_name(err));
+            flog::error("Could not close HackRF {0}: {1}", selectedSerial, hackrf_error_name(err));
         }
-        _this->stream.clearWriteStop();
-        flog::info("HackRFSourceModule '{0}': Stop!", _this->name);
+        stream.clearWriteStop();
+        flog::info("HackRFSourceModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
-        HackRFSourceModule* _this = (HackRFSourceModule*)ctx;
-        if (_this->running) {
-            hackrf_set_freq(_this->openDev, freq);
+    void tune(double freq) override {
+        if (running) {
+            hackrf_set_freq(openDev, freq);
         }
-        _this->freq = freq;
-        flog::info("HackRFSourceModule '{0}': Tune: {1}!", _this->name, freq);
+        freq = freq;
+        flog::info("HackRFSourceModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        HackRFSourceModule* _this = (HackRFSourceModule*)ctx;
-
-        if (_this->running) { SmGui::BeginDisabled(); }
+    void drawMenu() override {
+        if (running) { SmGui::BeginDisabled(); }
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Combo(CONCAT("##_hackrf_dev_sel_", _this->name), &_this->devId, _this->devListTxt.c_str())) {
-            _this->selectBySerial(_this->devList[_this->devId]);
-            core::setInputSampleRate(_this->sampleRate);
-            config.withConfig([&](json& conf) { conf["device"] = _this->selectedSerial; });
+        if (SmGui::Combo(CONCAT("##_hackrf_dev_sel_", name), &devId, devListTxt.c_str())) {
+            selectBySerial(devList[devId]);
+            core::setInputSampleRate(sampleRate);
+            config.withConfig([&](json& conf) { conf["device"] = selectedSerial; });
         }
 
-        if (SmGui::Combo(CONCAT("##_hackrf_sr_sel_", _this->name), &_this->srId, sampleRatesTxt)) {
-            _this->sampleRate = sampleRates[_this->srId];
-            core::setInputSampleRate(_this->sampleRate);
-            config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["sampleRate"] = _this->sampleRate; });
+        if (SmGui::Combo(CONCAT("##_hackrf_sr_sel_", name), &srId, sampleRatesTxt)) {
+            sampleRate = sampleRates[srId];
+            core::setInputSampleRate(sampleRate);
+            config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["sampleRate"] = sampleRate; });
         }
 
         SmGui::SameLine();
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Button(CONCAT("Refresh##_hackrf_refr_", _this->name))) {
-            _this->refresh();
-            _this->selectBySerial(_this->selectedSerial);
-            core::setInputSampleRate(_this->sampleRate);
+        if (SmGui::Button(CONCAT("Refresh##_hackrf_refr_", name))) {
+            refresh();
+            selectBySerial(selectedSerial);
+            core::setInputSampleRate(sampleRate);
         }
 
-        if (_this->running) { SmGui::EndDisabled(); }
+        if (running) { SmGui::EndDisabled(); }
 
         SmGui::LeftLabel("Bandwidth");
         SmGui::FillWidth();
-        if (SmGui::Combo(CONCAT("##_hackrf_bw_sel_", _this->name), &_this->bwId, bandwidthsTxt)) {
-            if (_this->running) {
-                hackrf_set_baseband_filter_bandwidth(_this->openDev, _this->bandwidthIdToBw(_this->bwId));
+        if (SmGui::Combo(CONCAT("##_hackrf_bw_sel_", name), &bwId, bandwidthsTxt)) {
+            if (running) {
+                hackrf_set_baseband_filter_bandwidth(openDev, bandwidthIdToBw(bwId));
             }
-            config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["bandwidth"] = _this->bwId; });
+            config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["bandwidth"] = bwId; });
         }
 
         SmGui::LeftLabel("LNA Gain");
         SmGui::FillWidth();
-        if (SmGui::SliderFloatWithSteps(CONCAT("##_hackrf_lna_", _this->name), &_this->lna, 0, 40, 8, SmGui::FMT_STR_FLOAT_DB_NO_DECIMAL)) {
-            if (_this->running) {
-                hackrf_set_lna_gain(_this->openDev, _this->lna);
+        if (SmGui::SliderFloatWithSteps(CONCAT("##_hackrf_lna_", name), &lna, 0, 40, 8, SmGui::FMT_STR_FLOAT_DB_NO_DECIMAL)) {
+            if (running) {
+                hackrf_set_lna_gain(openDev, lna);
             }
-            config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["lnaGain"] = (int)_this->lna; });
+            config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["lnaGain"] = (int)lna; });
         }
 
         SmGui::LeftLabel("VGA Gain");
         SmGui::FillWidth();
-        if (SmGui::SliderFloatWithSteps(CONCAT("##_hackrf_vga_", _this->name), &_this->vga, 0, 62, 2, SmGui::FMT_STR_FLOAT_DB_NO_DECIMAL)) {
-            if (_this->running) {
-                hackrf_set_vga_gain(_this->openDev, _this->vga);
+        if (SmGui::SliderFloatWithSteps(CONCAT("##_hackrf_vga_", name), &vga, 0, 62, 2, SmGui::FMT_STR_FLOAT_DB_NO_DECIMAL)) {
+            if (running) {
+                hackrf_set_vga_gain(openDev, vga);
             }
-            config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["vgaGain"] = (int)_this->vga; });
+            config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["vgaGain"] = (int)vga; });
         }
 
-        if (SmGui::Checkbox(CONCAT("Bias-T##_hackrf_bt_", _this->name), &_this->biasT)) {
-            if (_this->running) {
-                hackrf_set_antenna_enable(_this->openDev, _this->biasT);
+        if (SmGui::Checkbox(CONCAT("Bias-T##_hackrf_bt_", name), &biasT)) {
+            if (running) {
+                hackrf_set_antenna_enable(openDev, biasT);
             }
-            config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["biasT"] = _this->biasT; });
+            config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["biasT"] = biasT; });
         }
 
-        if (SmGui::Checkbox(CONCAT("Amp Enabled##_hackrf_amp_", _this->name), &_this->amp)) {
-            if (_this->running) {
-                hackrf_set_amp_enable(_this->openDev, _this->amp);
+        if (SmGui::Checkbox(CONCAT("Amp Enabled##_hackrf_amp_", name), &amp)) {
+            if (running) {
+                hackrf_set_amp_enable(openDev, amp);
             }
-            config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerial]["amp"] = _this->amp; });
+            config.withConfig([&](json& conf) { conf["devices"][selectedSerial]["amp"] = amp; });
         }
     }
 
@@ -377,7 +380,6 @@ private:
     bool enabled = true;
     dsp::stream<dsp::complex_t> stream;
     int sampleRate;
-    SourceManager::SourceHandler handler;
     bool running = false;
     double freq;
     std::string selectedSerial = "";
@@ -398,17 +400,10 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    def["devices"] = json({});
-    def["device"] = "";
-    config.setPath(core::args["root"].s() + "/hackrf_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "hackrf_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new HackRFSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(HackRFSourceModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (HackRFSourceModule*)instance;

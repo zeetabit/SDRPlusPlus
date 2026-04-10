@@ -7,22 +7,22 @@ namespace demod {
     public:
         DSB() {}
 
-        DSB(std::string name, ConfigManager* config, dsp::stream<dsp::complex_t>* input, double bandwidth, double audioSR) {
-            init(name, config, input, bandwidth, audioSR);
+        DSB(std::string name, ModuleConfig* cfg, dsp::stream<dsp::complex_t>* input, double bandwidth, double audioSR) {
+            init(name, cfg, input, bandwidth, audioSR);
         }
 
         ~DSB() {
             stop();
         }
 
-        void init(std::string name, ConfigManager* config, dsp::stream<dsp::complex_t>* input, double bandwidth, double audioSR) {
+        void init(std::string name, ModuleConfig* cfg, dsp::stream<dsp::complex_t>* input, double bandwidth, double audioSR) {
             this->name = name;
-            _config = config;
+            _cfg = cfg;
 
             // Load config
-            config->readConfig([&](const json& conf) {
-                if (conf[name][getName()].contains("agcAttack")) { agcAttack = conf[name][getName()]["agcAttack"]; }
-                if (conf[name][getName()].contains("agcDecay")) { agcDecay = conf[name][getName()]["agcDecay"]; }
+            _cfg->read([&](const json& conf) {
+                if (conf.contains(getName()) && conf[getName()].contains("agcAttack")) { agcAttack = conf[getName()]["agcAttack"]; }
+                if (conf.contains(getName()) && conf[getName()].contains("agcDecay")) { agcDecay = conf[getName()]["agcDecay"]; }
             });
 
             // Define structure
@@ -39,13 +39,13 @@ namespace demod {
             ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
             if (ImGui::SliderFloat(("##_radio_dsb_agc_attack_" + name).c_str(), &agcAttack, 1.0f, 200.0f)) {
                 demod.setAGCAttack(agcAttack / getIFSampleRate());
-                _config->withConfig([&](json& conf) { conf[name][getName()]["agcAttack"] = agcAttack; });
+                _cfg->with([&](json& conf) { conf[getName()]["agcAttack"] = agcAttack; });
             }
             ImGui::LeftLabel("AGC Decay");
             ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
             if (ImGui::SliderFloat(("##_radio_dsb_agc_decay_" + name).c_str(), &agcDecay, 1.0f, 20.0f)) {
                 demod.setAGCDecay(agcDecay / getIFSampleRate());
-                _config->withConfig([&](json& conf) { conf[name][getName()]["agcDecay"] = agcDecay; });
+                _cfg->with([&](json& conf) { conf[getName()]["agcDecay"] = agcDecay; });
             }
         }
 
@@ -78,7 +78,7 @@ namespace demod {
     private:
         dsp::demod::SSB<dsp::stereo_t> demod;
 
-        ConfigManager* _config;
+        ModuleConfig* _cfg = NULL;
 
         float agcAttack = 50.0f;
         float agcDecay = 5.0f;

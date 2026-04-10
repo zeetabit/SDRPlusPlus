@@ -1,8 +1,11 @@
 #include <imgui.h>
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <gui/style.h>
 #include <config.h>
@@ -24,11 +27,24 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
-ConfigManager config;
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "hydrasdr_source",
+    /* Description:     */ "HydraSDR source module for SDR++",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 1, 0,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
+};
 
-class HydraSDRSourceModule : public ModuleManager::Instance {
+ConfigManager config;
+SDRPP_MOD_CONFIG(config);
+
+class HydraSDRSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    HydraSDRSourceModule(std::string name) {
+    HydraSDRSourceModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
         // Define the ports
@@ -41,15 +57,6 @@ public:
 
         sampleRate = 10000000.0;
 
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
-
         refresh();
 
         // Select device from config
@@ -57,11 +64,11 @@ public:
         config.readConfig([&](const json& conf) { devSerial = conf["device"]; });
         selectByString(devSerial);
 
-        sigpath::sourceManager.registerSource("HydraSDR", &handler);
+        sigpath::sourceManager.registerSource("HydraSDR", static_cast<ISource*>(this));
     }
 
     ~HydraSDRSourceModule() {
-        stop(this);
+        stop();
         sigpath::sourceManager.unregisterSource("HydraSDR");;
     }
 
@@ -78,6 +85,9 @@ public:
     bool isEnabled() {
         return enabled;
     }
+
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
 
     void refresh() {
 #ifndef __ANDROID__
@@ -235,304 +245,297 @@ private:
         return std::string(buf);
     }
 
-    static void menuSelected(void* ctx) {
-        HydraSDRSourceModule* _this = (HydraSDRSourceModule*)ctx;
-        core::setInputSampleRate(_this->sampleRate);
-        flog::info("HydraSDRSourceModule '{0}': Menu Select!", _this->name);
+    void onSelect() override {
+        core::setInputSampleRate(sampleRate);
+        flog::info("HydraSDRSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        HydraSDRSourceModule* _this = (HydraSDRSourceModule*)ctx;
-        flog::info("HydraSDRSourceModule '{0}': Menu Deselect!", _this->name);
+    void onDeselect() override {
+        flog::info("HydraSDRSourceModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        HydraSDRSourceModule* _this = (HydraSDRSourceModule*)ctx;
-        if (_this->running) { return; }
-        if (_this->selectedSerial == 0) {
+    void start() override {
+        if (running) { return; }
+        if (selectedSerial == 0) {
             flog::error("Tried to start HydraSDR source with null serial");
             return;
         }
 
 #ifndef __ANDROID__
-        int err = hydrasdr_open_sn(&_this->openDev, _this->selectedSerial);
+        int err = hydrasdr_open_sn(&openDev, selectedSerial);
 #else
-        int err = hydrasdr_open_fd(&_this->openDev, _this->devFd);
+        int err = hydrasdr_open_fd(&openDev, devFd);
 #endif
         if (err != 0) {
             char buf[1024];
-            sprintf(buf, "%016" PRIX64, _this->selectedSerial);
+            sprintf(buf, "%016" PRIX64, selectedSerial);
             flog::error("Could not open HydraSDR {0}", buf);
             return;
         }
 
-        hydrasdr_set_samplerate(_this->openDev, _this->samplerates[_this->srId]);
-        hydrasdr_set_freq(_this->openDev, _this->freq);
+        hydrasdr_set_samplerate(openDev, samplerates[srId]);
+        hydrasdr_set_freq(openDev, freq);
 
-        hydrasdr_set_rf_port(_this->openDev, _this->ports[_this->portId]);
+        hydrasdr_set_rf_port(openDev, ports[portId]);
 
-        if (_this->gainMode == 0) {
-            hydrasdr_set_lna_agc(_this->openDev, 0);
-            hydrasdr_set_mixer_agc(_this->openDev, 0);
-            hydrasdr_set_sensitivity_gain(_this->openDev, _this->sensitiveGain);
+        if (gainMode == 0) {
+            hydrasdr_set_lna_agc(openDev, 0);
+            hydrasdr_set_mixer_agc(openDev, 0);
+            hydrasdr_set_sensitivity_gain(openDev, sensitiveGain);
         }
-        else if (_this->gainMode == 1) {
-            hydrasdr_set_lna_agc(_this->openDev, 0);
-            hydrasdr_set_mixer_agc(_this->openDev, 0);
-            hydrasdr_set_linearity_gain(_this->openDev, _this->linearGain);
+        else if (gainMode == 1) {
+            hydrasdr_set_lna_agc(openDev, 0);
+            hydrasdr_set_mixer_agc(openDev, 0);
+            hydrasdr_set_linearity_gain(openDev, linearGain);
         }
-        else if (_this->gainMode == 2) {
-            if (_this->lnaAgc) {
-                hydrasdr_set_lna_agc(_this->openDev, 1);
+        else if (gainMode == 2) {
+            if (lnaAgc) {
+                hydrasdr_set_lna_agc(openDev, 1);
             }
             else {
-                hydrasdr_set_lna_agc(_this->openDev, 0);
-                hydrasdr_set_lna_gain(_this->openDev, _this->lnaGain);
+                hydrasdr_set_lna_agc(openDev, 0);
+                hydrasdr_set_lna_gain(openDev, lnaGain);
             }
-            if (_this->mixerAgc) {
-                hydrasdr_set_mixer_agc(_this->openDev, 1);
+            if (mixerAgc) {
+                hydrasdr_set_mixer_agc(openDev, 1);
             }
             else {
-                hydrasdr_set_mixer_agc(_this->openDev, 0);
-                hydrasdr_set_mixer_gain(_this->openDev, _this->mixerGain);
+                hydrasdr_set_mixer_agc(openDev, 0);
+                hydrasdr_set_mixer_gain(openDev, mixerGain);
             }
-            hydrasdr_set_vga_gain(_this->openDev, _this->vgaGain);
+            hydrasdr_set_vga_gain(openDev, vgaGain);
         }
 
-        hydrasdr_set_rf_bias(_this->openDev, _this->biasT);
+        hydrasdr_set_rf_bias(openDev, biasT);
 
-        hydrasdr_start_rx(_this->openDev, callback, _this);
+        hydrasdr_start_rx(openDev, callback, this);
 
-        _this->running = true;
-        flog::info("HydraSDRSourceModule '{0}': Start!", _this->name);
+        running = true;
+        flog::info("HydraSDRSourceModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        HydraSDRSourceModule* _this = (HydraSDRSourceModule*)ctx;
-        if (!_this->running) { return; }
-        _this->running = false;
-        _this->stream.stopWriter();
-        hydrasdr_close(_this->openDev);
-        _this->stream.clearWriteStop();
-        flog::info("HydraSDRSourceModule '{0}': Stop!", _this->name);
+    void stop() override {
+        if (!running) { return; }
+        running = false;
+        stream.stopWriter();
+        hydrasdr_close(openDev);
+        stream.clearWriteStop();
+        flog::info("HydraSDRSourceModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
-        HydraSDRSourceModule* _this = (HydraSDRSourceModule*)ctx;
-        if (_this->running) {
-            hydrasdr_set_freq(_this->openDev, freq);
+    void tune(double freq) override {
+        if (running) {
+            hydrasdr_set_freq(openDev, freq);
         }
-        _this->freq = freq;
-        flog::info("HydraSDRSourceModule '{0}': Tune: {1}!", _this->name, freq);
+        freq = freq;
+        flog::info("HydraSDRSourceModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        HydraSDRSourceModule* _this = (HydraSDRSourceModule*)ctx;
-
-        if (_this->running) { SmGui::BeginDisabled(); }
+    void drawMenu() override {
+        if (running) { SmGui::BeginDisabled(); }
 
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Combo(CONCAT("##_hydrasdr_dev_sel_", _this->name), &_this->devId, _this->devices.txt)) {
-            _this->selectBySerial(_this->devices[_this->devId]);
-            core::setInputSampleRate(_this->sampleRate);
-            if (_this->selectedSerStr != "") {
-                config.withConfig([&](json& conf) { conf["device"] = _this->selectedSerStr; });
+        if (SmGui::Combo(CONCAT("##_hydrasdr_dev_sel_", name), &devId, devices.txt)) {
+            selectBySerial(devices[devId]);
+            core::setInputSampleRate(sampleRate);
+            if (selectedSerStr != "") {
+                config.withConfig([&](json& conf) { conf["device"] = selectedSerStr; });
             }
         }
 
-        if (SmGui::Combo(CONCAT("##_hydrasdr_sr_sel_", _this->name), &_this->srId, _this->samplerates.txt)) {
-            _this->sampleRate = _this->samplerates[_this->srId];
-            core::setInputSampleRate(_this->sampleRate);
-            if (_this->selectedSerStr != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["sampleRate"] = _this->samplerates.key(_this->srId); });
+        if (SmGui::Combo(CONCAT("##_hydrasdr_sr_sel_", name), &srId, samplerates.txt)) {
+            sampleRate = samplerates[srId];
+            core::setInputSampleRate(sampleRate);
+            if (selectedSerStr != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerStr]["sampleRate"] = samplerates.key(srId); });
             }
         }
 
         SmGui::SameLine();
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Button(CONCAT("Refresh##_hydrasdr_refr_", _this->name))) {
-            _this->refresh();
+        if (SmGui::Button(CONCAT("Refresh##_hydrasdr_refr_", name))) {
+            refresh();
             std::string devSerial;
             config.readConfig([&](const json& conf) { devSerial = conf["device"]; });
-            _this->selectByString(devSerial);
-            core::setInputSampleRate(_this->sampleRate);
+            selectByString(devSerial);
+            core::setInputSampleRate(sampleRate);
         }
 
-        if (_this->running) { SmGui::EndDisabled(); }
+        if (running) { SmGui::EndDisabled(); }
 
         SmGui::LeftLabel("Antenna Port");
         SmGui::FillWidth();
-        if (SmGui::Combo(CONCAT("##_hydrasdr_port_", _this->name), &_this->portId, _this->ports.txt)) {
-            if (_this->running) {
-                hydrasdr_set_rf_port(_this->openDev, _this->ports[_this->portId]);
+        if (SmGui::Combo(CONCAT("##_hydrasdr_port_", name), &portId, ports.txt)) {
+            if (running) {
+                hydrasdr_set_rf_port(openDev, ports[portId]);
             }
-            if (_this->selectedSerStr != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["port"] = _this->ports.key(_this->portId); });
+            if (selectedSerStr != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerStr]["port"] = ports.key(portId); });
             }
         }
 
         SmGui::BeginGroup();
-        SmGui::Columns(3, CONCAT("HydraSDRGainModeColumns##_", _this->name), false);
+        SmGui::Columns(3, CONCAT("HydraSDRGainModeColumns##_", name), false);
         SmGui::ForceSync();
-        if (SmGui::RadioButton(CONCAT("Sensitive##_hydrasdr_gm_", _this->name), _this->gainMode == 0)) {
-            _this->gainMode = 0;
-            if (_this->running) {
-                hydrasdr_set_lna_agc(_this->openDev, 0);
-                hydrasdr_set_mixer_agc(_this->openDev, 0);
-                hydrasdr_set_sensitivity_gain(_this->openDev, _this->sensitiveGain);
+        if (SmGui::RadioButton(CONCAT("Sensitive##_hydrasdr_gm_", name), gainMode == 0)) {
+            gainMode = 0;
+            if (running) {
+                hydrasdr_set_lna_agc(openDev, 0);
+                hydrasdr_set_mixer_agc(openDev, 0);
+                hydrasdr_set_sensitivity_gain(openDev, sensitiveGain);
             }
-            if (_this->selectedSerStr != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["gainMode"] = 0; });
+            if (selectedSerStr != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerStr]["gainMode"] = 0; });
             }
         }
         SmGui::NextColumn();
         SmGui::ForceSync();
-        if (SmGui::RadioButton(CONCAT("Linear##_hydrasdr_gm_", _this->name), _this->gainMode == 1)) {
-            _this->gainMode = 1;
-            if (_this->running) {
-                hydrasdr_set_lna_agc(_this->openDev, 0);
-                hydrasdr_set_mixer_agc(_this->openDev, 0);
-                hydrasdr_set_linearity_gain(_this->openDev, _this->linearGain);
+        if (SmGui::RadioButton(CONCAT("Linear##_hydrasdr_gm_", name), gainMode == 1)) {
+            gainMode = 1;
+            if (running) {
+                hydrasdr_set_lna_agc(openDev, 0);
+                hydrasdr_set_mixer_agc(openDev, 0);
+                hydrasdr_set_linearity_gain(openDev, linearGain);
             }
-            if (_this->selectedSerStr != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["gainMode"] = 1; });
+            if (selectedSerStr != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerStr]["gainMode"] = 1; });
             }
         }
         SmGui::NextColumn();
         SmGui::ForceSync();
-        if (SmGui::RadioButton(CONCAT("Free##_hydrasdr_gm_", _this->name), _this->gainMode == 2)) {
-            _this->gainMode = 2;
-            if (_this->running) {
-                if (_this->lnaAgc) {
-                    hydrasdr_set_lna_agc(_this->openDev, 1);
+        if (SmGui::RadioButton(CONCAT("Free##_hydrasdr_gm_", name), gainMode == 2)) {
+            gainMode = 2;
+            if (running) {
+                if (lnaAgc) {
+                    hydrasdr_set_lna_agc(openDev, 1);
                 }
                 else {
-                    hydrasdr_set_lna_agc(_this->openDev, 0);
-                    hydrasdr_set_lna_gain(_this->openDev, _this->lnaGain);
+                    hydrasdr_set_lna_agc(openDev, 0);
+                    hydrasdr_set_lna_gain(openDev, lnaGain);
                 }
-                if (_this->mixerAgc) {
-                    hydrasdr_set_mixer_agc(_this->openDev, 1);
+                if (mixerAgc) {
+                    hydrasdr_set_mixer_agc(openDev, 1);
                 }
                 else {
-                    hydrasdr_set_mixer_agc(_this->openDev, 0);
-                    hydrasdr_set_mixer_gain(_this->openDev, _this->mixerGain);
+                    hydrasdr_set_mixer_agc(openDev, 0);
+                    hydrasdr_set_mixer_gain(openDev, mixerGain);
                 }
-                hydrasdr_set_vga_gain(_this->openDev, _this->vgaGain);
+                hydrasdr_set_vga_gain(openDev, vgaGain);
             }
-            if (_this->selectedSerStr != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["gainMode"] = 2; });
+            if (selectedSerStr != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerStr]["gainMode"] = 2; });
             }
         }
-        SmGui::Columns(1, CONCAT("EndHydraSDRGainModeColumns##_", _this->name), false);
+        SmGui::Columns(1, CONCAT("EndHydraSDRGainModeColumns##_", name), false);
         SmGui::EndGroup();
 
         // Gain menus
 
-        if (_this->gainMode == 0) {
+        if (gainMode == 0) {
             SmGui::LeftLabel("Gain");
             SmGui::FillWidth();
-            if (SmGui::SliderInt(CONCAT("##_hydrasdr_sens_gain_", _this->name), &_this->sensitiveGain, 0, 21)) {
-                if (_this->running) {
-                    hydrasdr_set_sensitivity_gain(_this->openDev, _this->sensitiveGain);
+            if (SmGui::SliderInt(CONCAT("##_hydrasdr_sens_gain_", name), &sensitiveGain, 0, 21)) {
+                if (running) {
+                    hydrasdr_set_sensitivity_gain(openDev, sensitiveGain);
                 }
-                if (_this->selectedSerStr != "") {
-                    config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["sensitiveGain"] = _this->sensitiveGain; });
+                if (selectedSerStr != "") {
+                    config.withConfig([&](json& conf) { conf["devices"][selectedSerStr]["sensitiveGain"] = sensitiveGain; });
                 }
             }
         }
-        else if (_this->gainMode == 1) {
+        else if (gainMode == 1) {
             SmGui::LeftLabel("Gain");
             SmGui::FillWidth();
-            if (SmGui::SliderInt(CONCAT("##_hydrasdr_lin_gain_", _this->name), &_this->linearGain, 0, 21)) {
-                if (_this->running) {
-                    hydrasdr_set_linearity_gain(_this->openDev, _this->linearGain);
+            if (SmGui::SliderInt(CONCAT("##_hydrasdr_lin_gain_", name), &linearGain, 0, 21)) {
+                if (running) {
+                    hydrasdr_set_linearity_gain(openDev, linearGain);
                 }
-                if (_this->selectedSerStr != "") {
-                    config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["linearGain"] = _this->linearGain; });
+                if (selectedSerStr != "") {
+                    config.withConfig([&](json& conf) { conf["devices"][selectedSerStr]["linearGain"] = linearGain; });
                 }
             }
         }
-        else if (_this->gainMode == 2) {
+        else if (gainMode == 2) {
             // TODO: Switch to a table for alignment
-            if (_this->lnaAgc) { SmGui::BeginDisabled(); }
+            if (lnaAgc) { SmGui::BeginDisabled(); }
             SmGui::LeftLabel("LNA Gain");
             SmGui::FillWidth();
-            if (SmGui::SliderInt(CONCAT("##_hydrasdr_lna_gain_", _this->name), &_this->lnaGain, 0, 15)) {
-                if (_this->running) {
-                    hydrasdr_set_lna_gain(_this->openDev, _this->lnaGain);
+            if (SmGui::SliderInt(CONCAT("##_hydrasdr_lna_gain_", name), &lnaGain, 0, 15)) {
+                if (running) {
+                    hydrasdr_set_lna_gain(openDev, lnaGain);
                 }
-                if (_this->selectedSerStr != "") {
-                    config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["lnaGain"] = _this->lnaGain; });
+                if (selectedSerStr != "") {
+                    config.withConfig([&](json& conf) { conf["devices"][selectedSerStr]["lnaGain"] = lnaGain; });
                 }
             }
-            if (_this->lnaAgc) { SmGui::EndDisabled(); }
+            if (lnaAgc) { SmGui::EndDisabled(); }
 
-            if (_this->mixerAgc) { SmGui::BeginDisabled(); }
+            if (mixerAgc) { SmGui::BeginDisabled(); }
             SmGui::LeftLabel("Mixer Gain");
             SmGui::FillWidth();
-            if (SmGui::SliderInt(CONCAT("##_hydrasdr_mix_gain_", _this->name), &_this->mixerGain, 0, 15)) {
-                if (_this->running) {
-                    hydrasdr_set_mixer_gain(_this->openDev, _this->mixerGain);
+            if (SmGui::SliderInt(CONCAT("##_hydrasdr_mix_gain_", name), &mixerGain, 0, 15)) {
+                if (running) {
+                    hydrasdr_set_mixer_gain(openDev, mixerGain);
                 }
-                if (_this->selectedSerStr != "") {
-                    config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["mixerGain"] = _this->mixerGain; });
+                if (selectedSerStr != "") {
+                    config.withConfig([&](json& conf) { conf["devices"][selectedSerStr]["mixerGain"] = mixerGain; });
                 }
             }
-            if (_this->mixerAgc) { SmGui::EndDisabled(); }
+            if (mixerAgc) { SmGui::EndDisabled(); }
 
             SmGui::LeftLabel("VGA Gain");
             SmGui::FillWidth();
-            if (SmGui::SliderInt(CONCAT("##_hydrasdr_vga_gain_", _this->name), &_this->vgaGain, 0, 15)) {
-                if (_this->running) {
-                    hydrasdr_set_vga_gain(_this->openDev, _this->vgaGain);
+            if (SmGui::SliderInt(CONCAT("##_hydrasdr_vga_gain_", name), &vgaGain, 0, 15)) {
+                if (running) {
+                    hydrasdr_set_vga_gain(openDev, vgaGain);
                 }
-                if (_this->selectedSerStr != "") {
-                    config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["vgaGain"] = _this->vgaGain; });
+                if (selectedSerStr != "") {
+                    config.withConfig([&](json& conf) { conf["devices"][selectedSerStr]["vgaGain"] = vgaGain; });
                 }
             }
 
             // AGC Control
             SmGui::ForceSync();
-            if (SmGui::Checkbox(CONCAT("LNA AGC##_hydrasdr_", _this->name), &_this->lnaAgc)) {
-                if (_this->running) {
-                    if (_this->lnaAgc) {
-                        hydrasdr_set_lna_agc(_this->openDev, 1);
+            if (SmGui::Checkbox(CONCAT("LNA AGC##_hydrasdr_", name), &lnaAgc)) {
+                if (running) {
+                    if (lnaAgc) {
+                        hydrasdr_set_lna_agc(openDev, 1);
                     }
                     else {
-                        hydrasdr_set_lna_agc(_this->openDev, 0);
-                        hydrasdr_set_lna_gain(_this->openDev, _this->lnaGain);
+                        hydrasdr_set_lna_agc(openDev, 0);
+                        hydrasdr_set_lna_gain(openDev, lnaGain);
                     }
                 }
-                if (_this->selectedSerStr != "") {
-                    config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["lnaAgc"] = _this->lnaAgc; });
+                if (selectedSerStr != "") {
+                    config.withConfig([&](json& conf) { conf["devices"][selectedSerStr]["lnaAgc"] = lnaAgc; });
                 }
             }
             SmGui::ForceSync();
-            if (SmGui::Checkbox(CONCAT("Mixer AGC##_hydrasdr_", _this->name), &_this->mixerAgc)) {
-                if (_this->running) {
-                    if (_this->mixerAgc) {
-                        hydrasdr_set_mixer_agc(_this->openDev, 1);
+            if (SmGui::Checkbox(CONCAT("Mixer AGC##_hydrasdr_", name), &mixerAgc)) {
+                if (running) {
+                    if (mixerAgc) {
+                        hydrasdr_set_mixer_agc(openDev, 1);
                     }
                     else {
-                        hydrasdr_set_mixer_agc(_this->openDev, 0);
-                        hydrasdr_set_mixer_gain(_this->openDev, _this->mixerGain);
+                        hydrasdr_set_mixer_agc(openDev, 0);
+                        hydrasdr_set_mixer_gain(openDev, mixerGain);
                     }
                 }
-                if (_this->selectedSerStr != "") {
-                    config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["mixerAgc"] = _this->mixerAgc; });
+                if (selectedSerStr != "") {
+                    config.withConfig([&](json& conf) { conf["devices"][selectedSerStr]["mixerAgc"] = mixerAgc; });
                 }
             }
         }
 
         // Bias T
-        if (SmGui::Checkbox(CONCAT("Bias T##_hydrasdr_", _this->name), &_this->biasT)) {
-            if (_this->running) {
-                hydrasdr_set_rf_bias(_this->openDev, _this->biasT);
+        if (SmGui::Checkbox(CONCAT("Bias T##_hydrasdr_", name), &biasT)) {
+            if (running) {
+                hydrasdr_set_rf_bias(openDev, biasT);
             }
-            if (_this->selectedSerStr != "") {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSerStr]["biasT"] = _this->biasT; });
+            if (selectedSerStr != "") {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSerStr]["biasT"] = biasT; });
             }
         }
     }
@@ -552,7 +555,6 @@ private:
     bool enabled = true;
     dsp::stream<dsp::complex_t> stream;
     double sampleRate;
-    SourceManager::SourceHandler handler;
     bool running = false;
     double freq;
     uint64_t selectedSerial = 0;
@@ -584,17 +586,10 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    def["devices"] = json({});
-    def["device"] = "";
-    config.setPath(core::args["root"].s() + "/hydrasdr_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "hydrasdr_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new HydraSDRSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(HydraSDRSourceModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (HydraSDRSourceModule*)instance;

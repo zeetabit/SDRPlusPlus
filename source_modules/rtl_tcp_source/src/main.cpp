@@ -2,8 +2,11 @@
 #include <imgui.h>
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <gui/smgui.h>
 #include <gui/style.h>
@@ -19,11 +22,24 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
-ConfigManager config;
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "rtl_tcp_source",
+    /* Description:     */ "RTL-TCP source module for SDR++",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 1, 1, 0,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
+};
 
-class RTLTCPSourceModule : public ModuleManager::Instance {
+ConfigManager config;
+SDRPP_MOD_CONFIG(config);
+
+class RTLTCPSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    RTLTCPSourceModule(std::string name) {
+    RTLTCPSourceModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
         // Define samplerates
@@ -82,19 +98,11 @@ public:
         sampleRate = samplerates[srId];
 
         // Register source
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
-        sigpath::sourceManager.registerSource("RTL-TCP", &handler);
+        sigpath::sourceManager.registerSource("RTL-TCP", static_cast<ISource*>(this));
     }
 
     ~RTLTCPSourceModule() {
-        stop(this);
+        stop();
         sigpath::sourceManager.unregisterSource("RTL-TCP");
     }
 
@@ -112,25 +120,25 @@ public:
         return enabled;
     }
 
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
+
 private:
-    static void menuSelected(void* ctx) {
-        RTLTCPSourceModule* _this = (RTLTCPSourceModule*)ctx;
-        core::setInputSampleRate(_this->sampleRate);
-        flog::info("RTLTCPSourceModule '{0}': Menu Select!", _this->name);
+    void onSelect() override {
+        core::setInputSampleRate(sampleRate);
+        flog::info("RTLTCPSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        RTLTCPSourceModule* _this = (RTLTCPSourceModule*)ctx;
-        flog::info("RTLTCPSourceModule '{0}': Menu Deselect!", _this->name);
+    void onDeselect() override {
+        flog::info("RTLTCPSourceModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        RTLTCPSourceModule* _this = (RTLTCPSourceModule*)ctx;
-        if (_this->running) { return; }
+    void start() override {
+        if (running) { return; }
         
         // Connect to the server
         try {
-            _this->client = rtltcp::connect(&_this->stream, _this->ip, _this->port);
+            client = rtltcp::connect(&stream, ip, port);
         }
         catch (const std::exception& e) {
             flog::error("Could connect to RTL-TCP server: {}", e.what());
@@ -138,128 +146,124 @@ private:
         }
         
         // Sync settings
-        _this->client->setFrequency(_this->freq);
-        _this->client->setSampleRate(_this->sampleRate);
-        _this->client->setPPM(_this->ppm);
-        _this->client->setDirectSampling(_this->directSamplingId);
-        _this->client->setAGCMode(_this->rtlAGC);
-        _this->client->setBiasTee(_this->biasTee);
-        _this->client->setOffsetTuning(_this->offsetTuning);
-        if (_this->tunerAGC) {
-            _this->client->setGainMode(0);
+        client->setFrequency(freq);
+        client->setSampleRate(sampleRate);
+        client->setPPM(ppm);
+        client->setDirectSampling(directSamplingId);
+        client->setAGCMode(rtlAGC);
+        client->setBiasTee(biasTee);
+        client->setOffsetTuning(offsetTuning);
+        if (tunerAGC) {
+            client->setGainMode(0);
         }
         else {
-            _this->client->setGainMode(1);
-            _this->client->setGainIndex(_this->gain);
+            client->setGainMode(1);
+            client->setGainIndex(gain);
         }
 
-        _this->running = true;
-        flog::info("RTLTCPSourceModule '{0}': Start!", _this->name);
+        running = true;
+        flog::info("RTLTCPSourceModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        RTLTCPSourceModule* _this = (RTLTCPSourceModule*)ctx;
-        if (!_this->running) { return; }
-        _this->client->close();
-        _this->running = false;
-        flog::info("RTLTCPSourceModule '{0}': Stop!", _this->name);
+    void stop() override {
+        if (!running) { return; }
+        client->close();
+        running = false;
+        flog::info("RTLTCPSourceModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
-        RTLTCPSourceModule* _this = (RTLTCPSourceModule*)ctx;
-        if (_this->running) {
-            _this->client->setFrequency(freq);
+    void tune(double freq) override {
+        if (running) {
+            client->setFrequency(freq);
         }
-        _this->freq = freq;
-        flog::info("RTLTCPSourceModule '{0}': Tune: {1}!", _this->name, freq);
+        freq = freq;
+        flog::info("RTLTCPSourceModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        RTLTCPSourceModule* _this = (RTLTCPSourceModule*)ctx;
+    void drawMenu() override {
+        if (running) { SmGui::BeginDisabled(); }
 
-        if (_this->running) { SmGui::BeginDisabled(); }
-
-        if (SmGui::InputText(CONCAT("##_ip_select_", _this->name), _this->ip, 1024)) {
-            config.withConfig([&](json& conf) { conf["host"] = std::string(_this->ip); });
+        if (SmGui::InputText(CONCAT("##_ip_select_", name), ip, 1024)) {
+            config.withConfig([&](json& conf) { conf["host"] = std::string(ip); });
         }
         SmGui::SameLine();
         SmGui::FillWidth();
-        if (SmGui::InputInt(CONCAT("##_port_select_", _this->name), &_this->port, 0)) {
-            config.withConfig([&](json& conf) { conf["port"] = _this->port; });
+        if (SmGui::InputInt(CONCAT("##_port_select_", name), &port, 0)) {
+            config.withConfig([&](json& conf) { conf["port"] = port; });
         }
 
         SmGui::FillWidth();
-        if (SmGui::Combo(CONCAT("##_rtltcp_sr_", _this->name), &_this->srId, _this->samplerates.txt)) {
-            _this->sampleRate = _this->samplerates[_this->srId];
-            core::setInputSampleRate(_this->sampleRate);
-            config.withConfig([&](json& conf) { conf["sampleRate"] = _this->sampleRate; });
+        if (SmGui::Combo(CONCAT("##_rtltcp_sr_", name), &srId, samplerates.txt)) {
+            sampleRate = samplerates[srId];
+            core::setInputSampleRate(sampleRate);
+            config.withConfig([&](json& conf) { conf["sampleRate"] = sampleRate; });
         }
 
-        if (_this->running) { SmGui::EndDisabled(); }
+        if (running) { SmGui::EndDisabled(); }
 
         SmGui::LeftLabel("Direct Sampling");
         SmGui::FillWidth();
-        if (SmGui::Combo(CONCAT("##_rtltcp_ds_", _this->name), &_this->directSamplingId, "Disabled\0I branch\0Q branch\0")) {
-            if (_this->running) {
-                _this->client->setDirectSampling(_this->directSamplingId);
-                _this->client->setGainIndex(_this->gain);
+        if (SmGui::Combo(CONCAT("##_rtltcp_ds_", name), &directSamplingId, "Disabled\0I branch\0Q branch\0")) {
+            if (running) {
+                client->setDirectSampling(directSamplingId);
+                client->setGainIndex(gain);
             }
-            config.withConfig([&](json& conf) { conf["directSamplingMode"] = _this->directSamplingId; });
+            config.withConfig([&](json& conf) { conf["directSamplingMode"] = directSamplingId; });
         }
 
         SmGui::LeftLabel("PPM Correction");
         SmGui::FillWidth();
-        if (SmGui::InputInt(CONCAT("##_rtltcp_ppm_", _this->name), &_this->ppm, 1, 10)) {
-            if (_this->running) {
-                _this->client->setPPM(_this->ppm);
+        if (SmGui::InputInt(CONCAT("##_rtltcp_ppm_", name), &ppm, 1, 10)) {
+            if (running) {
+                client->setPPM(ppm);
             }
-            config.withConfig([&](json& conf) { conf["ppm"] = _this->ppm; });
+            config.withConfig([&](json& conf) { conf["ppm"] = ppm; });
         }
 
-        if (_this->tunerAGC) { SmGui::BeginDisabled(); }
+        if (tunerAGC) { SmGui::BeginDisabled(); }
         SmGui::LeftLabel("Gain");
         SmGui::FillWidth();
-        if (SmGui::SliderInt(CONCAT("##_gain_select_", _this->name), &_this->gain, 0, 28, SmGui::FMT_STR_NONE)) {
-            if (_this->running) {
-                _this->client->setGainIndex(_this->gain);
+        if (SmGui::SliderInt(CONCAT("##_gain_select_", name), &gain, 0, 28, SmGui::FMT_STR_NONE)) {
+            if (running) {
+                client->setGainIndex(gain);
             }
-            config.withConfig([&](json& conf) { conf["gainIndex"] = _this->gain; });
+            config.withConfig([&](json& conf) { conf["gainIndex"] = gain; });
         }
-        if (_this->tunerAGC) { SmGui::EndDisabled(); }
+        if (tunerAGC) { SmGui::EndDisabled(); }
 
-        if (SmGui::Checkbox(CONCAT("Bias-T##_biast_select_", _this->name), &_this->biasTee)) {
-            if (_this->running) {
-                _this->client->setBiasTee(_this->biasTee);
+        if (SmGui::Checkbox(CONCAT("Bias-T##_biast_select_", name), &biasTee)) {
+            if (running) {
+                client->setBiasTee(biasTee);
             }
-            config.withConfig([&](json& conf) { conf["biasTee"] = _this->biasTee; });
-        }
-
-        if (SmGui::Checkbox(CONCAT("Offset Tuning##_biast_select_", _this->name), &_this->offsetTuning)) {
-            if (_this->running) {
-                _this->client->setOffsetTuning(_this->offsetTuning);
-            }
-            config.withConfig([&](json& conf) { conf["offsetTuning"] = _this->offsetTuning; });
+            config.withConfig([&](json& conf) { conf["biasTee"] = biasTee; });
         }
 
-        if (SmGui::Checkbox("RTL AGC", &_this->rtlAGC)) {
-            if (_this->running) {
-                _this->client->setAGCMode(_this->rtlAGC);
-                if (!_this->rtlAGC) {
-                    _this->client->setGainIndex(_this->gain);
+        if (SmGui::Checkbox(CONCAT("Offset Tuning##_biast_select_", name), &offsetTuning)) {
+            if (running) {
+                client->setOffsetTuning(offsetTuning);
+            }
+            config.withConfig([&](json& conf) { conf["offsetTuning"] = offsetTuning; });
+        }
+
+        if (SmGui::Checkbox("RTL AGC", &rtlAGC)) {
+            if (running) {
+                client->setAGCMode(rtlAGC);
+                if (!rtlAGC) {
+                    client->setGainIndex(gain);
                 }
             }
-            config.withConfig([&](json& conf) { conf["rtlAGC"] = _this->rtlAGC; });
+            config.withConfig([&](json& conf) { conf["rtlAGC"] = rtlAGC; });
         }
 
         SmGui::ForceSync();
-        if (SmGui::Checkbox("Tuner AGC", &_this->tunerAGC)) {
-            if (_this->running) {
-                _this->client->setGainMode(!_this->tunerAGC);
-                if (!_this->tunerAGC) {
-                    _this->client->setGainIndex(_this->gain);
+        if (SmGui::Checkbox("Tuner AGC", &tunerAGC)) {
+            if (running) {
+                client->setGainMode(!tunerAGC);
+                if (!tunerAGC) {
+                    client->setGainIndex(gain);
                 }
             }
-            config.withConfig([&](json& conf) { conf["tunerAGC"] = _this->tunerAGC; });
+            config.withConfig([&](json& conf) { conf["tunerAGC"] = tunerAGC; });
         }
     }
 
@@ -267,7 +271,6 @@ private:
     bool enabled = true;
     dsp::stream<dsp::complex_t> stream;
     double sampleRate;
-    SourceManager::SourceHandler handler;
     std::thread workerThread;
     std::shared_ptr<rtltcp::Client> client;
     bool running = false;
@@ -289,14 +292,10 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    config.setPath(core::args["root"].s() + "/rtl_tcp_config.json");
-    config.load(json({}));
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "rtl_tcp_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new RTLTCPSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(RTLTCPSourceModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (RTLTCPSourceModule*)instance;

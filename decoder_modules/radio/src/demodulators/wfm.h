@@ -16,8 +16,8 @@ namespace demod {
     public:
         WFM() : diag(0.5, 4096)  {}
 
-        WFM(std::string name, ConfigManager* config, dsp::stream<dsp::complex_t>* input, double bandwidth, double audioSR) : diag(0.5, 4096) {
-            init(name, config, input, bandwidth, audioSR);
+        WFM(std::string name, ModuleConfig* cfg, dsp::stream<dsp::complex_t>* input, double bandwidth, double audioSR) : diag(0.5, 4096) {
+            init(name, cfg, input, bandwidth, audioSR);
         }
 
         ~WFM() {
@@ -25,9 +25,9 @@ namespace demod {
             gui::waterfall.onFFTRedraw.unbindHandler(&fftRedrawHandler);
         }
 
-        void init(std::string name, ConfigManager* config, dsp::stream<dsp::complex_t>* input, double bandwidth, double audioSR) {
+        void init(std::string name, ModuleConfig* cfg, dsp::stream<dsp::complex_t>* input, double bandwidth, double audioSR) {
             this->name = name;
-            _config = config;
+            _cfg = cfg;
 
             // Define RDS regions
             rdsRegions.define("eu", "Europe", RDS_REGION_EUROPE);
@@ -42,21 +42,21 @@ namespace demod {
             std::string rdsRegionStr = "eu";
 
             // Load config
-            _config->readConfig([&](const json& conf) {
-                if (conf[name][getName()].contains("stereo")) {
-                    _stereo = conf[name][getName()]["stereo"];
+            _cfg->read([&](const json& conf) {
+                if (conf.contains(getName()) && conf[getName()].contains("stereo")) {
+                    _stereo = conf[getName()]["stereo"];
                 }
-                if (conf[name][getName()].contains("lowPass")) {
-                    _lowPass = conf[name][getName()]["lowPass"];
+                if (conf.contains(getName()) && conf[getName()].contains("lowPass")) {
+                    _lowPass = conf[getName()]["lowPass"];
                 }
-                if (conf[name][getName()].contains("rds")) {
-                    _rds = conf[name][getName()]["rds"];
+                if (conf.contains(getName()) && conf[getName()].contains("rds")) {
+                    _rds = conf[getName()]["rds"];
                 }
-                if (conf[name][getName()].contains("rdsInfo")) {
-                    _rdsInfo = conf[name][getName()]["rdsInfo"];
+                if (conf.contains(getName()) && conf[getName()].contains("rdsInfo")) {
+                    _rdsInfo = conf[getName()]["rdsInfo"];
                 }
-                if (conf[name][getName()].contains("rdsRegion")) {
-                    rdsRegionStr = conf[name][getName()]["rdsRegion"];
+                if (conf.contains(getName()) && conf[getName()].contains("rdsRegion")) {
+                    rdsRegionStr = conf[getName()]["rdsRegion"];
                 }
             });
 
@@ -101,28 +101,28 @@ namespace demod {
         void showMenu() {
             if (ImGui::Checkbox(("Low Pass##_radio_wfm_lowpass_" + name).c_str(), &_lowPass)) {
                 demod.setLowPass(_lowPass);
-                _config->withConfig([&](json& conf) { conf[name][getName()]["lowPass"] = _lowPass; });
+                _cfg->with([&](json& conf) { conf[getName()]["lowPass"] = _lowPass; });
             }
             if (ImGui::Checkbox(("Stereo##_radio_wfm_stereo_" + name).c_str(), &_stereo)) {
                 setStereo(_stereo);
-                _config->withConfig([&](json& conf) { conf[name][getName()]["stereo"] = _stereo; });
+                _cfg->with([&](json& conf) { conf[getName()]["stereo"] = _stereo; });
             }
             if (ImGui::Checkbox(("Decode RDS##_radio_wfm_rds_" + name).c_str(), &_rds)) {
                 demod.setRDSOut(_rds);
-                _config->withConfig([&](json& conf) { conf[name][getName()]["rds"] = _rds; });
+                _cfg->with([&](json& conf) { conf[getName()]["rds"] = _rds; });
             }
 
             // TODO: This might break when the entire radio module is disabled
             if (!_rds) { ImGui::BeginDisabled(); }
             if (ImGui::Checkbox(("Advanced RDS Info##_radio_wfm_rds_info_" + name).c_str(), &_rdsInfo)) {
                 setAdvancedRds(_rdsInfo);
-                _config->withConfig([&](json& conf) { conf[name][getName()]["rdsInfo"] = _rdsInfo; });
+                _cfg->with([&](json& conf) { conf[getName()]["rdsInfo"] = _rdsInfo; });
             }
             ImGui::SameLine();
             ImGui::FillWidth();
             if (ImGui::Combo(("##_radio_wfm_rds_region_" + name).c_str(), &rdsRegionId, rdsRegions.txt)) {
                 rdsRegion = rdsRegions.value(rdsRegionId);
-                _config->withConfig([&](json& conf) { conf[name][getName()]["rdsRegion"] = rdsRegions.key(rdsRegionId); });
+                _cfg->with([&](json& conf) { conf[getName()]["rdsRegion"] = rdsRegions.key(rdsRegionId); });
             }
             if (!_rds) { ImGui::EndDisabled(); }
 
@@ -339,7 +339,7 @@ namespace demod {
 
         rds::Decoder rdsDecode;
 
-        ConfigManager* _config = NULL;
+        ModuleConfig* _cfg = NULL;
 
         bool _stereo = false;
         bool _lowPass = true;

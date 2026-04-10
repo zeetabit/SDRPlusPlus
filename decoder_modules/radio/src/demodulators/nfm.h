@@ -7,19 +7,19 @@ namespace demod {
     public:
         NFM() {}
 
-        NFM(std::string name, ConfigManager* config, dsp::stream<dsp::complex_t>* input, double bandwidth, double audioSR) {
-            init(name, config, input, bandwidth, audioSR);
+        NFM(std::string name, ModuleConfig* cfg, dsp::stream<dsp::complex_t>* input, double bandwidth, double audioSR) {
+            init(name, cfg, input, bandwidth, audioSR);
         }
 
         ~NFM() { stop(); }
 
-        void init(std::string name, ConfigManager* config, dsp::stream<dsp::complex_t>* input, double bandwidth, double audioSR) {
+        void init(std::string name, ModuleConfig* cfg, dsp::stream<dsp::complex_t>* input, double bandwidth, double audioSR) {
             this->name = name;
-            this->_config = config;
+            this->_cfg = cfg;
 
             // Load config
-            _config->readConfig([&](const json& conf) {
-                if (conf[name][getName()].contains("lowPass")) { _lowPass = conf[name][getName()]["lowPass"]; }
+            _cfg->read([&](const json& conf) {
+                if (conf.contains(getName()) && conf[getName()].contains("lowPass")) { _lowPass = conf[getName()]["lowPass"]; }
             });
 
 
@@ -34,7 +34,7 @@ namespace demod {
         void showMenu() {
             if (ImGui::Checkbox(("Low Pass##_radio_wfm_lowpass_" + name).c_str(), &_lowPass)) {
                 demod.setLowPass(_lowPass);
-                _config->withConfig([&](json& conf) { conf[name][getName()]["lowPass"] = _lowPass; });
+                _cfg->with([&](json& conf) { conf[getName()]["lowPass"] = _lowPass; });
             }
         }
 
@@ -69,7 +69,7 @@ namespace demod {
     private:
         dsp::demod::FM<dsp::stereo_t> demod;
 
-        ConfigManager* _config = NULL;
+        ModuleConfig* _cfg = NULL;
 
         bool _lowPass = true;
 

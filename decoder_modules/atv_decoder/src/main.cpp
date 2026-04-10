@@ -6,6 +6,8 @@
 #include <gui/widgets/image.h>
 #include <imgui.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <signal_path/signal_path.h>
 
 #include <dsp/demod/quadrature.h>
@@ -33,11 +35,16 @@ SDRPP_MOD_INFO{/* Name:            */ "atv_decoder",
                /* Max instances    */ -1
 };
 
+SDRPP_MOD_INFO_V2{
+    "atv_decoder", "ATV decoder for SDR++", "Ryzerth", 0, 1, 0, -1,
+    SDRPP_API_VERSION, MOD_CAP_DECODER, 0, nullptr, nullptr, nullptr
+};
+
 #define SAMPLE_RATE (625.0f * (float)LINE_SIZE * 25.0f)
 
 class ATVDecoderModule : public ModuleManager::Instance {
   public:
-    ATVDecoderModule(std::string name) : img(768, 576) {
+    ATVDecoderModule(std::string name, ModuleConfig* cfg) : img(768, 576) {
         this->name = name;
 
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, 0, 7000000.0f, SAMPLE_RATE, SAMPLE_RATE, SAMPLE_RATE, true);
@@ -318,8 +325,8 @@ class ATVDecoderModule : public ModuleManager::Instance {
 
 MOD_EXPORT void _INIT_() {}
 
-MOD_EXPORT ModuleManager::Instance *_CREATE_INSTANCE_(std::string name) { return new ATVDecoderModule(name); }
+SDRPP_CREATE_INSTANCE_V2(ATVDecoderModule)
 
-MOD_EXPORT void _DELETE_INSTANCE_(void *instance) { delete (ATVDecoderModule *)instance; }
+MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* inst) { delete (ATVDecoderModule*)inst; }
 
 MOD_EXPORT void _END_() {}

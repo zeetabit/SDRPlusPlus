@@ -5,6 +5,8 @@
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/widgets/folder_select.h>
 #include <utils/optionlist.h>
 #include "decoder.h"
@@ -23,7 +25,15 @@ SDRPP_MOD_INFO{
     /* Max instances    */ -1
 };
 
+SDRPP_MOD_INFO_V2{
+    "pager_decoder", "POCSAG and Flex Pager Decoder", "Ryzerth", 0, 1, 0, -1,
+    SDRPP_API_VERSION, MOD_CAP_DECODER, 0, nullptr,
+    nullptr,
+    "pager_decoder_config.json"
+};
+
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 enum Protocol {
     PROTOCOL_INVALID = -1,
@@ -33,7 +43,7 @@ enum Protocol {
 
 class PagerDecoderModule : public ModuleManager::Instance {
 public:
-    PagerDecoderModule(std::string name) {
+    PagerDecoderModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
         // Define protocols
@@ -153,18 +163,12 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    // Create default recording directory
-    json def = json({});
-    config.setPath(core::args["root"].s() + "/pager_decoder_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "pager_decoder_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new PagerDecoderModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(PagerDecoderModule)
 
-MOD_EXPORT void _DELETE_INSTANCE_(void* instance) {
+MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (PagerDecoderModule*)instance;
 }
 

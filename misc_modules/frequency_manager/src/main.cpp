@@ -1,6 +1,8 @@
 #include <imgui.h>
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <gui/style.h>
 #include <core.h>
@@ -25,6 +27,13 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
+SDRPP_MOD_INFO_V2{
+    "frequency_manager", "Frequency manager module for SDR++", "Ryzerth;Zimm", 0, 3, 0, 1,
+    SDRPP_API_VERSION, MOD_CAP_MISC, 0, nullptr,
+    R"({"selectedList":"General","bookmarkDisplayMode":1})",
+    "frequency_manager_config.json"
+};
+
 struct FrequencyBookmark {
     double frequency;
     double bandwidth;
@@ -39,6 +48,7 @@ struct WaterfallBookmark {
 };
 
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 const char* demodModeList[] = {
     "NFM",
@@ -64,15 +74,11 @@ const char* bookmarkDisplayModesTxt = "Off\0Top\0Bottom\0";
 
 class FrequencyManagerModule : public ModuleManager::Instance {
 public:
-    FrequencyManagerModule(std::string name) {
+    FrequencyManagerModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
-        std::string selList = config.readConfig<std::string>([](const json& conf) {
-            return conf.contains("selectedList") ? (std::string)conf["selectedList"] : "General";
-        });
-        bookmarkDisplayMode = config.readConfig<int>([](const json& conf) {
-            return conf.contains("bookmarkDisplayMode") ? (int)conf["bookmarkDisplayMode"] : 0;
-        });
+        std::string selList = cfg->get<std::string>("selectedList", "General");
+        bookmarkDisplayMode = cfg->get<int>("bookmarkDisplayMode", 0);
 
         refreshLists();
         loadByName(selList);
@@ -830,20 +836,15 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    def["selectedList"] = "General";
-    def["bookmarkDisplayMode"] = BOOKMARK_DISP_MODE_TOP;
-    def["lists"]["General"]["showOnWaterfall"] = true;
-    def["lists"]["General"]["bookmarks"] = json::object();
+    sdrppInitModuleConfig(config, "frequency_manager_config.json");
 
-    config.setPath(core::args["root"].s() + "/frequency_manager_config.json");
-    config.load(def);
-    config.enableAutoSave();
-
-    // Migrate old config format if needed
+    // Ensure default list structure exists and migrate old config format
     config.withConfig([](json& conf) {
-        if (!conf.contains("bookmarkDisplayMode")) {
-            conf["bookmarkDisplayMode"] = BOOKMARK_DISP_MODE_TOP;
+        if (!conf.contains("selectedList")) { conf["selectedList"] = "General"; }
+        if (!conf.contains("bookmarkDisplayMode")) { conf["bookmarkDisplayMode"] = BOOKMARK_DISP_MODE_TOP; }
+        if (!conf.contains("lists")) {
+            conf["lists"]["General"]["showOnWaterfall"] = true;
+            conf["lists"]["General"]["bookmarks"] = json::object();
         }
         for (auto [listName, list] : conf["lists"].items()) {
             if (list.contains("bookmarks") && list.contains("showOnWaterfall") && list["showOnWaterfall"].is_boolean()) { continue; }
@@ -855,11 +856,9 @@ MOD_EXPORT void _INIT_() {
     });
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new FrequencyManagerModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(FrequencyManagerModule);
 
-MOD_EXPORT void _DELETE_INSTANCE_(void* instance) {
+MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (FrequencyManagerModule*)instance;
 }
 

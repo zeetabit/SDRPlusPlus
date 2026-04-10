@@ -1,6 +1,8 @@
 #include <utils/networking.h>
 #include <imgui.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <gui/style.h>
 #include <signal_path/signal_path.h>
@@ -23,44 +25,35 @@ SDRPP_MOD_INFO{
     /* Max instances    */ -1
 };
 
+SDRPP_MOD_INFO_V2{
+    "rigctl_server", "My fancy new module", "Ryzerth", 0, 1, 0, -1,
+    SDRPP_API_VERSION, MOD_CAP_MISC, 0, nullptr,
+    R"({"host":"localhost","port":4532,"tuning":true,"recording":false,"autoStart":false,"vfo":"","recorder":""})",
+    "rigctl_server_config.json"
+};
+
 enum {
     RECORDER_TYPE_RECORDER,
     RECORDER_TYPE_METEOR_DEMODULATOR
 };
 
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 class SigctlServerModule : public ModuleManager::Instance {
 public:
-    SigctlServerModule(std::string name) {
+    SigctlServerModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
+        this->cfg = cfg;
 
-        config.withConfig([&](json& conf) {
-            if (!conf.contains(name)) {
-                conf[name]["host"] = "localhost";
-                conf[name]["port"] = 4532;
-                conf[name]["tuning"] = true;
-                conf[name]["recording"] = false;
-                conf[name]["autoStart"] = false;
-                conf[name]["vfo"] = "";
-                conf[name]["recorder"] = "";
-            }
-            if (!conf[name].contains("host")) { conf[name]["host"] = "localhost"; }
-            if (!conf[name].contains("port")) { conf[name]["port"] = 4532; }
-            if (!conf[name].contains("tuning")) { conf[name]["tuning"] = true; }
-            if (!conf[name].contains("recording")) { conf[name]["recording"] = false; }
-            if (!conf[name].contains("autoStart")) { conf[name]["autoStart"] = false; }
-            if (!conf[name].contains("vfo")) { conf[name]["vfo"] = ""; }
-            if (!conf[name].contains("recorder")) { conf[name]["recorder"] = ""; }
-            std::string host = conf[name]["host"];
-            strcpy(hostname, host.c_str());
-            port = conf[name]["port"];
-            tuningEnabled = conf[name]["tuning"];
-            recordingEnabled = conf[name]["recording"];
-            autoStart = conf[name]["autoStart"];
-            selectedVfo = conf[name]["vfo"];
-            selectedRecorder = conf[name]["recorder"];
-        });
+        std::string host = cfg->get<std::string>("host", "localhost");
+        strcpy(hostname, host.c_str());
+        port = cfg->get<int>("port", 4532);
+        tuningEnabled = cfg->get<bool>("tuning", true);
+        recordingEnabled = cfg->get<bool>("recording", false);
+        autoStart = cfg->get<bool>("autoStart", false);
+        selectedVfo = cfg->get<std::string>("vfo", "");
+        selectedRecorder = cfg->get<std::string>("recorder", "");
 
         gui::menu.registerEntry(name, menuHandler, this, NULL);
     }
@@ -120,16 +113,12 @@ private:
 
         if (listening) { style::beginDisabled(); }
         if (ImGui::InputText(CONCAT("##_rigctl_srv_host_", _this->name), _this->hostname, 1023)) {
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["host"] = std::string(_this->hostname);
-            });
+            _this->cfg->set("host", std::string(_this->hostname));
         }
         ImGui::SameLine();
         ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
         if (ImGui::InputInt(CONCAT("##_rigctl_srv_port_", _this->name), &_this->port, 0, 0)) {
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["port"] = _this->port;
-            });
+            _this->cfg->set("port", _this->port);
         }
         if (listening) { style::endDisabled(); }
 
@@ -140,9 +129,7 @@ private:
             if (ImGui::Combo(CONCAT("##_rigctl_srv_vfo_", _this->name), &_this->vfoId, _this->vfoNamesTxt.c_str())) {
                 _this->selectVfoByName(_this->vfoNames[_this->vfoId], false);
                 if (!_this->selectedVfo.empty()) {
-                    config.withConfig([&](json& conf) {
-                        conf[_this->name]["vfo"] = _this->selectedVfo;
-                    });
+                    _this->cfg->set("vfo", _this->selectedVfo);
                 }
             }
         }
@@ -154,9 +141,7 @@ private:
             if (ImGui::Combo(CONCAT("##_rigctl_srv_rec_", _this->name), &_this->recorderId, _this->recorderNamesTxt.c_str())) {
                 _this->selectRecorderByName(_this->recorderNames[_this->recorderId], false);
                 if (!_this->selectedRecorder.empty()) {
-                    config.withConfig([&](json& conf) {
-                        conf[_this->name]["recorder"] = _this->selectedRecorder;
-                    });
+                    _this->cfg->set("recorder", _this->selectedRecorder);
                 }
             }
         }
@@ -165,22 +150,16 @@ private:
         ImGui::TableNextRow();
         ImGui::TableSetColumnIndex(0);
         if (ImGui::Checkbox(CONCAT("Tuning##_rigctl_srv_tune_ena_", _this->name), &_this->tuningEnabled)) {
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["tuning"] = _this->tuningEnabled;
-            });
+            _this->cfg->set("tuning", _this->tuningEnabled);
         }
         ImGui::TableSetColumnIndex(1);
         if (ImGui::Checkbox(CONCAT("Recording##_rigctl_srv_tune_ena_", _this->name), &_this->recordingEnabled)) {
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["recording"] = _this->recordingEnabled;
-            });
+            _this->cfg->set("recording", _this->recordingEnabled);
         }
         ImGui::EndTable();
 
         if (ImGui::Checkbox(CONCAT("Listen on startup##_rigctl_srv_auto_lst_", _this->name), &_this->autoStart)) {
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["autoStart"] = _this->autoStart;
-            });
+            _this->cfg->set("autoStart", _this->autoStart);
         }
 
         if (listening && ImGui::Button(CONCAT("Stop##_rigctl_srv_stop_", _this->name), ImVec2(menuWidth, 0))) {
@@ -686,6 +665,7 @@ private:
     }
 
     std::string name;
+    ModuleConfig* cfg = nullptr;
     bool enabled = true;
 
     char hostname[1024];
@@ -719,16 +699,12 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    config.setPath(core::args["root"].s() + "/rigctl_server_config.json");
-    config.load(json::object());
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "rigctl_server_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new SigctlServerModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(SigctlServerModule);
 
-MOD_EXPORT void _DELETE_INSTANCE_(void* instance) {
+MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (SigctlServerModule*)instance;
 }
 

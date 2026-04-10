@@ -57,8 +57,11 @@ public:
 TEST_CASE("ViewState loadFromConfig restores saved zoom", "[view_state]") {
     MockWaterfall wf;
     MockConfig config;
+    // Slider and viewBw must be consistent: slider=0.5 → viewBw = 1000 + 0.25 * (8M-1000) = 2000750
+    // Using the forward formula to derive consistent values:
+    double expectedViewBw = gui_math::zoomSliderToBandwidth(0.5f, wf.bandwidth);
     config.data["bandwidth_slider"] = 0.5f;
-    config.data["bandwidth_view"] = 1200000.0;
+    config.data["bandwidth_view"] = expectedViewBw;
     config.data["bandwidth_offset"] = 50000.0;
 
     ViewStateCoordinator vs(&wf, &config);
@@ -66,7 +69,7 @@ TEST_CASE("ViewState loadFromConfig restores saved zoom", "[view_state]") {
     vs.loadFromConfig(sliderBw);
 
     REQUIRE(sliderBw == Approx(0.5f));
-    REQUIRE(wf.viewBandwidth == Approx(1200000.0));
+    REQUIRE(wf.viewBandwidth == Approx(expectedViewBw));
     REQUIRE(wf.viewOffset == Approx(50000.0));
 }
 

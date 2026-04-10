@@ -5,6 +5,8 @@
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <filesystem>
 #include "meteor_demod.h"
 #include <dsp/routing/splitter.h>
@@ -30,7 +32,15 @@ SDRPP_MOD_INFO{
     /* Max instances    */ -1
 };
 
+SDRPP_MOD_INFO_V2{
+    "meteor_demodulator", "Meteor demodulator for SDR++", "Ryzerth", 0, 1, 0, -1,
+    SDRPP_API_VERSION, MOD_CAP_DECODER, 0, nullptr,
+    R"({"brokenModulation":false,"oqpsk":false})",
+    "meteor_demodulator_config.json"
+};
+
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 std::string genFileName(std::string prefix, std::string suffix) {
     time_t now = time(0);
@@ -44,27 +54,19 @@ std::string genFileName(std::string prefix, std::string suffix) {
 
 class MeteorDemodulatorModule : public ModuleManager::Instance, public IDemodulatorControl {
 public:
-    MeteorDemodulatorModule(std::string name) : folderSelect("%ROOT%/recordings") {
+    MeteorDemodulatorModule(std::string name, ModuleConfig* cfg) : folderSelect("%ROOT%/recordings") {
         this->name = name;
+        this->cfg = cfg;
 
         writeBuffer = new int8_t[STREAM_BUFFER_SIZE];
 
         // Load config
-        config.withConfig([&](json& conf) {
-            // Note: this first one may not be needed but I'm paranoid
-            if (!conf.contains(name)) {
-                conf[name] = json({});
-            }
-            if (conf[name].contains("recPath")) {
-                folderSelect.setPath(conf[name]["recPath"]);
-            }
-            if (conf[name].contains("brokenModulation")) {
-                brokenModulation = conf[name]["brokenModulation"];
-            }
-            if (conf[name].contains("oqpsk")) {
-                oqpsk = conf[name]["oqpsk"];
-            }
-        });
+        std::string recPath = cfg->get<std::string>("recPath", "");
+        if (!recPath.empty()) {
+            folderSelect.setPath(recPath);
+        }
+        brokenModulation = cfg->get<bool>("brokenModulation", false);
+        oqpsk = cfg->get<bool>("oqpsk", false);
 
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, 0, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, true);
         demod.init(vfo->output, 72000.0f, INPUT_SAMPLE_RATE, 33, 0.6f, 0.1f, 0.005f, brokenModulation, oqpsk, 1e-6, 0.01);
@@ -147,24 +149,18 @@ private:
 
         if (_this->folderSelect.render("##meteor_rec" + _this->name)) {
             if (_this->folderSelect.pathIsValid()) {
-                config.withConfig([&](json& conf) {
-                    conf[_this->name]["recPath"] = _this->folderSelect.path;
-                });
+                _this->cfg->set("recPath", _this->folderSelect.path);
             }
         }
 
         if (ImGui::Checkbox(CONCAT("Broken modulation##meteor_rec", _this->name), &_this->brokenModulation)) {
             _this->demod.setBrokenModulation(_this->brokenModulation);
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["brokenModulation"] = _this->brokenModulation;
-            });
+            _this->cfg->set("brokenModulation", _this->brokenModulation);
         }
 
         if (ImGui::Checkbox(CONCAT("OQPSK##oqpsk", _this->name), &_this->oqpsk)) {
             _this->demod.setOQPSK(_this->oqpsk);
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["oqpsk"] = _this->oqpsk;
-            });
+            _this->cfg->set("oqpsk", _this->oqpsk);
         }
 
         if (!_this->folderSelect.pathIsValid() && _this->enabled) { style::beginDisabled(); }
@@ -243,6 +239,7 @@ private:
     void stopDemod() override { if (recording) { stopRecording(); } }
 
     std::string name;
+    ModuleConfig* cfg = nullptr;
     bool enabled = true;
 
     // DSP Chain
@@ -270,7 +267,6 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    // Create default recording directory
     std::string root = (std::string)core::args["root"];
     if (!std::filesystem::exists(root + "/recordings")) {
         flog::warn("Recordings directory does not exist, creating it");
@@ -278,17 +274,12 @@ MOD_EXPORT void _INIT_() {
             flog::error("Could not create recordings directory");
         }
     }
-    json def = json({});
-    config.setPath(root + "/meteor_demodulator_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "meteor_demodulator_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new MeteorDemodulatorModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(MeteorDemodulatorModule)
 
-MOD_EXPORT void _DELETE_INSTANCE_(void* instance) {
+MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (MeteorDemodulatorModule*)instance;
 }
 

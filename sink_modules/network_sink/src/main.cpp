@@ -11,6 +11,8 @@
 #include <config.h>
 #include <gui/style.h>
 #include <core.h>
+#include <module_manifest.h>
+#include <module_config.h>
 
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
@@ -22,7 +24,14 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
+SDRPP_MOD_INFO_V2{
+    "network_sink", "Network sink module for SDR++", "Ryzerth", 0, 1, 0, 1,
+    SDRPP_API_VERSION, MOD_CAP_SINK, 0, nullptr,
+    nullptr, "network_sink_config.json"
+};
+
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 enum {
     SINK_MODE_TCP,
@@ -313,7 +322,7 @@ private:
 
 class NetworkSinkModule : public ModuleManager::Instance {
 public:
-    NetworkSinkModule(std::string name) {
+    NetworkSinkModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
         provider.create = create_sink;
         provider.ctx = this;
@@ -351,18 +360,12 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    config.setPath(core::args["root"].s() + "/network_sink_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "network_sink_config.json");
 }
 
-MOD_EXPORT void* _CREATE_INSTANCE_(std::string name) {
-    NetworkSinkModule* instance = new NetworkSinkModule(name);
-    return instance;
-}
+SDRPP_CREATE_INSTANCE_V2(NetworkSinkModule)
 
-MOD_EXPORT void _DELETE_INSTANCE_(void* instance) {
+MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (NetworkSinkModule*)instance;
 }
 

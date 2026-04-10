@@ -5,6 +5,8 @@
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <filesystem>
 #include <dsp/stream.h>
 #include <dsp/buffer/reshaper.h>
@@ -28,32 +30,33 @@ SDRPP_MOD_INFO{
     /* Max instances    */ -1
 };
 
+SDRPP_MOD_INFO_V2{
+    "m17_decoder", "M17 Digital Voice Decoder for SDR++", "Ryzerth", 0, 1, 0, -1,
+    SDRPP_API_VERSION, MOD_CAP_DECODER, 0, nullptr,
+    R"({"showLines":false})",
+    "m17_decoder_config.json"
+};
+
 ConfigManager config;
+SDRPP_MOD_CONFIG(config);
 
 #define INPUT_SAMPLE_RATE 14400
 
 class M17DecoderModule : public ModuleManager::Instance {
 public:
-    M17DecoderModule(std::string name) : diag(0.6, 480) {
+    M17DecoderModule(std::string name, ModuleConfig* cfg) : diag(0.6, 480) {
         this->name = name;
+        this->cfg = cfg;
         lsf.valid = false;
 
         // Load config
-        config.withConfig([&](json& conf) {
-            if (!conf.contains(name)) {
-                conf[name]["showLines"] = false;
-            }
-            if (!conf[name].contains("showLines")) {
-                conf[name]["showLines"] = false;
-            }
-            showLines = conf[name]["showLines"];
-            if (showLines) {
-                diag.lines.push_back(-1.0);
-                diag.lines.push_back(-1.0/3.0);
-                diag.lines.push_back(1.0/3.0);
-                diag.lines.push_back(1.0);
-            }
-        });
+        showLines = cfg->get<bool>("showLines", false);
+        if (showLines) {
+            diag.lines.push_back(-1.0);
+            diag.lines.push_back(-1.0/3.0);
+            diag.lines.push_back(1.0/3.0);
+            diag.lines.push_back(1.0);
+        }
 
 
         // Initialize VFO
@@ -227,9 +230,7 @@ private:
             else {
                 _this->diag.lines.clear();
             }
-            config.withConfig([&](json& conf) {
-                conf[_this->name]["showLines"] = _this->showLines;
-            });
+            _this->cfg->set("showLines", _this->showLines);
         }
 
         ImGui::TextUnformatted("Status:");
@@ -268,6 +269,7 @@ private:
     }
 
     std::string name;
+    ModuleConfig* cfg = nullptr;
     bool enabled = true;
 
     // DSP Chain
@@ -293,18 +295,12 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    // Create default recording directory
-    json def = json({});
-    config.setPath(core::args["root"].s() + "/m17_decoder_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "m17_decoder_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new M17DecoderModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(M17DecoderModule)
 
-MOD_EXPORT void _DELETE_INSTANCE_(void* instance) {
+MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (M17DecoderModule*)instance;
 }
 

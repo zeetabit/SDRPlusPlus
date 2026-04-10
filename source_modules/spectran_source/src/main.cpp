@@ -1,8 +1,11 @@
 #include <imgui.h>
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <gui/style.h>
 #include <config.h>
@@ -26,11 +29,24 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
-ConfigManager config;
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "spectran_source",
+    /* Description:     */ "Spectran source module for SDR++",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 1, 0,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
+};
 
-class SpectranSourceModule : public ModuleManager::Instance {
+ConfigManager config;
+SDRPP_MOD_CONFIG(config);
+
+class SpectranSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    SpectranSourceModule(std::string name) {
+    SpectranSourceModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
         AARTSAAPI_Result res;
@@ -59,15 +75,6 @@ public:
 
         samplerate.effective = 1000000.0;
 
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
-
         refresh();
 
         // Select device from config
@@ -76,11 +83,11 @@ public:
         // TODO: Select
         selectSerial("");
 
-        sigpath::sourceManager.registerSource("Spectran", &handler);
+        sigpath::sourceManager.registerSource("Spectran", static_cast<ISource*>(this));
     }
 
     ~SpectranSourceModule() {
-        stop(this);
+        stop();
         sigpath::sourceManager.unregisterSource("Spectran");
         AARTSAAPI_Close(&api);
         AARTSAAPI_Shutdown();
@@ -99,6 +106,9 @@ public:
     bool isEnabled() {
         return enabled;
     }
+
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
 
     void refresh() {
         // Clear device list
@@ -218,72 +228,69 @@ private:
         return std::string(buf);
     }
 
-    static void menuSelected(void* ctx) {
-        SpectranSourceModule* _this = (SpectranSourceModule*)ctx;
-        core::setInputSampleRate(_this->samplerate.effective);
-        flog::info("SpectranSourceModule '{0}': Menu Select!", _this->name);
+    void onSelect() override {
+        core::setInputSampleRate(samplerate.effective);
+        flog::info("SpectranSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        SpectranSourceModule* _this = (SpectranSourceModule*)ctx;
-        flog::info("SpectranSourceModule '{0}': Menu Deselect!", _this->name);
+    void onDeselect() override {
+        flog::info("SpectranSourceModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        SpectranSourceModule* _this = (SpectranSourceModule*)ctx;
-        if (_this->running) { return; }
-        if (_this->selectedSerial.empty()) { return; }
+    void start() override {
+        if (running) { return; }
+        if (selectedSerial.empty()) { return; }
 
-        if (AARTSAAPI_OpenDevice(&_this->api, &_this->dev, L"spectranv6/raw", _this->devList[_this->devId].c_str()) != AARTSAAPI_OK) {
+        if (AARTSAAPI_OpenDevice(&api, &dev, L"spectranv6/raw", devList[devId].c_str()) != AARTSAAPI_OK) {
             flog::error("Failed to open device");
             return;
         }
 
         AARTSAAPI_Config config;
-        AARTSAAPI_ConfigRoot(&_this->dev, &_this->croot);
+        AARTSAAPI_ConfigRoot(&dev, &croot);
 
-        AARTSAAPI_ConfigFind(&_this->dev, &_this->croot, &config, L"device/usbcompression");
-        AARTSAAPI_ConfigSetString(&_this->dev, &config, _this->compList[_this->compId].c_str());
+        AARTSAAPI_ConfigFind(&dev, &croot, &config, L"device/usbcompression");
+        AARTSAAPI_ConfigSetString(&dev, &config, compList[compId].c_str());
 
-        AARTSAAPI_ConfigFind(&_this->dev, &_this->croot, &config, L"device/gaincontrol");
-        AARTSAAPI_ConfigSetString(&_this->dev, &config, _this->agcModeList[_this->agcModeId].c_str());
+        AARTSAAPI_ConfigFind(&dev, &croot, &config, L"device/gaincontrol");
+        AARTSAAPI_ConfigSetString(&dev, &config, agcModeList[agcModeId].c_str());
 
-        AARTSAAPI_ConfigFind(&_this->dev, &_this->croot, &config, L"device/receiverchannel");
-        AARTSAAPI_ConfigSetString(&_this->dev, &config, L"Rx1");
+        AARTSAAPI_ConfigFind(&dev, &croot, &config, L"device/receiverchannel");
+        AARTSAAPI_ConfigSetString(&dev, &config, L"Rx1");
 
-        AARTSAAPI_ConfigFind(&_this->dev, &_this->croot, &config, L"device/outputformat");
-        AARTSAAPI_ConfigSetString(&_this->dev, &config, L"iq");
+        AARTSAAPI_ConfigFind(&dev, &croot, &config, L"device/outputformat");
+        AARTSAAPI_ConfigSetString(&dev, &config, L"iq");
 
-        AARTSAAPI_ConfigFind(&_this->dev, &_this->croot, &config, L"device/receiverclock");
-        AARTSAAPI_ConfigSetString(&_this->dev, &config, _this->clkRatesTxt[_this->samplerate.baseId]);
+        AARTSAAPI_ConfigFind(&dev, &croot, &config, L"device/receiverclock");
+        AARTSAAPI_ConfigSetString(&dev, &config, clkRatesTxt[samplerate.baseId]);
 
-        AARTSAAPI_ConfigFind(&_this->dev, &_this->croot, &config, L"main/decimation");
-        AARTSAAPI_ConfigSetString(&_this->dev, &config, _this->decimationsTxt[_this->samplerate.decimId]);
+        AARTSAAPI_ConfigFind(&dev, &croot, &config, L"main/decimation");
+        AARTSAAPI_ConfigSetString(&dev, &config, decimationsTxt[samplerate.decimId]);
 
-        AARTSAAPI_ConfigFind(&_this->dev, &_this->croot, &config, L"main/centerfreq");
-        AARTSAAPI_ConfigSetFloat(&_this->dev, &config, _this->freq);
+        AARTSAAPI_ConfigFind(&dev, &croot, &config, L"main/centerfreq");
+        AARTSAAPI_ConfigSetFloat(&dev, &config, freq);
 
-        AARTSAAPI_ConfigFind(&_this->dev, &_this->croot, &config, L"main/reflevel");
-        AARTSAAPI_ConfigSetFloat(&_this->dev, &config, _this->refLevel);
+        AARTSAAPI_ConfigFind(&dev, &croot, &config, L"main/reflevel");
+        AARTSAAPI_ConfigSetFloat(&dev, &config, refLevel);
 
-        AARTSAAPI_ConfigFind(&_this->dev, &_this->croot, &config, L"calibration/rffilter");
-        AARTSAAPI_ConfigSetString(&_this->dev, &config, L"Auto Extended");
+        AARTSAAPI_ConfigFind(&dev, &croot, &config, L"calibration/rffilter");
+        AARTSAAPI_ConfigSetString(&dev, &config, L"Auto Extended");
 
-        _this->updateAmps();
+        updateAmps();
 
-        if (AARTSAAPI_ConnectDevice(&_this->dev) != AARTSAAPI_OK) {
+        if (AARTSAAPI_ConnectDevice(&dev) != AARTSAAPI_OK) {
             flog::error("Failed to connect device");
             return;
         }
 
-        if (AARTSAAPI_StartDevice(&_this->dev) != AARTSAAPI_OK) {
+        if (AARTSAAPI_StartDevice(&dev) != AARTSAAPI_OK) {
             flog::error("Failed to start device");
             return;
         }
 
         // Wait for first packet
         AARTSAAPI_Packet pkt = { sizeof(AARTSAAPI_Packet) };
-        while (AARTSAAPI_GetPacket(&_this->dev, 0, 0, &pkt) == AARTSAAPI_EMPTY) {
+        while (AARTSAAPI_GetPacket(&dev, 0, 0, &pkt) == AARTSAAPI_EMPTY) {
 #ifdef _WIN32
             Sleep(1);
 #else
@@ -291,111 +298,107 @@ private:
 #endif
         }
 
-        _this->workerThread = std::thread(&SpectranSourceModule::worker, _this);
+        workerThread = std::thread(&SpectranSourceModule::worker, this);
 
-        _this->running = true;
-        flog::info("SpectranSourceModule '{0}': Start!", _this->name);
+        running = true;
+        flog::info("SpectranSourceModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        SpectranSourceModule* _this = (SpectranSourceModule*)ctx;
-        if (!_this->running) { return; }
-        _this->running = false;
+    void stop() override {
+        if (!running) { return; }
+        running = false;
         
-        _this->stream.stopWriter();
-        AARTSAAPI_StopDevice(&_this->dev);
-        AARTSAAPI_DisconnectDevice(&_this->dev);
-        AARTSAAPI_CloseDevice(&_this->api, &_this->dev);
+        stream.stopWriter();
+        AARTSAAPI_StopDevice(&dev);
+        AARTSAAPI_DisconnectDevice(&dev);
+        AARTSAAPI_CloseDevice(&api, &dev);
 
-        if (_this->workerThread.joinable()) {
-            _this->workerThread.join();
+        if (workerThread.joinable()) {
+            workerThread.join();
         }
 
-        _this->stream.clearWriteStop();
+        stream.clearWriteStop();
 
-        flog::info("SpectranSourceModule '{0}': Stop!", _this->name);
+        flog::info("SpectranSourceModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
-        SpectranSourceModule* _this = (SpectranSourceModule*)ctx;
-        if (_this->running) {
+    void tune(double freq) override {
+        if (running) {
             AARTSAAPI_Config config;
-            AARTSAAPI_ConfigFind(&_this->dev, &_this->croot, &config, L"main/centerfreq");
-            AARTSAAPI_ConfigSetFloat(&_this->dev, &config, freq);
+            AARTSAAPI_ConfigFind(&dev, &croot, &config, L"main/centerfreq");
+            AARTSAAPI_ConfigSetFloat(&dev, &config, freq);
         }
-        _this->freq = freq;
-        flog::info("SpectranSourceModule '{0}': Tune: {1}!", _this->name, freq);
+        freq = freq;
+        flog::info("SpectranSourceModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        SpectranSourceModule* _this = (SpectranSourceModule*)ctx;
-
-        if (_this->running) { SmGui::BeginDisabled(); }
+    void drawMenu() override {
+        if (running) { SmGui::BeginDisabled(); }
 
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Combo(CONCAT("##_spectran_dev_", _this->name), &_this->devId, _this->devList.txt)) {
-            _this->selectSerial(_this->devList.key(_this->devId));
-            core::setInputSampleRate(_this->samplerate.effective);
+        if (SmGui::Combo(CONCAT("##_spectran_dev_", name), &devId, devList.txt)) {
+            selectSerial(devList.key(devId));
+            core::setInputSampleRate(samplerate.effective);
         }
         
-        if (SmGui::Combo(CONCAT("##_spectran_sr_", _this->name), &_this->srId, _this->sampleRateList.txt)) {
-            _this->samplerate = _this->sampleRateList.value(_this->srId);
-            core::setInputSampleRate(_this->samplerate.effective);
+        if (SmGui::Combo(CONCAT("##_spectran_sr_", name), &srId, sampleRateList.txt)) {
+            samplerate = sampleRateList.value(srId);
+            core::setInputSampleRate(samplerate.effective);
         }
 
         SmGui::SameLine();
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Button(CONCAT("Refresh##_spectran_refr_", _this->name))) {
-            _this->refresh();
-            _this->selectSerial(_this->selectedSerial);
-            core::setInputSampleRate(_this->samplerate.effective);
+        if (SmGui::Button(CONCAT("Refresh##_spectran_refr_", name))) {
+            refresh();
+            selectSerial(selectedSerial);
+            core::setInputSampleRate(samplerate.effective);
         }
 
-        if (_this->running) { SmGui::EndDisabled(); }
+        if (running) { SmGui::EndDisabled(); }
 
         SmGui::LeftLabel("USB Compression");
         SmGui::FillWidth();
-        if (SmGui::Combo(CONCAT("##_spectran_comp_", _this->name), &_this->compId, _this->compList.txt)) {
-            if (_this->running) {
+        if (SmGui::Combo(CONCAT("##_spectran_comp_", name), &compId, compList.txt)) {
+            if (running) {
                 AARTSAAPI_Config config;
-                AARTSAAPI_ConfigFind(&_this->dev, &_this->croot, &config, L"device/usbcompression");
-                AARTSAAPI_ConfigSetString(&_this->dev, &config, _this->compList[_this->compId].c_str());
+                AARTSAAPI_ConfigFind(&dev, &croot, &config, L"device/usbcompression");
+                AARTSAAPI_ConfigSetString(&dev, &config, compList[compId].c_str());
             }
         }
 
         SmGui::LeftLabel("AGC Mode");
         SmGui::FillWidth();
-        if (SmGui::Combo(CONCAT("##_spectran_agc_", _this->name), &_this->agcModeId, _this->agcModeList.txt)) {
-            if (_this->running) {
+        if (SmGui::Combo(CONCAT("##_spectran_agc_", name), &agcModeId, agcModeList.txt)) {
+            if (running) {
                 AARTSAAPI_Config config;
-                AARTSAAPI_ConfigFind(&_this->dev, &_this->croot, &config, L"device/gaincontrol");
-                AARTSAAPI_ConfigSetString(&_this->dev, &config, _this->agcModeList[_this->agcModeId].c_str());
+                AARTSAAPI_ConfigFind(&dev, &croot, &config, L"device/gaincontrol");
+                AARTSAAPI_ConfigSetString(&dev, &config, agcModeList[agcModeId].c_str());
             }
         }
         
-        if (_this->agcModeId) { SmGui::BeginDisabled(); }
+        if (agcModeId) { SmGui::BeginDisabled(); }
         SmGui::LeftLabel("Ref Level");
         SmGui::FillWidth();
-        if (SmGui::SliderFloatWithSteps(CONCAT("##_spectran_ref_", _this->name), &_this->refLevel, _this->minRef, _this->maxRef, _this->refStep, SmGui::FMT_STR_FLOAT_DB_ONE_DECIMAL)) {
-            if (_this->running) {
+        if (SmGui::SliderFloatWithSteps(CONCAT("##_spectran_ref_", name), &refLevel, minRef, maxRef, refStep, SmGui::FMT_STR_FLOAT_DB_ONE_DECIMAL)) {
+            if (running) {
                 AARTSAAPI_Config config;
-                AARTSAAPI_ConfigFind(&_this->dev, &_this->croot, &config, L"main/reflevel");
-                AARTSAAPI_ConfigSetFloat(&_this->dev, &config, _this->refLevel);
+                AARTSAAPI_ConfigFind(&dev, &croot, &config, L"main/reflevel");
+                AARTSAAPI_ConfigSetFloat(&dev, &config, refLevel);
             }
         }
-        if (_this->agcModeId) { SmGui::EndDisabled(); }
+        if (agcModeId) { SmGui::EndDisabled(); }
 
-        if (SmGui::Checkbox(CONCAT("Amp##_spectran_amp_", _this->name), &_this->amp)) {
-            if (_this->running) {
-                _this->updateAmps();
+        if (SmGui::Checkbox(CONCAT("Amp##_spectran_amp_", name), &amp)) {
+            if (running) {
+                updateAmps();
             }
         }
 
-        if (SmGui::Checkbox(CONCAT("Preamp##_spectran_preamp_", _this->name), &_this->preAmp)) {
-            if (_this->running) {
-                _this->updateAmps();
+        if (SmGui::Checkbox(CONCAT("Preamp##_spectran_preamp_", name), &preAmp)) {
+            if (running) {
+                updateAmps();
             }
         }
     }
@@ -496,7 +499,6 @@ private:
     std::string name;
     bool enabled = true;
     dsp::stream<dsp::complex_t> stream;
-    SourceManager::SourceHandler handler;
     bool running = false;
     double freq;
     
@@ -538,17 +540,10 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    def["devices"] = json({});
-    def["device"] = "";
-    config.setPath(core::args["root"].s() + "/spectran_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "spectran_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new SpectranSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(SpectranSourceModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (SpectranSourceModule*)instance;

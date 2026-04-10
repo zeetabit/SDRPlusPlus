@@ -1,7 +1,10 @@
 #include <utils/flog.h>
 #include <module.h>
+#include <module_manifest.h>
+#include <module_config.h>
 #include <gui/gui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <gui/style.h>
 #include <config.h>
@@ -23,29 +26,33 @@ SDRPP_MOD_INFO{
     /* Max instances    */ 1
 };
 
-ConfigManager config;
+SDRPP_MOD_INFO_V2{
+    /* Name:            */ "usrp_source",
+    /* Description:     */ "USRP source module for SDR++",
+    /* Author:          */ "Ryzerth",
+    /* Version:         */ 0, 1, 0,
+    /* Max instances    */ 1,
+    /* API version      */ SDRPP_API_VERSION,
+    /* Capabilities     */ MOD_CAP_SOURCE,
+    /* Dependency count */ 0,
+    /* Dependencies     */ nullptr
+};
 
-class USRPSourceModule : public ModuleManager::Instance {
+ConfigManager config;
+SDRPP_MOD_CONFIG(config);
+
+class USRPSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    USRPSourceModule(std::string name) {
+    USRPSourceModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
 
         sampleRate = 8000000.0;
 
-        handler.ctx = this;
-        handler.selectHandler = menuSelected;
-        handler.deselectHandler = menuDeselected;
-        handler.menuHandler = menuHandler;
-        handler.startHandler = start;
-        handler.stopHandler = stop;
-        handler.tuneHandler = tune;
-        handler.stream = &stream;
-
-        sigpath::sourceManager.registerSource("USRP", &handler);
+        sigpath::sourceManager.registerSource("USRP", static_cast<ISource*>(this));
     }
 
     ~USRPSourceModule() {
-        stop(this);
+        stop();
         sigpath::sourceManager.unregisterSource("USRP");
     }
 
@@ -68,6 +75,9 @@ public:
     bool isEnabled() {
         return enabled;
     }
+
+    // ISource implementation
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
 
     void refresh() {
         devices.clear();
@@ -233,176 +243,168 @@ public:
     }
 
 private:
-    static void menuSelected(void* ctx) {
-        USRPSourceModule* _this = (USRPSourceModule*)ctx;
-
-        if (_this->firstSelect) {
-            _this->firstSelect = false;
+    void onSelect() override {
+        if (firstSelect) {
+            firstSelect = false;
 
             // List devices
-            _this->refresh();
+            refresh();
 
             // Select device
-            config.readConfig([&](const json& conf) { _this->selectedSer = conf["device"]; });
-            _this->select(_this->selectedSer);
+            config.readConfig([&](const json& conf) { selectedSer = conf["device"]; });
+            select(selectedSer);
         }
 
-        core::setInputSampleRate(_this->sampleRate);
-        flog::info("USRPSourceModule '{0}': Menu Select!", _this->name);
+        core::setInputSampleRate(sampleRate);
+        flog::info("USRPSourceModule '{0}': Menu Select!", name);
     }
 
-    static void menuDeselected(void* ctx) {
-        USRPSourceModule* _this = (USRPSourceModule*)ctx;
-        flog::info("USRPSourceModule '{0}': Menu Deselect!", _this->name);
+    void onDeselect() override {
+        flog::info("USRPSourceModule '{0}': Menu Deselect!", name);
     }
 
-    static void start(void* ctx) {
-        USRPSourceModule* _this = (USRPSourceModule*)ctx;
-        if (_this->running) { return; }
-        if (_this->selectedSer.empty()) { return; }
+    void start() override {
+        if (running) { return; }
+        if (selectedSer.empty()) { return; }
 
-        _this->dev = uhd::usrp::multi_usrp::make(_this->devices[_this->devId]);
+        dev = uhd::usrp::multi_usrp::make(devices[devId]);
 
-        _this->dev->set_rx_rate(_this->sampleRate, _this->chanId);
-        _this->dev->set_rx_antenna(_this->antennas.key(_this->antId), _this->chanId);
-        _this->dev->set_rx_gain(_this->gain, _this->chanId);
-        _this->dev->set_rx_freq(_this->freq, _this->chanId);
-        _this->dev->set_clock_source(_this->clockSources.key(_this->csId));
-        _this->setBandwidth(_this->bandwidths[_this->bwId]);
+        dev->set_rx_rate(sampleRate, chanId);
+        dev->set_rx_antenna(antennas.key(antId), chanId);
+        dev->set_rx_gain(gain, chanId);
+        dev->set_rx_freq(freq, chanId);
+        dev->set_clock_source(clockSources.key(csId));
+        setBandwidth(bandwidths[bwId]);
         
         uhd::stream_args_t sargs;
         sargs.channels.clear();
-        sargs.channels.push_back(_this->chanId);
+        sargs.channels.push_back(chanId);
         sargs.cpu_format = "fc32";
         sargs.otw_format = "sc16";
-        _this->streamer = _this->dev->get_rx_stream(sargs);
-        _this->streamer->issue_stream_cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
+        streamer = dev->get_rx_stream(sargs);
+        streamer->issue_stream_cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
         
-        _this->stream.clearWriteStop();
-        _this->workerThread = std::thread(&USRPSourceModule::worker, _this);
+        stream.clearWriteStop();
+        workerThread = std::thread(&USRPSourceModule::worker, this);
 
-        _this->running = true;
-        flog::info("USRPSourceModule '{0}': Start!", _this->name);
+        running = true;
+        flog::info("USRPSourceModule '{0}': Start!", name);
     }
 
-    static void stop(void* ctx) {
-        USRPSourceModule* _this = (USRPSourceModule*)ctx;
-        if (!_this->running) { return; }
-        _this->running = false;
+    void stop() override {
+        if (!running) { return; }
+        running = false;
         
-        _this->stream.stopWriter();
-        _this->streamer->issue_stream_cmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
-        if (_this->workerThread.joinable()) { _this->workerThread.join(); }
-        _this->stream.clearWriteStop();
+        stream.stopWriter();
+        streamer->issue_stream_cmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
+        if (workerThread.joinable()) { workerThread.join(); }
+        stream.clearWriteStop();
         
-        _this->streamer.reset();
-        _this->dev.reset();
+        streamer.reset();
+        dev.reset();
 
-        flog::info("USRPSourceModule '{0}': Stop!", _this->name);
+        flog::info("USRPSourceModule '{0}': Stop!", name);
     }
 
-    static void tune(double freq, void* ctx) {
-        USRPSourceModule* _this = (USRPSourceModule*)ctx;
-        if (_this->running) {
-            _this->dev->set_rx_freq(freq, _this->chanId);
+    void tune(double freq) override {
+        if (running) {
+            dev->set_rx_freq(freq, chanId);
         }
-        _this->freq = freq;
-        flog::info("USRPSourceModule '{0}': Tune: {1}!", _this->name, freq);
+        freq = freq;
+        flog::info("USRPSourceModule '{0}': Tune: {1}!", name, freq);
     }
 
-    static void menuHandler(void* ctx) {
-        USRPSourceModule* _this = (USRPSourceModule*)ctx;
-
-        if (_this->running) { SmGui::BeginDisabled(); }
+    void drawMenu() override {
+        if (running) { SmGui::BeginDisabled(); }
 
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Combo(CONCAT("##_usrp_dev_sel_", _this->name), &_this->devId, _this->devices.txt)) {
-            _this->select(_this->devices.key(_this->devId));
-            core::setInputSampleRate(_this->sampleRate);
-            if (!_this->selectedSer.empty()) {
-                config.withConfig([&](json& conf) { conf["device"] = _this->devices.key(_this->devId); });
+        if (SmGui::Combo(CONCAT("##_usrp_dev_sel_", name), &devId, devices.txt)) {
+            select(devices.key(devId));
+            core::setInputSampleRate(sampleRate);
+            if (!selectedSer.empty()) {
+                config.withConfig([&](json& conf) { conf["device"] = devices.key(devId); });
             }
         }
 
-        if (SmGui::Combo(CONCAT("##_usrp_sr_sel_", _this->name), &_this->srId, _this->samplerates.txt)) {
-            _this->sampleRate = _this->samplerates.key(_this->srId);
-            core::setInputSampleRate(_this->sampleRate);
-            if (!_this->selectedSer.empty()) {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSer]["channels"][_this->selectedChan]["samplerate"] = _this->samplerates.key(_this->srId); });
+        if (SmGui::Combo(CONCAT("##_usrp_sr_sel_", name), &srId, samplerates.txt)) {
+            sampleRate = samplerates.key(srId);
+            core::setInputSampleRate(sampleRate);
+            if (!selectedSer.empty()) {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSer]["channels"][selectedChan]["samplerate"] = samplerates.key(srId); });
             }
         }
 
         SmGui::SameLine();
         SmGui::FillWidth();
         SmGui::ForceSync();
-        if (SmGui::Button(CONCAT("Refresh##_usrp_refr_", _this->name))) {
-            _this->refresh();
-            _this->select(_this->selectedSer);
-            core::setInputSampleRate(_this->sampleRate);
+        if (SmGui::Button(CONCAT("Refresh##_usrp_refr_", name))) {
+            refresh();
+            select(selectedSer);
+            core::setInputSampleRate(sampleRate);
         }
 
-        if (_this->channels.size() > 1) {
+        if (channels.size() > 1) {
             SmGui::LeftLabel("Channel");
             SmGui::FillWidth();
             SmGui::ForceSync();
-            if (SmGui::Combo(CONCAT("##_usrp_ch_sel_", _this->name), &_this->chanId, _this->channels.txt)) {
-                if (!_this->selectedSer.empty()) {
-                    config.withConfig([&](json& conf) { conf["devices"][_this->selectedSer]["channel"] = _this->channels.key(_this->chanId); });
+            if (SmGui::Combo(CONCAT("##_usrp_ch_sel_", name), &chanId, channels.txt)) {
+                if (!selectedSer.empty()) {
+                    config.withConfig([&](json& conf) { conf["devices"][selectedSer]["channel"] = channels.key(chanId); });
                 }
-                _this->select(_this->devices.key(_this->devId));
+                select(devices.key(devId));
             }
         }
 
-        if (_this->running) { SmGui::EndDisabled(); }
+        if (running) { SmGui::EndDisabled(); }
 
-        if (_this->antennas.size() > 1) {
+        if (antennas.size() > 1) {
             SmGui::LeftLabel("Antenna");
             SmGui::FillWidth();
-            if (SmGui::Combo(CONCAT("##_usrp_ant_sel_", _this->name), &_this->antId, _this->antennas.txt)) {
-                if (_this->running) {
-                    _this->dev->set_rx_antenna(_this->antennas.key(_this->antId), _this->chanId);
+            if (SmGui::Combo(CONCAT("##_usrp_ant_sel_", name), &antId, antennas.txt)) {
+                if (running) {
+                    dev->set_rx_antenna(antennas.key(antId), chanId);
                 }
-                if (!_this->selectedSer.empty() && !_this->selectedChan.empty()) {
-                    config.withConfig([&](json& conf) { conf["devices"][_this->selectedSer]["channels"][_this->selectedChan]["antenna"] = _this->antennas.key(_this->antId); });
+                if (!selectedSer.empty() && !selectedChan.empty()) {
+                    config.withConfig([&](json& conf) { conf["devices"][selectedSer]["channels"][selectedChan]["antenna"] = antennas.key(antId); });
                 }
             }
         }
 
-        if (_this->bandwidths.size() > 2) {
+        if (bandwidths.size() > 2) {
             SmGui::LeftLabel("Bandwidth");
             SmGui::FillWidth();
-            if (SmGui::Combo(CONCAT("##_usrp_bw_sel_", _this->name), &_this->bwId, _this->bandwidths.txt)) {
-                if (_this->running) {
-                    _this->setBandwidth(_this->bandwidths[_this->bwId]);
+            if (SmGui::Combo(CONCAT("##_usrp_bw_sel_", name), &bwId, bandwidths.txt)) {
+                if (running) {
+                    setBandwidth(bandwidths[bwId]);
                 }
-                if (!_this->selectedSer.empty() && !_this->selectedChan.empty()) {
-                    config.withConfig([&](json& conf) { conf["devices"][_this->selectedSer]["channels"][_this->selectedChan]["bandwidth"] = _this->bandwidths.key(_this->bwId); });
+                if (!selectedSer.empty() && !selectedChan.empty()) {
+                    config.withConfig([&](json& conf) { conf["devices"][selectedSer]["channels"][selectedChan]["bandwidth"] = bandwidths.key(bwId); });
                 }
             }
         }
 
-        if (_this->clockSources.size() > 1) {
+        if (clockSources.size() > 1) {
             SmGui::LeftLabel("Clock");
             SmGui::FillWidth();
-            if (SmGui::Combo(CONCAT("##_usrp_clk_sel_", _this->name), &_this->csId, _this->clockSources.txt)) {
-                if (_this->running) {
-                    _this->dev->set_clock_source(_this->clockSources.key(_this->csId));
+            if (SmGui::Combo(CONCAT("##_usrp_clk_sel_", name), &csId, clockSources.txt)) {
+                if (running) {
+                    dev->set_clock_source(clockSources.key(csId));
                 }
-                if (!_this->selectedSer.empty()) {
-                    config.withConfig([&](json& conf) { conf["devices"][_this->selectedSer]["channels"][_this->selectedChan]["clock"] = _this->clockSources.key(_this->csId); });
+                if (!selectedSer.empty()) {
+                    config.withConfig([&](json& conf) { conf["devices"][selectedSer]["channels"][selectedChan]["clock"] = clockSources.key(csId); });
                 }
             }
         }
 
         SmGui::LeftLabel("Gain");
         SmGui::FillWidth();
-        if (SmGui::SliderFloatWithSteps(CONCAT("##_usrp_gain_", _this->name), &_this->gain, _this->gainRange.start(), _this->gainRange.stop(), _this->gainRange.step(), SmGui::FMT_STR_FLOAT_DB_ONE_DECIMAL)) {
-            if (_this->running) {
-                _this->dev->set_rx_gain(_this->gain, _this->chanId);
+        if (SmGui::SliderFloatWithSteps(CONCAT("##_usrp_gain_", name), &gain, gainRange.start(), gainRange.stop(), gainRange.step(), SmGui::FMT_STR_FLOAT_DB_ONE_DECIMAL)) {
+            if (running) {
+                dev->set_rx_gain(gain, chanId);
             }
-            if (!_this->selectedSer.empty() && !_this->selectedChan.empty()) {
-                config.withConfig([&](json& conf) { conf["devices"][_this->selectedSer]["channels"][_this->selectedChan]["gain"] = _this->gain; });
+            if (!selectedSer.empty() && !selectedChan.empty()) {
+                config.withConfig([&](json& conf) { conf["devices"][selectedSer]["channels"][selectedChan]["gain"] = gain; });
             }
         }
     }
@@ -443,7 +445,6 @@ private:
     bool enabled = true;
     dsp::stream<dsp::complex_t> stream;
     double sampleRate;
-    SourceManager::SourceHandler handler;
     bool running = false;
     double freq;
     int devId = 0;
@@ -474,17 +475,10 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    json def = json({});
-    def["devices"] = json({});
-    def["device"] = "";
-    config.setPath(core::args["root"].s() + "/usrp_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "usrp_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new USRPSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(USRPSourceModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (USRPSourceModule*)instance;
