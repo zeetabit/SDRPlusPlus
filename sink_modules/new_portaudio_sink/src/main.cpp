@@ -401,20 +401,33 @@ public:
         this->name = name;
         provider.create = create_sink;
         provider.ctx = this;
+    }
 
-        Pa_Initialize();
-
-        sigpath::sinkManager.registerSinkProvider("New Audio", provider);
+    void postInit() override {
+        // Initialize PortAudio only if the module is still enabled after
+        // all instance creation (disabled modules were turned off by disableInstance).
+        if (enabled && !paInitialized) {
+            enable();
+        }
     }
 
     ~AudioSinkModule() {
-        sigpath::sinkManager.unregisterSinkProvider("New Audio");
-        Pa_Terminate();
+        if (paInitialized) {
+            sigpath::sinkManager.unregisterSinkProvider("New Audio");
+            Pa_Terminate();
+        }
     }
 
-    void postInit() {}
-
     void enable() {
+        if (!paInitialized) {
+            PaError err = Pa_Initialize();
+            if (err != paNoError) {
+                flog::error("PortAudio init failed: {0}", Pa_GetErrorText(err));
+                return;
+            }
+            paInitialized = true;
+            sigpath::sinkManager.registerSinkProvider("New Audio", provider);
+        }
         enabled = true;
     }
 
@@ -433,6 +446,7 @@ private:
 
     std::string name;
     bool enabled = true;
+    bool paInitialized = false;
     SinkManager::SinkProvider provider;
 };
 

@@ -216,7 +216,8 @@ void MainWindow::init() {
     }
 
     // Auto-create instances for loaded modules that have no config entry yet.
-    // Modules already in moduleInstances (active, disabled, or removed) are skipped.
+    // New modules are auto-enabled UNLESS another module with the same capability
+    // is already active (e.g. two audio sinks would conflict).
     std::set<std::string> knownModules;
     for (auto const& [name, _module] : modList) {
         std::string mod;
@@ -224,11 +225,30 @@ void MainWindow::init() {
         else { mod = _module["module"].get<std::string>(); }
         knownModules.insert(mod);
     }
+
+    // Build a set of capability flags already covered by enabled instances.
+    // For V1 modules (capabilities=0), infer from module name suffix.
+    auto inferCaps = [](const std::string& modName, int declaredCaps) -> int {
+        if (declaredCaps != 0) { return declaredCaps; }
+        if (modName.find("_source") != std::string::npos) { return MOD_CAP_SOURCE; }
+        if (modName.find("_sink") != std::string::npos) { return MOD_CAP_SINK; }
+        if (modName.find("_decoder") != std::string::npos || modName.find("demodulator") != std::string::npos) { return MOD_CAP_DECODER; }
+        return MOD_CAP_MISC;
+    };
+
+    int activeCaps = 0;
+    for (auto const& [name, inst] : core::moduleManager.instances) {
+        if (inst.faulted) { continue; }
+        if (inst.instance && inst.instance->isEnabled()) {
+            activeCaps |= inferCaps(inst.module.info->name, inst.module.capabilities());
+        }
+    }
+
     for (auto const& [modName, mod] : core::moduleManager.modules) {
         if (knownModules.count(modName)) { continue; }
         if (mod.info->maxInstances == 0) { continue; }
 
-        // Generate a display name from the module name (e.g. "radiosonde_decoder" → "Radiosonde Decoder")
+        // Generate a display name from the module name
         std::string displayName;
         bool capitalize = true;
         for (char c : modName) {
@@ -237,19 +257,36 @@ void MainWindow::init() {
             capitalize = false;
         }
 
-        flog::info("Auto-creating instance {0} ({1})", displayName, modName);
-        LoadingScreen::show("Initializing " + displayName);
+        // Auto-enable unless a module with the same capability is already active
+        int caps = inferCaps(modName, mod.capabilities());
+        bool conflict = (activeCaps & caps) != 0;
+        bool autoEnable = !conflict;
+
+        if (conflict) {
+            flog::info("New module discovered: {0} ({1}) — disabled (capability conflict with existing module)", displayName, modName);
+        }
+        else {
+            flog::info("New module discovered: {0} ({1}) — auto-enabled", displayName, modName);
+        }
+
+        LoadingScreen::show("Discovered " + displayName);
         try {
             core::moduleManager.createInstance(displayName, modName);
+            if (!autoEnable) {
+                core::moduleManager.disableInstance(displayName);
+            }
 
-            // Persist to config so it appears on next launch
             core::configManager.withConfig([&](json& conf) {
                 conf["moduleInstances"][displayName]["module"] = modName;
-                conf["moduleInstances"][displayName]["enabled"] = true;
+                conf["moduleInstances"][displayName]["enabled"] = autoEnable;
             });
+
+            if (autoEnable) {
+                activeCaps |= caps;
+            }
         }
         catch (const std::exception& e) {
-            flog::error("Failed to auto-create instance {0}: {1}", displayName, e.what());
+            flog::error("Failed to create instance {0}: {1}", displayName, e.what());
         }
     }
 

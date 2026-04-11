@@ -49,19 +49,28 @@ namespace module_manager_menu {
             for (auto& [name, inst] : core::moduleManager.instances) {
                 ImGui::TableNextRow();
 
-                // Highlight faulted modules
                 bool isFaulted = inst.faulted;
+                bool isEnabled = inst.instance && !isFaulted && inst.instance->isEnabled();
+
+                // Row background: faulted=red, disabled=dim
                 if (isFaulted) {
                     ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, IM_COL32(180, 40, 40, 80));
+                }
+                else if (!isEnabled) {
+                    ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, IM_COL32(80, 80, 80, 40));
                 }
 
                 ImGui::TableSetColumnIndex(0);
                 if (isFaulted) { ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 100, 100, 255)); }
+                else if (!isEnabled) { ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(150, 150, 150, 200)); }
                 ImGui::TextUnformatted(name.c_str());
                 if (isFaulted && ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("FAULTED: %s", inst.faultError.c_str());
                 }
-                if (isFaulted) { ImGui::PopStyleColor(); }
+                else if (!isEnabled && ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Disabled — enable via the module's menu checkbox");
+                }
+                if (isFaulted || !isEnabled) { ImGui::PopStyleColor(); }
 
                 ImGui::TableSetColumnIndex(1);
                 bool isLegacy = !inst.module.isV2();
