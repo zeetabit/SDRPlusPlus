@@ -30,8 +30,13 @@ else ()
     target_link_directories(m17_decoder PRIVATE ${LIBCODEC2_LIBRARY_DIRS})
     target_link_libraries(m17_decoder PRIVATE ${LIBCODEC2_LIBRARIES})
 
-    # Include it because for some reason pkgconfig doesn't look here?
     if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
         target_include_directories(m17_decoder PRIVATE "/usr/local/include")
+        # codec2 pkg-config gives .../include/codec2 but codec2.h includes <codec2/version.h>
+        # so we need the parent directory too
+        foreach(dir ${LIBCODEC2_INCLUDE_DIRS})
+            get_filename_component(parent "${dir}" DIRECTORY)
+            target_include_directories(m17_decoder PRIVATE "${parent}")
+        endforeach()
     endif()
 endif ()

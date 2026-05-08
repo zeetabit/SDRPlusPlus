@@ -8,14 +8,9 @@
 #include <module_manifest.h>
 #include <module_config.h>
 #include <filesystem>
-#include <dsp/pll.h>
 #include <dsp/stream.h>
-#include <dsp/demodulator.h>
-#include <dsp/window.h>
-#include <dsp/resampling.h>
-#include <dsp/processing.h>
-#include <dsp/routing.h>
-#include <dsp/sink.h>
+#include <dsp/buffer/reshaper.h>
+#include <dsp/sink/handler_sink.h>
 #include <gui/widgets/folder_select.h>
 #include <gui/widgets/symbol_diagram.h>
 #include <fstream>
@@ -83,16 +78,8 @@ public:
     }
 
     ~M17DecoderModule() {
+        if (enabled) { disable(); }
         gui::menu.removeEntry(name);
-        // Stop DSP Here
-        if (enabled) {
-            decoder.stop();
-            reshape.stop();
-            diagHandler.stop();
-            sigpath::vfoManager.deleteVFO(vfo);
-        }
-
-        sigpath::sinkManager.unregisterStream(name);
     }
 
     void postInit() {}
@@ -169,8 +156,8 @@ private:
     VFOManager::VFO* vfo;
     kgsstv::Decoder decoder;
 
-    dsp::Reshaper<float> reshape;
-    dsp::HandlerSink<float> diagHandler;
+    dsp::buffer::Reshaper<float> reshape;
+    dsp::sink::Handler<float> diagHandler;
     dsp::stream<float> dummy;
 
     ImGui::SymbolDiagram diag;

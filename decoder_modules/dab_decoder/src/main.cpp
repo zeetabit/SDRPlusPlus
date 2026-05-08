@@ -1,5 +1,7 @@
 #include <imgui.h>
 #include <config.h>
+#include <module_config.h>
+#include <module_manifest.h>
 #include <core.h>
 #include <gui/style.h>
 #include <gui/gui.h>
@@ -27,6 +29,13 @@ SDRPP_MOD_INFO{
     /* Max instances    */ -1
 };
 
+SDRPP_MOD_INFO_V2{
+    "dab_decoder", "DAB/DAB+ Decoder for SDR++", "Ryzerth", 0, 1, 0, -1,
+    SDRPP_API_VERSION, MOD_CAP_DECODER, 0, nullptr,
+    R"({})",
+    "dab_decoder_config.json"
+};
+
 ConfigManager config;
 SDRPP_MOD_CONFIG(config);
 
@@ -35,14 +44,10 @@ SDRPP_MOD_CONFIG(config);
 
 class M17DecoderModule : public ModuleManager::Instance {
 public:
-    M17DecoderModule(std::string name)  {
+    M17DecoderModule(std::string name, ModuleConfig* cfg)  {
         this->name = name;
 
         file = std::ofstream("sync4.f32", std::ios::out | std::ios::binary);
-
-        // Load config
-        config.withConfig([&](json& conf) {
-        });
 
         // Initialize VFO
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, 0, VFO_BANDWIDTH, INPUT_SAMPLE_RATE, VFO_BANDWIDTH, VFO_BANDWIDTH, true);
@@ -144,18 +149,12 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    // Create default recording directory
-    json def = json({});
-    config.setPath(core::args["root"].s() + "/dab_decoder_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "dab_decoder_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new M17DecoderModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(M17DecoderModule)
 
-MOD_EXPORT void _DELETE_INSTANCE_(void* instance) {
+MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (M17DecoderModule*)instance;
 }
 

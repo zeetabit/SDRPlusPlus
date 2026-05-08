@@ -64,7 +64,9 @@ public:
 
         // Select device here
         std::string serial;
-        config.readConfig([&](const json& conf) { serial = conf["device"]; });
+        config.readConfig([&](const json& conf) {
+            if (conf.contains("device")) { serial = conf["device"]; }
+        });
         selectBySerial(serial);
 
         sigpath::sourceManager.registerSource("BladeRF", static_cast<ISource*>(this));
@@ -240,7 +242,7 @@ public:
 
         // Load settings here
         config.withConfig([&](json& conf) {
-            if (!conf["devices"].contains(selectedSerial)) {
+            if (!conf.contains("devices") || !conf["devices"].contains(selectedSerial)) {
                 conf["devices"][info->serial]["channelId"] = 0;
                 conf["devices"][selectedSerial]["sampleRate"] = sampleRates[0];
                 conf["devices"][selectedSerial]["bandwidth"] = bandwidths.size(); // Auto

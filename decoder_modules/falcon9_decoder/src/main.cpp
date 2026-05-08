@@ -5,18 +5,16 @@
 #include <signal_path/signal_path.h>
 #include <module.h>
 #include <gui/gui.h>
-#include <dsp/pll.h>
 #include <dsp/stream.h>
-#include <dsp/demodulator.h>
-#include <dsp/window.h>
-#include <dsp/resampling.h>
-#include <dsp/processing.h>
-#include <dsp/routing.h>
+#include <dsp/block.h>
+#include <dsp/demod/fm.h>
+#include <dsp/clock_recovery/mm.h>
+#include <dsp/routing/splitter.h>
+#include <dsp/buffer/reshaper.h>
+#include <dsp/sink/handler_sink.h>
 
-#include <dsp/deframing.h>
 #include <falcon_fec.h>
 #include <falcon_packet.h>
-#include <dsp/sink.h>
 
 #include <gui/widgets/symbol_diagram.h>
 
@@ -36,6 +34,163 @@ SDRPP_MOD_INFO{
 
 std::ofstream file("output.ts");
 
+class Threshold : public dsp::block {
+public:
+    Threshold() {}
+
+    Threshold(dsp::stream<float>* in) { init(in); }
+
+    ~Threshold() {
+        if (!_block_init) { return; }
+        stop();
+        delete[] normBuffer;
+        _block_init = false;
+    }
+
+    void init(dsp::stream<float>* in) {
+        _in = in;
+        normBuffer = new float[STREAM_BUFFER_SIZE];
+        registerInput(_in);
+        registerOutput(&out);
+        _block_init = true;
+    }
+
+    void setInput(dsp::stream<float>* in) {
+        assert(_block_init);
+        std::lock_guard<std::recursive_mutex> lck(ctrlMtx);
+        tempStop();
+        unregisterInput(_in);
+        _in = in;
+        registerInput(_in);
+        tempStart();
+    }
+
+    int run() override {
+        int count = _in->read();
+        if (count < 0) { return -1; }
+
+        for (int i = 0; i < count; i++) {
+            out.writeBuf[i] = (_in->readBuf[i] > 0.0f);
+        }
+
+        _in->flush();
+        if (!out.swap(count)) { return -1; }
+        return count;
+    }
+
+    dsp::stream<uint8_t> out;
+
+private:
+    float* normBuffer = nullptr;
+    dsp::stream<float>* _in;
+};
+
+class Deframer : public dsp::block {
+public:
+    Deframer() {}
+
+    Deframer(dsp::stream<uint8_t>* in, int frameLen, uint8_t* syncWord, int syncLen) { init(in, frameLen, syncWord, syncLen); }
+
+    ~Deframer() {
+        if (!_block_init) { return; }
+        stop();
+        delete[] buffer;
+        delete[] _syncword;
+        _block_init = false;
+    }
+
+    void init(dsp::stream<uint8_t>* in, int frameLen, uint8_t* syncWord, int syncLen) {
+        _in = in;
+        _frameLen = frameLen;
+        _syncword = new uint8_t[syncLen];
+        _syncLen = syncLen;
+        memcpy(_syncword, syncWord, syncLen);
+
+        buffer = new uint8_t[STREAM_BUFFER_SIZE + syncLen];
+        memset(buffer, 0, syncLen);
+        bufferStart = buffer + syncLen;
+
+        registerInput(_in);
+        registerOutput(&out);
+        _block_init = true;
+    }
+
+    void setInput(dsp::stream<uint8_t>* in) {
+        assert(_block_init);
+        std::lock_guard<std::recursive_mutex> lck(ctrlMtx);
+        tempStop();
+        unregisterInput(_in);
+        _in = in;
+        registerInput(_in);
+        tempStart();
+    }
+
+    int run() override {
+        count = _in->read();
+        if (count < 0) { return -1; }
+
+        memcpy(bufferStart, _in->readBuf, count - 1);
+
+        for (int i = 0; i < count;) {
+            if (bitsRead >= 0) {
+                if ((bitsRead % 8) == 0) { out.writeBuf[bitsRead / 8] = 0; }
+                out.writeBuf[bitsRead / 8] |= (buffer[i] << (7 - (bitsRead % 8)));
+                i++;
+                bitsRead++;
+
+                if (bitsRead >= _frameLen) {
+                    if (!out.swap((bitsRead / 8) + ((bitsRead % 8) > 0))) { return -1; }
+                    bitsRead = -1;
+                    if (allowSequential) { nextBitIsStartOfFrame = true; }
+                }
+
+                continue;
+            }
+            else if (memcmp(buffer + i, _syncword, _syncLen) == 0) {
+                bitsRead = 0;
+                badFrameCount = 0;
+                continue;
+            }
+            else if (nextBitIsStartOfFrame) {
+                nextBitIsStartOfFrame = false;
+                if (badFrameCount < 5) {
+                    badFrameCount++;
+                    bitsRead = 0;
+                    continue;
+                }
+            }
+            else {
+                i++;
+            }
+
+            nextBitIsStartOfFrame = false;
+        }
+
+        memcpy(buffer, &_in->readBuf[count - _syncLen], _syncLen);
+
+        _in->flush();
+        return count;
+    }
+
+    bool allowSequential = true;
+
+    dsp::stream<uint8_t> out;
+
+private:
+    uint8_t* buffer = nullptr;
+    uint8_t* bufferStart = nullptr;
+    uint8_t* _syncword = nullptr;
+    int count;
+    int _frameLen;
+    int _syncLen;
+    int bitsRead = -1;
+    int badFrameCount = 0;
+    int callcount = 0;
+    bool nextBitIsStartOfFrame = false;
+
+    dsp::stream<uint8_t>* _in;
+};
+
 class Falcon9DecoderModule : public ModuleManager::Instance {
 public:
     Falcon9DecoderModule(std::string name) {
@@ -43,14 +198,8 @@ public:
 
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, 0, 4000000, INPUT_SAMPLE_RATE, 4000000, 4000000, true);
 
-        // dsp::Splitter<float> split;
-        // dsp::Reshaper<float> reshape;
-        // dsp::HandlerSink<float> symSink;
-        // dsp::stream<float> thrInput;
-        // dsp::Threshold thr;
-
-        demod.init(vfo->output, INPUT_SAMPLE_RATE, 2000000.0f);
-        recov.init(&demod.out, (float)INPUT_SAMPLE_RATE / 3571400.0f, powf(0.01f, 2) / 4.0f, 0.01, 100e-6f); // 0.00765625f, 0.175f, 0.005f
+        demod.init(vfo->output, INPUT_SAMPLE_RATE, 2000000.0f * 2.0f, false);
+        recov.init(&demod.out, (float)INPUT_SAMPLE_RATE / 3571400.0f, powf(0.01f, 2) / 4.0f, 0.01, 100e-6f);
         split.init(&recov.out);
         split.bindStream(&reshapeInput);
         split.bindStream(&thrInput);
@@ -153,7 +302,7 @@ private:
             // GPS Logs
             ImGui::BeginTabItem("GPS");
             if (ImGui::Button("Clear logs##GPSClear")) { _this->gpsLogs.clear(); }
-            ImGui::BeginChild(ImGuiID("GPSChild"));
+            ImGui::BeginChild("GPSChild");
             ImGui::TextUnformatted(_this->gpsLogs.c_str());
             ImGui::SetScrollHereY(1.0f);
             ImGui::EndChild();
@@ -197,8 +346,6 @@ private:
             fwrite(data + 25, 1, 940, _this->ffplay);
             file.write((char*)(data + 25), 940);
         }
-
-        //printf("%016" PRIX64 ": %d bytes, %d full\n", pktId, length, count);
     }
 
     static void symSinkHandler(float* data, int count, void* ctx) {
@@ -217,23 +364,23 @@ private:
     std::string gpsLogs = "";
 
     // DSP Chain
-    dsp::FloatFMDemod demod;
-    dsp::MMClockRecovery<float> recov;
+    dsp::demod::FM<float> demod;
+    dsp::clock_recovery::MM<float> recov;
 
-    dsp::Splitter<float> split;
+    dsp::routing::Splitter<float> split;
 
     dsp::stream<float> reshapeInput;
-    dsp::Reshaper<float> reshape;
-    dsp::HandlerSink<float> symSink;
+    dsp::buffer::Reshaper<float> reshape;
+    dsp::sink::Handler<float> symSink;
 
     dsp::stream<float> thrInput;
-    dsp::Threshold thr;
+    Threshold thr;
 
     uint8_t syncWord[32] = { 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1 };
-    dsp::Deframer deframe;
+    Deframer deframe;
     dsp::FalconRS falconRS;
     dsp::FalconPacketSync pkt;
-    dsp::HandlerSink<uint8_t> sink;
+    dsp::sink::Handler<uint8_t> sink;
 
     FILE* ffplay;
 

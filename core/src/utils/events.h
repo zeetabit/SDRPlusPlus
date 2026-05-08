@@ -64,6 +64,11 @@ struct FFTRedraw {
 };
 
 // --- Application lifecycle ---
+// Published after all modules are loaded, instances created, and postInit complete.
+// Subsystems that depend on all providers being available (e.g. sink manager)
+// should load their config here instead of during individual registrations.
+struct AllModulesReady {};
+
 // Published before shutdown begins. Handlers should save state, flush buffers,
 // and release external resources. Handlers run synchronously on the main thread.
 struct ShutdownRequested {};

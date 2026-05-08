@@ -14,6 +14,14 @@ SinkManager::SinkManager() {
     SinkManager::SinkProvider prov;
     prov.create = SinkManager::NullSink::create;
     registerSinkProvider("None", prov);
+
+    // When all modules are ready, load saved sink selections.
+    // This ensures all sink providers are registered before we try to restore config.
+    modulesReadySub = EventBus::get().subscribe<events::AllModulesReady>(
+        [this](const events::AllModulesReady&) {
+            loadSinksFromConfig();
+        }
+    );
 }
 
 SinkManager::Stream::Stream(dsp::stream<dsp::stereo_t>* in, EventHandler<float>* srChangeHandler, float sampleRate) {
@@ -166,11 +174,8 @@ void SinkManager::registerStream(std::string name, SinkManager::Stream* stream) 
     streams[name] = stream;
     streamNames.push_back(name);
 
-    // Load config
-    bool available = core::configManager.readConfig<bool>([&](const json& conf) {
-        return conf["streams"].contains(name);
-    });
-    if (available) { loadStreamConfig(name); }
+    // Config load deferred to AllModulesReady event — all providers must be
+    // registered before we can restore the saved sink selection.
 
     onStreamRegistered.emit(name);
     EventBus::get().publish(events::StreamRegistered{name});
@@ -317,9 +322,13 @@ void SinkManager::loadStreamConfig(std::string name) {
         return conf["streams"][name];
     });
     SinkManager::Stream* stream = streams[name];
-    std::string provName = streamConf["sink"];
-    if (providers.find(provName) == providers.end()) {
-        provName = providerNames[0];
+    std::string provName = streamConf.value("sink", "");
+    if (provName.empty() || providers.find(provName) == providers.end()) {
+        // Saved provider not available — pick first real provider, or "None"
+        provName = "None";
+        for (auto& pn : providerNames) {
+            if (pn != "None") { provName = pn; break; }
+        }
     }
     if (stream->running) {
         stream->sink->stop();

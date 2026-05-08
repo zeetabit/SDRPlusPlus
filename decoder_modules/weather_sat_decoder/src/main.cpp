@@ -6,14 +6,7 @@
 #include <signal_path/signal_path.h>
 #include <module.h>
 
-#include <dsp/pll.h>
 #include <dsp/stream.h>
-#include <dsp/demodulator.h>
-#include <dsp/window.h>
-#include <dsp/resampling.h>
-#include <dsp/processing.h>
-#include <dsp/routing.h>
-#include <dsp/sink.h>
 
 #include <gui/widgets/folder_select.h>
 #include <gui/widgets/constellation_diagram.h>

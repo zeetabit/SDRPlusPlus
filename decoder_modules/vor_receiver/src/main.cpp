@@ -1,5 +1,7 @@
 #include <imgui.h>
 #include <config.h>
+#include <module_config.h>
+#include <module_manifest.h>
 #include <core.h>
 #include <gui/style.h>
 #include <gui/gui.h>
@@ -24,6 +26,13 @@ SDRPP_MOD_INFO{
     /* Max instances    */ -1
 };
 
+SDRPP_MOD_INFO_V2{
+    "vor_receiver", "VOR Receiver for SDR++", "Ryzerth", 0, 1, 0, -1,
+    SDRPP_API_VERSION, MOD_CAP_DECODER, 0, nullptr,
+    R"({})",
+    "vor_receiver_config.json"
+};
+
 ConfigManager config;
 SDRPP_MOD_CONFIG(config);
 
@@ -31,13 +40,8 @@ SDRPP_MOD_CONFIG(config);
 
 class VORReceiverModule : public ModuleManager::Instance {
 public:
-    VORReceiverModule(std::string name) {
+    VORReceiverModule(std::string name, ModuleConfig* cfg) {
         this->name = name;
-
-        // Load config
-        config.readConfig([&](const json& conf) {
-            // TODO: Load config
-        });
 
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, 0, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, true);
         decoder = new vor::Decoder(vfo->output, 1);
@@ -109,19 +113,12 @@ private:
 };
 
 MOD_EXPORT void _INIT_() {
-    // Create default recording directory
-    std::string root = (std::string)core::args["root"];
-    json def = json({});
-    config.setPath(root + "/vor_receiver_config.json");
-    config.load(def);
-    config.enableAutoSave();
+    sdrppInitModuleConfig(config, "vor_receiver_config.json");
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new VORReceiverModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(VORReceiverModule)
 
-MOD_EXPORT void _DELETE_INSTANCE_(void* instance) {
+MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (VORReceiverModule*)instance;
 }
 

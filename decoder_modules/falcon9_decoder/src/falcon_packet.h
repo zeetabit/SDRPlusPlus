@@ -8,21 +8,28 @@ namespace dsp {
         uint16_t packet;
     };
 
-    class FalconPacketSync : public generic_block<FalconPacketSync> {
+    class FalconPacketSync : public block {
     public:
         FalconPacketSync() {}
 
         FalconPacketSync(stream<uint8_t>* in) { init(in); }
 
-        ~FalconPacketSync() {
-            generic_block<FalconPacketSync>::stop();
-        }
-
         void init(stream<uint8_t>* in) {
             _in = in;
 
-            generic_block<FalconPacketSync>::registerInput(_in);
-            generic_block<FalconPacketSync>::registerOutput(&out);
+            registerInput(_in);
+            registerOutput(&out);
+            _block_init = true;
+        }
+
+        void setInput(stream<uint8_t>* in) {
+            assert(_block_init);
+            std::lock_guard<std::recursive_mutex> lck(ctrlMtx);
+            tempStop();
+            unregisterInput(_in);
+            _in = in;
+            registerInput(_in);
+            tempStart();
         }
 
         int run() {

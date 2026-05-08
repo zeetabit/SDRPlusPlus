@@ -13,7 +13,7 @@ namespace dsp {
         }
 
         virtual void start() {
-            assert(_block_init);
+            if (!_block_init) { return; }
             std::lock_guard<std::recursive_mutex> lck(ctrlMtx);
             if (running) {
                 return;
@@ -23,7 +23,7 @@ namespace dsp {
         }
 
         virtual void stop() {
-            assert(_block_init);
+            if (!_block_init) { return; }
             std::lock_guard<std::recursive_mutex> lck(ctrlMtx);
             if (!running) {
                 return;

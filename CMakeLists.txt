@@ -47,16 +47,16 @@ option(OPT_BUILD_PORTAUDIO_SINK "Build PortAudio Sink Module (Dependencies: port
 
 # Decoders
 option(OPT_BUILD_ATV_DECODER "Build ATV decoder (no dependencies required)" ON)
-option(OPT_BUILD_DAB_DECODER "Build the DAB/DAB+ decoder (no dependencies required)" OFF)
-option(OPT_BUILD_FALCON9_DECODER "Build the falcon9 live decoder (Dependencies: ffplay)" OFF)
+option(OPT_BUILD_DAB_DECODER "Build the DAB/DAB+ decoder (no dependencies required)" ON)
+option(OPT_BUILD_FALCON9_DECODER "Build the falcon9 live decoder (Dependencies: ffplay)" ON)
 option(OPT_BUILD_KG_SSTV_DECODER "Build the KG SSTV (KG-STV) decoder module (no dependencies required)" OFF)
 option(OPT_BUILD_M17_DECODER "Build the M17 decoder module (Dependencies: codec2)" OFF)
 option(OPT_BUILD_METEOR_DEMODULATOR "Build the meteor demodulator module (no dependencies required)" ON)
 option(OPT_BUILD_PAGER_DECODER "Build the pager decoder module (no dependencies required)" ON)
 option(OPT_BUILD_RADIO "Main audio modulation decoder (AM, FM, SSB, etc...)" ON)
-option(OPT_BUILD_RYFI_DECODER "RyFi data link decoder" OFF)
-option(OPT_BUILD_VOR_RECEIVER "VOR beacon receiver" OFF)
-option(OPT_BUILD_WEATHER_SAT_DECODER "Build the HRPT decoder module (no dependencies required)" OFF)
+option(OPT_BUILD_RYFI_DECODER "RyFi data link decoder" ON)
+option(OPT_BUILD_VOR_RECEIVER "VOR beacon receiver" ON)
+option(OPT_BUILD_WEATHER_SAT_DECODER "Build the HRPT decoder module (no dependencies required)" ON)
 option(OPT_BUILD_CW_DECODER "Build the CW decoder module (no dependencies required)" ON)
 option(OPT_BUILD_RADIOSONDE_DECODER "Build the radiosonde decoder module (no dependencies required)" ON)
 

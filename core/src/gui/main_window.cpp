@@ -375,6 +375,10 @@ void MainWindow::init() {
     vfoHandler.setInitComplete(true);
 
     core::moduleManager.doPostInitAll();
+
+    // All modules loaded, instances created, postInit complete.
+    // Subsystems can now safely load config that depends on all providers.
+    EventBus::get().publish(events::AllModulesReady{});
 }
 
 ImGui::WaterfallVFO* MainWindow::getSelectedVFO() {

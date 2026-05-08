@@ -4,7 +4,8 @@
 
 namespace sinkmenu {
     void init() {
-        sigpath::sinkManager.loadSinksFromConfig();
+        // Sink config loading is now handled by SinkManager's AllModulesReady subscription.
+        // All providers are guaranteed to be registered by then.
     }
 
     void draw(void* ctx) {

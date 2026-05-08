@@ -8,6 +8,8 @@
 #include "../dsp/sink/null_sink.h"
 #include <mutex>
 #include <utils/event.h>
+#include <utils/event_bus.h>
+#include <utils/events.h>
 #include <vector>
 
 class SinkManager {
@@ -137,4 +139,5 @@ private:
     std::vector<std::string> providerNames;
     std::string providerNamesTxt;
     std::vector<std::string> streamNames;
+    Subscription modulesReadySub;
 };
