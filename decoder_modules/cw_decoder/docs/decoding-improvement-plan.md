@@ -39,12 +39,15 @@
 > | Oracle ablation | per-stage headroom measured; "physical limit" claim refuted |
 > | Detector metrics | edge bias +9.8% dit confirmed; matched-filter resize defect found |
 > | Matched-filter fix | `legacy+mf` — 17× fewer spurious events, CER unchanged, not promoted |
+> | Edge-bias correction | `legacy+edge` — better on 6 profiles, over-corrects at low SNR |
+> | Peak-reference fix | `legacy+peak` — hand-keyed 0.1579 → 0.0628, but `qsb` regresses 43× |
 >
-> **Next:** the detector (`tone_detector.h`), for the AWGN/QSB/QRN family only.
-> Oracle ablation confirms 100% of the error on those profiles is at the
-> detector. It also corrects the scope: hand-keyed profiles are a *timing*
-> fault, Farnsworth is a *gap-classification* fault, and `worstcase` needs both
-> the detector and the duration model fixed together.
+> **Next:** the detector's threshold reference timescale (Phase 16). Oracle
+> ablation confirms 100% of the AWGN/QSB/QRN error is at the detector, and
+> Phase 15 measured that the detector *also* holds 67% of the hand-keyed
+> headroom — an earlier reading of hand-keyed as a pure timing fault was too
+> strong. Farnsworth remains a *gap-classification* fault, unrelated to the
+> detector; `worstcase` needs the detector and the duration model fixed together.
 
 ## Current State (after Phase 1-10 implementation)
 
@@ -316,7 +319,10 @@ Key finding: **filter bandwidth is the dominant factor** — 35 Hz vs 68 Hz = 20
 | 28 | Oracle ablation harness | N/A | N/A | Low | **Done (2026-07)** |
 | 28b | Detector ground-truth metrics | N/A | N/A | Low | **Done (2026-07)** |
 | 28c | Matched-filter resize fix | Low | Low | Low | **Measured — variant `+mf`, not promoted** |
-| 28d | Schmitt edge-bias correction | High | Medium | Low | **Next** |
+| 28d | Schmitt edge-bias correction | High | Medium | Low | **Measured — variant `+edge`, not promoted** |
+| 28e | Symmetric Schmitt thresholds | N/A | N/A | Low | **Refuted (2026-07)** |
+| 28f | Percentile threshold reference | High | High | Low | **Measured — variant `+peak`, not promoted** |
+| 28g | Attack-constant sweep for the peak reference | High | High | Low | **Next** |
 | 29 | Adaptive gap centres rewrite (Farnsworth) | N/A | Low | Low | **Candidate — measured 0.0141 → 0** |
 | 30 | Real-recording benchmark + model-mismatch profiles | N/A | N/A | Medium | **Prerequisite for #24** |
 
@@ -456,7 +462,28 @@ jitter, group delay. Full results `decoder-investigation-2026-07.md` §12.
 - **False-event rate is a poor CER proxy.** Deletions carry the cost — at
   `noise4.0` the miss rate is 1.384 per element and `del = 0.840`.
 
-### Phase 15: Detector Correction (NEXT)
+### Phase 15: Detector Correction (IN PROGRESS, 2026-07)
+Full results `decoder-investigation-2026-07.md` §12.5–12.6.
+
+- **The ON-stretch mechanism was misattributed and is now measured.** The
+  threshold ratio gap accounts for 11% of it; **instant-attack peak tracking
+  accounts for 57%**. `legacy+sym` removed the ratio gap entirely and moved the
+  bias by only a tenth of what the model predicted.
+- **Correcting it is worth a lot.** `legacy+peak` takes handkeyed-15 from 0.1579
+  to **0.0628** — 67% of the available headroom, and equal to the *oracle*
+  detector's own 0.0651 on that profile. Largest single-change improvement so far.
+- **This amends the §11 reading.** "Hand-keyed is a timing problem" described the
+  oracle *combination*, not the attribution: a perfect duration model masks
+  detector error rather than proving there is none.
+- **Nothing promoted.** `+peak` regresses `qsb` 43× (2 s window vs a 3.3 s fade);
+  `+edge` over-corrects at low SNR because it is scaled by the ratio gap, which
+  is not the cause; `+sym` is catastrophic — hysteresis is load-bearing.
+
+### Phase 16: Threshold Reference Timescale (NEXT)
+A keying edge is ~32 ms; a QSB cycle is ~3300 ms. Instant attack (0 ms) chases
+edges; a 2 s percentile cannot follow fading. An asymmetric tracker with an
+attack constant of ~200–500 ms sits between the two and has not been tried.
+Single-constant sweep, with a measured 0.095 CER at stake on hand-keyed alone.
 Scoped by Phase 13 to the AWGN/QSB/QRN family. `tone_detector.h` applies a
 fixed-fraction Schmitt threshold to a magnitude envelope and emits a hard binary
 decision, discarding the soft information before timing ever sees it.

@@ -199,10 +199,13 @@ namespace cw_test {
 
     // Runs the real pipeline once and scores its detector against ground truth.
     inline DetectorScore measureDetector(const std::string& message, SignalParams params,
-                                         cw::MatchedFilterResize mfResize = cw::MF_RESET) {
+                                         cw::MatchedFilterResize mfResize = cw::MF_RESET,
+                                         cw::EdgeBias edgeBias = cw::EDGE_RAW,
+                                         cw::PeakTracker peak = cw::PEAK_INSTANT_ATTACK) {
         auto sig = generateMessage(message, params);
 
-        auto rec = std::make_unique<RecordingDetector>(std::make_unique<cw::SchmittDetector>());
+        auto rec = std::make_unique<RecordingDetector>(
+                       std::make_unique<cw::SchmittDetector>(edgeBias, peak));
         RecordingDetector* probe = rec.get();
 
         auto core = std::make_unique<cw::StagedCore>(
@@ -234,13 +237,15 @@ namespace cw_test {
                                               SignalParams params,
                                               int nSeeds = 24,
                                               unsigned seedBase = 1000,
-                                              cw::MatchedFilterResize mfResize = cw::MF_RESET) {
+                                              cw::MatchedFilterResize mfResize = cw::MF_RESET,
+                                              cw::EdgeBias edgeBias = cw::EDGE_RAW,
+                                              cw::PeakTracker peak = cw::PEAK_INSTANT_ATTACK) {
         DetectorStats out;
         out.seeds = nSeeds;
         DetectorScore acc;
         for (int i = 0; i < nSeeds; i++) {
             params.seed = seedBase + (unsigned)i * 7919u;
-            auto s = measureDetector(message, params, mfResize);
+            auto s = measureDetector(message, params, mfResize, edgeBias, peak);
             acc.groupDelayMs  += s.groupDelayMs;
             acc.falseRate     += s.falseRate;
             acc.missRate      += s.missRate;

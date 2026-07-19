@@ -27,21 +27,44 @@ codebase has roughly even odds.**
 
 ## 1. Summary
 
-Three findings, in order of expected impact:
+### Where the error is (§11, oracle ablation, 24 seeds)
 
-1. **The receive filter is 3–5× wider than optimal.** Measured **+2.8 to +4.8 dB**
-   of weak-signal threshold gain available from narrowing the pre-detection BPF
-   alone. This is larger than any decoding-statistics change on the table, and
-   the improvement plan already identified it (quoting AG1LE) without ever
-   measuring it. **Confirmed by experiment** — see §4.
-2. **The pipeline makes hard decisions at every stage.** Schmitt trigger →
-   duration → dit/dah → gap → beam search. Only the last stage is soft, and it
-   sits downstream of three irreversible decisions. This is the structural
-   reason the worst-case profile is stuck at CER ≈ 0.57 despite ten phases of
-   statistical refinement.
-3. **The benchmark suite measures a single coin flip.** Every noise/jitter/QSB
-   result in `decoding-improvement-plan.md` is one realization on `seed = 42`.
-   Some of the five "tried and reverted" verdicts may themselves be noise.
+| profile family | attribution | measured |
+|---|---|---|
+| AWGN, QSB, QRN | **100% detector** | perfect detector → CER 0; perfect timing barely moves noise3.0 (0.8163 → 0.6614) |
+| hand-keyed | detector and duration model both | a real detector fix reaches the *oracle detector* bound (§12.6) |
+| Farnsworth | **100% gap classification** | 0.0141 → 0.0000 with ideal boundaries; detector irrelevant |
+| worstcase | **both stages, super-additive** | 0.41 / 0.36 alone, **0.0792 together** |
+
+### What is established
+
+- **The old benchmark measured a single coin flip.** Every pre-2026-07 figure is
+  one realization on `seed = 42`. Hand-keyed was ~4× worse than documented (§3).
+- **Pre-detection bandwidth is worth +2.8 to +4.8 dB** — but narrowing it breaks
+  clean 25 WPM decoding, which the AWGN-only view missed (§4).
+- **"Noise+QSB is a physical limit" is refuted.** `worstcase` 0.6244 → 0.0792
+  under oracle ablation; three independent lines agree (§11).
+- **The detector stretches every ON by 9.8% of a dit**, so timing is fed a
+  dah:dit ratio of 2.82 instead of 3.0. The cause is instant-attack peak
+  tracking (57%), **not** the Schmitt threshold gap (11%) — an earlier
+  attribution to the threshold gap was measured and refuted (§12.1, §12.6).
+- **Best single change measured:** `legacy+peak` takes handkeyed-15 from 0.1579
+  to 0.0628 — equal to the oracle detector's own score on that profile.
+
+### What is open
+
+- **Threshold reference timescale (§13).** Instant attack chases 32 ms keying
+  edges; a 2 s percentile cannot follow a 3.3 s fade. Two orders of magnitude
+  unexplored, one constant, 0.095 CER at stake on hand-keyed alone.
+- **Farnsworth gap centres.** The only measured win with *no* identified cost,
+  still untouched.
+- **Generator fidelity is unvalidated** and every number here is conditional on
+  it (§14). It has no multipath, and its AWGN makes the envelope exactly Rician
+  — the model a likelihood-ratio detector assumes, so that work would be tested
+  against its own premise.
+- **18 registry variants, zero promotions.** Every candidate so far trades. The
+  promotion rule has no notion of operating regime: `+kalman2` is blocked by
+  `noise4.0` 0.9032 vs 0.9888, both total failure.
 
 ---
 
@@ -623,7 +646,7 @@ IDecodeCore                    ── IQ in, characters out. The outer contract.
     ├── StagedCore             ── composes independently swappable stages
     │      IFrontEnd           ── EnvelopeFrontEnd (bandwidth parameterized)
     │      IDetector           ── SchmittDetector
-    │      ITiming             ── AdaptiveTimingStage (4 strategies)
+    │      ITiming             ── AdaptiveTimingStage (7 strategies)
     │      ISymbolDecoder      ── BeamSymbolDecoder
     │      + inline sequencing (pre-lock capture, retroDecode, flush, freeze)
     │
@@ -652,45 +675,27 @@ benchmark by quietly narrowing its filter.
 
 ### Registry
 
-`core_registry.h` is the single list; the config UI and the benchmark matrix both
-enumerate it. Adding a core or a stage combination is one entry.
+`core_registry.h` is the single list of benchmarkable configurations; the config
+UI and the benchmark matrix both enumerate it. Adding a core or a stage
+combination is one entry.
 
-| name | configuration | status |
-|---|---|---|
-| `legacy` | Schmitt + Kalman V1 + beam search | **production default** |
-| `legacy+kmeans` | K-means timing | worse on jitter, QRM, QRN |
-| `legacy+median` | median-split timing | worst overall |
-| `legacy+bimodal` | bimodal-histogram timing | best on handkeyed-25 |
-| `legacy+kalman2` | corrected dah gain + gated learning (§8) | better on 10/13 |
-| `legacy+log` | log-duration Kalman (§9) | best on 5, tied on 5 |
-| `legacy+logrobust` | log + Huberised update (§9) | refuted |
-| `legacy+bpf40` | 40/50 BPF, 64 Hz ENBW | breaks clean-25 WPM |
-| `legacy+bpf30` | 30/40 BPF, 48 Hz ENBW | best on noise3.0 |
-| `legacy+bpf20` | 20/30 BPF, 31 Hz ENBW | |
-
-The three original timing variants already existed in `timing.h` and had **never
-been benchmarked head-to-head across seeds**.
+**The table of variants and their measured status lives in `architecture.md`.**
+It is not duplicated here — this copy had already drifted to 10 rows against 18
+actual entries.
 
 **Promotion rule.** A variant becomes the default only when it is no worse on
 *every* profile. "Better on average" is not sufficient: a profile that decoded
 better before and worse after is a regression, not a trade. Losing variants are
-kept, not deleted — they are the comparison baseline for future cores.
+kept — they are the comparison baseline for future cores.
 
-### Running the benchmarks
+⚠ That rule has a known gap: it has no notion of operating regime, so a profile
+where the decoder is already useless carries the same veto as one where it
+works. `+kalman2` is blocked by `noise4.0` at 0.9032 vs 0.9888 — 90% against 99%
+character error, a regime nobody copies in. Unresolved.
 
-```bash
-cd decoder_modules/cw_decoder/tests/build && cmake .. && make -j8
-
-./cw_decoder_tests                       # full suite incl. 24-seed gates (~17s)
-./cw_decoder_tests "[characterize]" -s    # per-profile CER distribution
-./cw_decoder_tests "[matrix-timing]" -s   # timing strategies head-to-head
-./cw_decoder_tests "[matrix-bpf]"    -s   # front-end bandwidths
-./cw_decoder_tests "[matrix-all]"    -s   # every registry core (~2 min)
-```
-
-Matrix tests are tagged `[.]` (Catch2 hidden) so the always-on suite keeps the
-regression gates while the exploratory sweep stays opt-in. Run each suite **once**
-and post-process the saved output — do not re-run to extract different fields.
+**Commands: see `architecture.md` → Running the benchmarks.** Run each suite
+**once** and post-process the saved output — do not re-run to extract different
+fields.
 
 ### Refactor gate
 
@@ -898,9 +903,11 @@ Recorded because the pattern was consistent and is likely to repeat.
 | Huber separates "move x" from "teach R" | ❌ no effect on the blocker |
 | The detector holds the heavy-noise error (§9, by elimination) | ✅ confirmed by oracle ablation, and understated |
 | Detector and timing contribute about equally on hand-keyed | ❌ hand-keyed is almost entirely timing |
-| Schmitt asymmetry biases the dit/dah ratio (§2.3h) | ✅ +9.8% dit, predicted 7.65 ms vs measured 7.84 ms |
+| Schmitt asymmetry biases the dit/dah ratio (§2.3h) | ✅ the bias is real: +9.8% of a dit |
+| …and the threshold ratio gap is what causes it | ❌ accounts for 11%; instant-attack peak tracking accounts for 57% |
 | `clean-25` false detections are an alignment artifact | ❌ real, deterministic, and a distinct defect |
 | Removing spurious detector events improves CER | ❌ 17× fewer, CER unchanged, 3 profiles regressed |
+| Correcting the edge bias helps hand-keyed | ✅ 0.1579 → 0.0628, 67% of the headroom |
 
 Every correction came from measurement, not from re-reading the code. **Build the
 instrument before using it** — the multi-seed harness and the matrix each paid
@@ -1063,10 +1070,14 @@ explains why the timing interventions failed only on the noise profiles.
    ladder plus QSB and QRN, timing contributes nothing. The three failed timing
    interventions were not badly designed; they were aimed at a stage holding
    none of the error.
-2. **Hand-keyed is a timing problem, not a detector problem.** `+tim` alone
-   takes handkeyed-15 from 0.1579 to 0.0153 and `+det` adds nothing on top.
-   This *raises* the value of element-model work (`+kalman2`, `+log`), but aimed
-   at weighting and gap boundaries rather than noise robustness.
+2. **Hand-keyed is a timing problem, not a detector problem.**
+   ⚠ **AMENDED by §12.6 — this wording was too strong.** `+tim` alone does take
+   handkeyed-15 from 0.1579 to 0.0153 with `+det` adding nothing on top, and
+   that measurement stands. But sub-additivity describes the *combination*: a
+   perfect duration model masks detector error rather than proving the detector
+   holds none. A real detector fix (`legacy+peak`) reaches 0.0628 — **67% of the
+   total hand-keyed headroom, and equal to the oracle detector's own 0.0651** —
+   without touching timing.
 3. **`worstcase` requires both stages.** Either alone buys ~40%; both buy 87%.
    Phase 13 alone will not fix this profile.
 4. **Farnsworth is purely gap classification.** `+det` changes nothing
@@ -1095,18 +1106,13 @@ explains why the timing interventions failed only on the noise profiles.
   fidelity gaps. An oracle result on `worstcase` says nothing about real
   multipath, because the generator has none.
 
-### Running it
+### Instrument self-checks
 
-```bash
-./cw_decoder_tests "[oracle]" -s        # the ablation sweep (~16 s)
-./cw_decoder_tests "[oracle-self]"      # instrument self-checks (always on)
-```
-
-The self-checks are deliberately **not** hidden: they assert the oracle detector
-reproduces the generator's transitions exactly, that the recorded element model
-matches what the generator keys under weight bias and Farnsworth, and that a
-clean signal with both oracles decodes at CER 0. If any of those break, every
-headroom number above is measuring the harness.
+`[oracle-self]` runs in the always-on suite, not hidden behind `[.]`. It asserts
+that the oracle detector reproduces the generator's transitions exactly, that the
+recorded element model matches what the generator keys under weight bias and
+Farnsworth, and that a clean signal with both oracles decodes at CER 0. If any
+break, every headroom number above is measuring the harness.
 
 ## 12. Detector ground-truth metrics
 
@@ -1151,32 +1157,41 @@ biases the dit/dah ratio.
 
 Sweep cost: 3.7 s.
 
-### 12.1 §2.3(h) confirmed, with the mechanism verified quantitatively
+### 12.1 §2.3(h) confirmed — but the mechanism attributed here was wrong
 
 On a **noiseless** signal with zero false detections and zero misses, every ON is
-stretched by **9.80% of a dit** (7.84 ms). Pure bias, no noise involved.
+stretched by **9.80% of a dit** (7.84 ms). Pure bias, no noise involved. The
+existence of the bias is confirmed and is not in doubt.
 
-Predicted from the threshold geometry:
+> **✗ REFUTED — the mechanism originally recorded here.** This section
+> attributed the bias to the Schmitt threshold gap and reported the arithmetic
+> agreement below as confirmation:
+>
+> | term | value |
+> |---|---|
+> | post-lock matched filter `0.4 × dit` turns a step into a ramp | 32 ms |
+> | threshold gap `0.55 − 0.35` at high SNR | 0.20 |
+> | crossing separation on that ramp: `0.20 × 32` | 6.40 ms |
+> | keying envelope, one-pole τ = 5 ms: `τ·ln(0.35/0.45)` | 1.25 ms |
+> | predicted | 7.65 ms |
+> | measured | 7.84 ms |
+>
+> §12.6 falsified it directly. Removing the threshold gap entirely
+> (`EDGE_SYMMETRIC`, both ratios 0.45) should have eliminated the 6.40 ms term
+> and left ~1.75% of a dit. **Measured: 9.80% → 8.69%, i.e. 11% of the
+> predicted effect.** The agreement was a coincidence of magnitude.
+>
+> The dominant cause is instant-attack peak tracking (§12.6): removing that
+> alone takes the stretch to +4.24%, **57%** of the bias. Kept here because the
+> arithmetic is a good example of how convincing a wrong mechanism can look
+> when it lands on the right number.
 
-| term | value |
-|---|---|
-| post-lock matched filter `0.4 × dit` turns a step into a ramp | 32 ms |
-| threshold gap `0.55 − 0.35` at high SNR | 0.20 |
-| crossing separation on that ramp: `0.20 × 32` | 6.40 ms |
-| keying envelope, one-pole τ = 5 ms: `τ·ln(0.35/0.45)` | 1.25 ms |
-| **predicted** | **7.65 ms** |
-| **measured** | **7.84 ms** |
-
-**The bias is a constant time offset, not a proportional one** — set by edge
-width and threshold gap, both independent of element length. So a dit becomes
+**The bias is a constant time offset, not a proportional one** — so a dit becomes
 `dit + 7.8 ms` (×1.098) while a dah becomes `dah + 7.8 ms` (×1.033): the
 observed dah:dit ratio is **2.82, not 3.0**, and the element gap shrinks to
 0.90 dit. Every model in `timing.h` assumes exact 1:3 and 1:3:7 ratios and is
-being fed distorted ones.
-
-This is a candidate explanation for §11's "hand-keyed is a timing problem":
-`ClairvoyantTiming` fixes hand-keyed completely because it classifies against
-true durations and ignores what the detector reports. ⊘ Not yet tested — see §13.
+being fed distorted ones. That part stands — it depends only on the offset being
+constant, not on what causes it.
 
 ### 12.2 Matched-filter resize injects a dropout mid-element
 
@@ -1256,7 +1271,7 @@ obvious one is the wrong one:
 | `clean-25`, legacy → +mf | −93% | 0 (already 0) |
 
 **Deletions are what cost.** At `noise4.0` the miss rate is 1.384 per element —
-~70% of transitions never fire — and `del = 0.840` dominates. Phase 14 should
+~70% of transitions never fire — and `del = 0.840` dominates. Phase 16 should
 target **misses and edge bias, not false events**.
 
 One reservation: CER weights insertions and deletions equally, but §10 records
@@ -1266,107 +1281,191 @@ promotion rule is CER-based, so it stays a variant; if the product goal is
 spotting rather than transcription, this trade may be the right one. ⊘ No
 spotting-level metric exists to decide it.
 
-### Running it
+### 12.5 Removing the bias — `legacy+sym`, `legacy+edge`
 
-```bash
-./cw_decoder_tests "[detector-metrics]" -s   # the sweep (~4 s)
-./cw_decoder_tests "[mf-fix]"           -s   # legacy vs legacy+mf
-./cw_decoder_tests "[detector-diag]"    -s   # event locations, resize hypothesis
-./cw_decoder_tests "[detector-self]"         # instrument self-checks (always on)
-```
+Two routes with different costs. `EDGE_SYMMETRIC` collapses both thresholds to
+0.45, removing the ratio gap and the hysteresis with it. `EDGE_COMPENSATE` keeps
+the hysteresis and pulls the release edge earlier by the modelled stretch
+`(onRatio − offRatio) × 0.4 × ditEst`.
 
-The self-checks inject a known 37 ms constant latency and a known 8 ms edge
-asymmetry into synthetic transition lists and assert the scorer recovers them
-without inventing false detections. An earlier version of the diagnostic located
-spurious events at *raw* detected time without removing the group delay, which
-placed them "inside element gaps" and would have supported a wrong mechanism —
-the same class of error as the `ClairvoyantTiming` weight-bias bug in §10.
+| profile | ON stretch %dit | | | CER mean | | |
+|---|---|---|---|---|---|---|
+| | legacy | +sym | +edge | legacy | +sym | +edge |
+| clean-15wpm | +9.80 | +8.69 | +0.90 | 0.0000 | 0.0000 | 0.0000 |
+| clean-25wpm | +7.94 | +7.64 | −0.55 | 0.0000 | 0.0000 | 0.0000 |
+| handkeyed-15wpm | +6.96 | +6.16 | −2.23 | 0.1579 | 0.1667 | **0.1197** |
+| handkeyed-25wpm | +4.27 | +4.14 | −3.35 | 0.1309 | 0.1626 | **0.1197** |
+| qsb | +2.19 | +1.41 | −10.02 | 0.0117 | 0.0205 | **0.0088** |
+| qrm | +7.56 | +6.59 | −1.38 | 0.0100 | 0.0147 | **0.0018** |
+| qrn | +7.50 | +6.50 | −1.51 | 0.0029 | 0.0147 | 0.0029 |
+| worstcase | −2.42 | −7.42 | −17.42 | 0.6244 | **1.2283** | **0.5205** |
+| snr-noise1.0 | +3.97 | +2.66 | −9.08 | 0.0000 | 0.0106 | 0.0000 |
+| snr-noise2.0 | −2.00 | −4.08 | −17.48 | 0.0827 | 0.4137 | **0.1332** |
+| snr-noise3.0 | −8.79 | −15.67 | −18.87 | 0.8163 | 2.0335 | **0.9237** |
+| snr-noise4.0 | −15.78 | −16.82 | −22.46 | 0.9032 | 1.1338 | **0.8709** |
+
+**`+sym` is refuted twice over.** It barely moved the bias (§12.1) *and*
+removing the hysteresis is catastrophic at low SNR — `worstcase` 0.6244 →
+1.2283, `noise3.0` 0.8163 → 2.0335. Hysteresis is load-bearing.
+
+**`+edge` improves 6 profiles and regresses 2.** Not promoted. The regressions
+are diagnosable from the stretch column: at low SNR the thresholds widen to
+0.65/0.25, so the modelled correction grows to `0.40 × 0.4 × dit` = 16% of a dit
+while the real bias does not, and it **over-corrects to −17%**. The correction is
+scaled by a quantity §12.1 shows is not the cause.
+
+### 12.6 The real mechanism — `legacy+peak`
+
+`PEAK_INSTANT_ATTACK` sets `signalPeak = v` the moment `v` exceeds it. On a
+rising edge the threshold reference therefore tracks the signal upward and the
+threshold `noiseFloor + ratio × range` chases it; on the falling edge the
+reference holds, because decay is a 0.5 s exponential. That is an on/off
+asymmetry **independent of the threshold ratios** — which is exactly why `+sym`
+failed to remove the bias.
+
+`PEAK_PERCENTILE` references the threshold to the 90th percentile of the same
+subsampled window the noise floor already uses: lagged and stable by
+construction, so it cannot follow the sample being thresholded. Only the
+threshold reference changes — `signalPeak` still drives the impulse blanker and
+`getSNR` — so the variant isolates one mechanism.
+
+**Contribution to the ON stretch, clean-15wpm:**
+
+| removed | stretch | share of the 9.80% |
+|---|---|---|
+| nothing (`legacy`) | +9.80 | — |
+| threshold ratio gap (`+sym`) | +8.69 | **11%** |
+| instant attack (`+peak`) | +4.24 | **57%** |
+
+The remaining ~32% is unattributed — keying ramp, debounce and matched-filter
+shaping are the candidates. ⊘ Not separated.
+
+**CER:**
+
+| profile | legacy | +edge | **+peak** | oracle `+det` (§11) |
+|---|---|---|---|---|
+| clean-15 / clean-25 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| handkeyed-15wpm | 0.1579 | 0.1197 | **0.0628** | 0.0651 |
+| handkeyed-25wpm | 0.1309 | 0.1197 | **0.0898** | 0.0716 |
+| qsb | 0.0117 | 0.0088 | **0.5065** | 0.0000 |
+| qrm | 0.0100 | **0.0018** | 0.0070 | 0.0000 |
+| qrn | 0.0029 | 0.0029 | 0.0029 | 0.0000 |
+| worstcase | 0.6244 | **0.5205** | 0.6749 | 0.4149 |
+| snr-noise2.0 | 0.0827 | 0.1332 | **0.0276** | 0.0000 |
+| snr-noise3.0 | 0.8163 | 0.9237 | **0.7682** | 0.0000 |
+| snr-noise4.0 | 0.9032 | **0.8709** | 0.9278 | 0.0000 |
+
+**On handkeyed-15 the real detector scores 0.0628 against the oracle detector's
+0.0651** — a percentile reference reaches the perfect-detector bound on that
+profile. Largest single-change improvement measured in this investigation.
+
+**This corrects §11 finding 2.** "Hand-keyed is a timing problem, not a detector
+problem" was too strong. The oracle's sub-additivity was real, but it described
+the *combination*: a perfect duration model masks detector error, which is not
+the same as the detector holding none. `+peak` captures
+`(0.1579 − 0.0628) / (0.1579 − 0.0153)` = **67% of the total hand-keyed
+headroom** by changing the detector alone.
+
+**Not promoted — `qsb` regresses 43×** (0.0117 → 0.5065), plus `worstcase` and
+`noise4.0`. The cause is a timescale collision: the percentile window is ~2 s and
+`profileQSB` fades at 0.3 Hz (3.3 s period), so the reference remembers the loud
+half of the cycle and the threshold sits far too high through the null.
+
+**That defines the fix.** The reference must be slow relative to a keying edge
+(~32 ms) and fast relative to fading (~3300 ms). Those are two orders of
+magnitude apart. Instant attack and a 2 s percentile are the two extremes;
+an asymmetric tracker with an attack time constant of ~200–500 ms, keeping the
+0.5 s decay, sits in the gap and has not been tried.
+
+### Instrument self-checks
+
+`[detector-self]` injects a known 37 ms constant latency and a known 8 ms edge
+asymmetry into synthetic transition lists and asserts the scorer recovers both
+without inventing false detections.
+
+Needed because an earlier version of the diagnostic located spurious events at
+*raw* detected time without removing the group delay. That placed them "inside
+element gaps" and would have supported a wrong mechanism — the same class of
+error as the `ClairvoyantTiming` weight-bias bug in §10.
 
 ## 13. Next: the detector (planning)
 
-**Why here.** `+kalman2` and `+log` are both blocked on `noise3.0`/`noise4.0`,
-and §11 measured that the entire error on those profiles sits in the detector —
-a perfect duration model moves noise3.0 only 0.8163 → 0.6614, while a perfect
-detector takes it to zero. One piece of work unblocks both candidates.
+### Status
 
-**Scope correction from §11.** This phase addresses the AWGN/QSB/QRN family
-only. Hand-keyed profiles are a *timing* fault (`+tim` alone captures all of the
-available gain), Farnsworth is a *gap-classification* fault, and `worstcase`
-needs the detector and the duration model fixed together. Phase 13 is not a
-general fix.
+| item | state |
+|---|---|
+| Attribution — which stage holds the error | done (§11) |
+| Detector characterisation — which *kind* of error | done (§12) |
+| Matched-filter resize | measured, `legacy+mf`, not promoted (§12.3) |
+| Edge bias — ratio-gap route | refuted, `legacy+sym` (§12.5) |
+| Edge bias — event-time route | measured, `legacy+edge`, over-corrects at low SNR (§12.5) |
+| Edge bias — threshold-reference route | measured, `legacy+peak`, best result so far, breaks `qsb` (§12.6) |
+| **Threshold reference timescale** | **next** |
+| Likelihood-ratio detector | blocked on §14 (generator fidelity) |
 
-**What is wrong with `tone_detector.h` today** (§2.3):
+### Immediate next step — the threshold reference timescale
 
-* A fixed-fraction Schmitt threshold on a magnitude envelope, emitting a **hard
-  binary decision**. All soft information is destroyed before timing sees it.
-* Thresholds are fractions of `signalPeak − noiseFloor`, but the optimal decision
-  point in Rayleigh/Rice noise is not a fixed fraction — hence the ad-hoc
-  SNR-dependent table of 0.55/0.35, 0.60/0.30, 0.65/0.25.
-* On/off asymmetry (0.55 rising vs 0.35 falling) systematically stretches ON
-  durations and shortens the following gap. A bias, not noise — averaging does
-  not remove it, and it shifts both the dit/dah boundary and the gap centres.
-* `signalPeak` uses instant attack, so a single impulse during key-down raises
-  the thresholds for ~0.5 s (decay tau).
-* Mills 1977 (§5.3a): amplitude-based likelihoods are "worthless and even a
-  source of error" under multipath — and fading profiles are exactly where this
-  decoder fails.
+§12.6 localises the dominant cause of the edge bias to instant-attack peak
+tracking, and shows both extremes failing for opposite, understood reasons:
 
-**Candidate direction.** Replace the threshold with a likelihood ratio:
-key-up `|x| ~ Rayleigh(σ)`, key-down `|x| ~ Rice(A, σ)`, giving a per-sample
-log-likelihood ratio instead of a boolean. That is the statistically correct test
-and it preserves soft information. Open questions to settle during planning:
+| reference | attack timescale | fails on |
+|---|---|---|
+| `PEAK_INSTANT_ATTACK` | 0 ms | chases keying edges → +9.8% ON stretch |
+| `PEAK_PERCENTILE` | ~2000 ms | cannot follow QSB → `qsb` 0.0117 → 0.5065 |
 
-1. Does `IDetector` need to emit soft events, or does a hysteresis on the LLR
-   keep the existing `KeyEvent` interface? (The latter is a much smaller change
-   and should be measured first.)
+A keying edge is ~32 ms and a QSB cycle ~3300 ms — two orders of magnitude
+apart. An asymmetric tracker with an attack constant of ~200–500 ms, decay
+unchanged at 0.5 s, sits between them and has not been tried. Single-constant
+sweep; 0.095 CER measured at stake on hand-keyed alone.
+
+If it lands, re-derive or drop `+edge` rather than tuning it — its correction is
+scaled by `(onRatio − offRatio)`, which §12.1 shows is not the cause, and that is
+exactly why it over-corrects to −17% at low SNR.
+
+### After that — the likelihood-ratio detector
+
+§12.4 retargeted this. False events are cheap (cutting them 17× moved CER by
+nothing); **misses are what cost** — 1.384 per element at `noise4.0` with
+`del = 0.840`, a detector going silent rather than hallucinating. That is the
+genuine likelihood-ratio case: key-up `|x| ~ Rayleigh(σ)`, key-down
+`|x| ~ Rice(A, σ)`, a per-sample log-likelihood ratio instead of a boolean.
+
+Open questions:
+
+1. Does `IDetector` need to emit soft events, or does hysteresis on the LLR keep
+   the existing `KeyEvent` interface? The latter is far smaller — measure first.
 2. Where do `A` and `σ` come from — reuse `noiseFloor`/`signalPeak`, or estimate
-   them jointly (EM, as SparkGap does)?
-3. Does this subsume the impulse blanker and the minimum-element filter, both of
-   which are patches on the hard-decision output?
+   jointly (EM, as SparkGap does)?
+3. Does it subsume the impulse blanker and the minimum-element filter, both
+   patches on hard-decision output?
 
-**Measurement plan.** New `IDetector` implementation → new registry entries
-(`legacy+llr`, and `+llr+log` to test the combination). Existing gates must stay
-green with `legacy` untouched. Success criterion: `noise3.0`/`noise4.0` no worse
-than `legacy` while `+log`'s jitter advantage survives.
+**Prerequisite, not a follow-up.** The generator adds complex Gaussian noise, so
+its envelope is *exactly Rician* — the model an LLR detector assumes. On this
+suite alone such a detector is tested against its own premise and is guaranteed
+to look good. One consequence is already visible: the claim that an LLR
+"subsumes the impulse blanker" holds under Gaussian noise and fails under real
+impulsive HF noise, where a Rayleigh tail *over*-reacts to spikes. Real
+recordings and model-mismatch profiles (§14) come first.
 
-**Before committing to the LLR rewrite — a circularity to avoid.** The generator
-adds complex Gaussian noise to a tone, so the envelope is *exactly Rician* — the
-model an LLR detector assumes. Benchmarked on this suite alone, such a detector
-is being tested against its own generative assumptions and is guaranteed to look
-good. One consequence is already visible: the claim in §11's planning notes that
-an LLR "subsumes the impulse blanker" holds under Gaussian noise and fails under
-real impulsive HF noise, where a Rayleigh-tailed likelihood *over*-reacts to
-spikes. Real recordings and model-mismatch profiles (§13) are a prerequisite,
-not a follow-up.
+Measurement plan: new `IDetector` → registry entries `legacy+llr` and
+`+llr+log`. `legacy` untouched, gates green. Success criterion:
+`noise3.0`/`noise4.0` no worse than `legacy` while `+log`'s jitter advantage
+survives.
 
-**Retargeted by §12.** The obvious optimisation target turned out to be the wrong
-one: cutting false detections 17× moved CER by nothing and regressed three
-profiles. The two things that carry cost are:
+### Detector defects, with verdicts
 
-1. **Misses at low SNR** — 1.384 per element at `noise4.0`, `del = 0.840`. The
-   detector goes silent rather than hallucinating. That is a threshold-too-high
-   failure and is the genuine likelihood-ratio case.
-2. **Edge bias** — a constant +7.8 ms ON stretch that distorts the observed
-   dah:dit ratio to 2.82 and shrinks the element gap to 0.90 dit, on *every*
-   profile including clean.
+| defect | status |
+|---|---|
+| Hard binary decision destroys soft information before timing | open — the LLR case |
+| Thresholds are fixed fractions of `signalPeak − noiseFloor`; the optimal point in Rayleigh/Rice noise is not | open — the LLR case |
+| On/off ratio asymmetry stretches ON | measured: real but only 11% of the bias (§12.5) |
+| `signalPeak` instant attack | measured: **57% of the bias** (§12.6); also raises thresholds for ~0.5 s after an impulse ⊘ |
+| Matched-filter resize dropout | measured; fixing it does not reach CER (§12.3) |
+| Mills 1977: amplitude likelihoods "worthless and even a source of error" under multipath | 📎 second-hand, and **untestable here** — the generator has no multipath (§14) |
 
-**Cheapest experiment first, before any LLR work.** §12.1 shows the bias is a
-constant offset with a closed-form cause. Two candidate corrections, both a few
-lines:
-
-* symmetric thresholds (both 0.45) — removes the bias, costs hysteresis and
-  therefore noise immunity; measurable directly against `noise2.0`/`noise3.0`
-* subtract the estimated offset `(onRatio − offRatio) × filterWindow` from
-  element durations and add it to gaps — keeps the hysteresis
-
-If either recovers a meaningful part of hand-keyed CER, §11's "hand-keyed is a
-timing problem" is really "timing is fed a distorted ratio", and the element-model
-work (`+kalman2`, `+log`) has been compensating for a detector defect. Much
-cheaper than any rewrite, and directly testable.
-
-⊘ Note that §12.3 is a warning about this plan too: a detector metric improving
-does not imply CER improving. Both corrections must be judged on CER across all
-profiles, not on the ON-stretch number they are designed to move.
+⊘ §12.3 is the standing warning for all of the above: a detector metric improving
+does not imply CER improving. Judge on CER across every profile, never on the
+number the change was designed to move.
 
 ## 14. Open items
 

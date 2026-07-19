@@ -42,18 +42,36 @@ namespace cw {
 
     class SchmittDetector : public IDetector {
     public:
-        void init(float internalRate) override { det.init(internalRate); }
+        explicit SchmittDetector(EdgeBias bias = EDGE_RAW,
+                                 PeakTracker peak = PEAK_INSTANT_ATTACK)
+            : _bias(bias), _peak(peak) {}
+
+        void init(float internalRate) override {
+            det.init(internalRate);
+            det.setEdgeBias(_bias);
+            det.setPeakTracker(_peak);
+        }
         void reset() override { det.reset(); }
         std::vector<KeyEvent> process(const float* env, int count) override {
             return det.process(env, count);
         }
         float getSNR() const override { return det.getSNR(); }
         bool isKeyDown() const override { return det.isKeyDown(); }
-        const char* name() const override { return "schmitt"; }
         void preseed(float level, int count) override { det.preseed(level, count); }
+
+        const char* name() const override {
+            switch (_bias) {
+                case EDGE_RAW:        return "schmitt";
+                case EDGE_SYMMETRIC:  return "schmitt-sym";
+                case EDGE_COMPENSATE: return "schmitt-comp";
+            }
+            return "schmitt";
+        }
 
     private:
         ToneDetector det;
+        EdgeBias _bias;
+        PeakTracker _peak;
     };
 
     // ── Stage 3: timing ─────────────────────────────────────────

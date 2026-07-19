@@ -73,7 +73,7 @@ Channel  (owns post-processing, implements CharSink)
     │     ├── StagedCore ─── composes independently swappable stages
     │     │      IFrontEnd       EnvelopeFrontEnd (filter geometry parameterized)
     │     │      IDetector       SchmittDetector
-    │     │      ITiming         AdaptiveTimingStage (6 strategies)
+    │     │      ITiming         AdaptiveTimingStage (7 strategies)
     │     │      ISymbolDecoder  BeamSymbolDecoder
     │     │      + inline sequencing: pre-lock capture, retroDecode, flush, freeze
     │     │
@@ -123,6 +123,12 @@ stable. Unknown names fall back to `legacy` rather than failing.
 | `legacy+logrobust` | log timing + Huberised state update | ≈ `+log`, no blocker relief |
 | `legacy+mf` | matched filter preserved across resize | 17× fewer spurious events, CER unchanged, 3 profiles worse |
 | `legacy+mf+log` | preserved matched filter + log timing | combination baseline |
+| `legacy+sym` | symmetric Schmitt thresholds (0.45/0.45) | refuted: barely moves the bias, hysteresis loss is catastrophic |
+| `legacy+edge` | release edge corrected for modelled stretch | better on 6, over-corrects at low SNR |
+| `legacy+edge+log` | edge correction + log timing | comparison baseline |
+| `legacy+edge+mf` | edge correction + preserved matched filter | comparison baseline |
+| `legacy+peak` | threshold referenced to windowed 90th percentile | **best hand-keyed result measured** (0.1579 → 0.0628); `qsb` regresses 43× |
+| `legacy+peak+edge` | percentile reference + edge correction | combination baseline |
 | `legacy+bpf40` | 40/50 BPF, 64 Hz ENBW | breaks clean-25 WPM |
 | `legacy+bpf30` | 30/40 BPF, 48 Hz ENBW | best on noise3.0; worse on hand-keyed |
 | `legacy+bpf20` | 20/30 BPF, 31 Hz ENBW | |
@@ -643,7 +649,7 @@ decoder_modules/cw_decoder/
 │       ├── menu.h                    ImGui UI: channel list, controls, text display
 │       ├── morse_tree.h              beam search (8/12 paths, 127-node tree, prosigns)
 │       ├── text_buffer.h             thread-safe text + in-place replaceLastN
-│       ├── timing.h                  6 strategies: kmeans/median/bimodal/kalman/kalman2/log
+│       ├── timing.h                  7 strategies: kmeans/median/bimodal/kalman/kalman2/log/logrobust
 │       ├── tone_detector.h           Schmitt detector + impulse blanker
 │       ├── tone_scanner.h            FFT tone scanning + spectral averaging
 │       └── vocabulary.h              CW dictionary + callsign/Q-code/RST patterns
@@ -658,7 +664,7 @@ decoder_modules/cw_decoder/
     ├── test_matrix.cpp               core comparison sweep (on demand, tagged [.])
     ├── test_oracle.cpp               per-stage headroom ablation + instrument self-checks
     ├── test_detector_metrics.cpp     detector characterisation, diagnostics, mf-fix
-    └── test_*.cpp                    221 tests, 1608 assertions, ~17s
+    └── test_*.cpp                    221 tests, 1614 assertions, ~17s
 ```
 
 ## Running the benchmarks
@@ -675,6 +681,7 @@ cd decoder_modules/cw_decoder/tests/build && cmake .. && make -j8
 ./cw_decoder_tests "[detector-metrics]" -s # detector vs ground truth (~4s)
 ./cw_decoder_tests "[mf-fix]"        -s   # legacy vs legacy+mf
 ./cw_decoder_tests "[detector-diag]" -s   # spurious-event locations, resize test
+./cw_decoder_tests "[edge-fix]"      -s   # edge-bias and peak-reference variants
 ```
 
 The matrix and oracle sweeps are tagged `[.]` so Catch2 hides them from the
@@ -753,7 +760,8 @@ look like bugs and are load-bearing — do not "fix" them without re-measuring.
 | `morse_tree.h` | Unmapped tree nodes emit `'\0'`, silently dropping the character | Real defect, not yet addressed — deletions cost the same as substitutions in CER but give the operator no cue. ⊘ magnitude never measured. |
 | `timing.h` adaptive gap centres | Farnsworth char/word split fails at ratio 2.0 | Measured, not yet fixed: oracle ablation puts the entire `farnsworth-2.0` error here (0.0141 → 0.0000 with ideal gap boundaries, detector irrelevant). Isolated and cheap. |
 | `staged_core.h` matched filter | Ring buffer zeroed on window resize — dropout mid-element, 14 spurious transitions on a *noiseless* 25 WPM signal | Fixing it (`legacy+mf`) cuts spurious events 17× and CER does not follow: `qsb`, `worstcase` and `noise2.0` all regress. The artifacts fall below `minElementMs()` and are already discarded. |
-| `tone_detector.h` | Schmitt on/off asymmetry stretches every ON by ~9.8% of a dit | Measured on a clean signal; predicted 7.65 ms vs measured 7.84 ms. Distorts the observed dah:dit ratio to 2.82. Not yet corrected — removing it costs hysteresis. First target of Phase 14. |
+| `tone_detector.h` | Every ON is stretched by ~9.8% of a dit, distorting the observed dah:dit ratio to 2.82 | Confirmed on a noiseless signal. **Cause is instant-attack peak tracking (57%), not the threshold ratio gap (11%)** — an earlier attribution to the ratio gap was refuted by `legacy+sym`. Correcting it is worth 0.095 CER on hand-keyed; no variant yet avoids regressing `qsb`. |
+| `tone_detector.h` | `signalPeak` instant attack: the threshold reference chases the rising edge but holds on the falling one | The asymmetry above. `PEAK_PERCENTILE` removes it and reaches the oracle-detector bound on hand-keyed, but a ~2 s window cannot follow QSB. Fix is an attack constant between the two extremes. |
 
 ## Build
 

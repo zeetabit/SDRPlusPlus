@@ -11,6 +11,37 @@ namespace cw {
         int sampleOffset;
     };
 
+    // How to handle the Schmitt trigger's on/off threshold asymmetry.
+    //
+    // Key-down is declared on rising through onRatio but released only on
+    // falling through the lower offRatio, so on a ramp of width W the ON
+    // duration is stretched by (onRatio - offRatio) x W and the following gap
+    // shortened by the same amount. Measured on a noiseless signal: +9.8% of a
+    // dit, which makes the observed dah:dit ratio 2.82 instead of 3.0. Every
+    // model in timing.h assumes exact 1:3 and 1:3:7 ratios.
+    // See docs/decoder-investigation-2026-07.md §12.1.
+    enum EdgeBias {
+        EDGE_RAW,          // historical behaviour
+        EDGE_SYMMETRIC,    // on == off == 0.45: no bias, and no hysteresis
+        EDGE_COMPENSATE,   // keep hysteresis, correct the event time
+    };
+
+    // Where the threshold's reference level comes from.
+    //
+    // PEAK_INSTANT_ATTACK sets signalPeak = v the moment v exceeds it, so on a
+    // rising edge the reference tracks the signal upward and the threshold
+    // (noiseFloor + ratio x range) chases it. On the falling edge the reference
+    // holds, because decay is a 0.5 s exponential. That is an on/off asymmetry
+    // independent of the threshold ratios.
+    //
+    // Hypothesis under test: this, not the ratio gap, is what stretches ON.
+    // EDGE_SYMMETRIC removed the ratio gap entirely and cut the stretch by only
+    // 14% of what the ratio-gap model predicted (docs §12.1, §13).
+    enum PeakTracker {
+        PEAK_INSTANT_ATTACK,   // historical behaviour
+        PEAK_PERCENTILE,       // 90th percentile of the same subsampled window
+    };
+
     // Adaptive CW tone detector.
     //
     // Noise floor: subsampled percentile (every Mth sample into a small buffer,
@@ -73,6 +104,15 @@ namespace cw {
                         std::nth_element(noiseSorted.begin(), noiseSorted.begin() + idx, noiseSorted.begin() + n);
                         noiseFloor = noiseSorted[idx];
                         if (noiseFloor < 1e-12f) noiseFloor = 1e-12f;
+
+                        if (peakTracker == PEAK_PERCENTILE) {
+                            // Lagged and stable by construction: cannot follow
+                            // the sample currently being thresholded.
+                            int pidx = std::min(n - 1, (n * 9) / 10);
+                            std::nth_element(noiseSorted.begin(), noiseSorted.begin() + pidx,
+                                             noiseSorted.begin() + n);
+                            peakPercentile = noiseSorted[pidx];
+                        }
                     }
                 }
 
@@ -87,14 +127,26 @@ namespace cw {
                 // Subsampled percentile needs noiseWinCount >= 10 to be valid.
                 if (noiseWinCount < 10) { continue; }
 
-                float dynamicRange = signalPeak / noiseFloor;
+                // Only the threshold reference changes; signalPeak still drives
+                // the impulse blanker and getSNR, so the variant isolates one
+                // mechanism.
+                float peakRef = signalPeak;
+                if (peakTracker == PEAK_PERCENTILE && peakPercentile > noiseFloor) {
+                    peakRef = peakPercentile;
+                }
+
+                float dynamicRange = peakRef / noiseFloor;
                 if (dynamicRange < 1.8f) {
                     stableSamples = 0;
                     continue;
                 }
 
+                // All three historical pairs are centred on 0.45, so the
+                // symmetric variant collapses to that midpoint at every SNR.
                 float onRatio, offRatio;
-                if (dynamicRange > 10.0f) {
+                if (edgeBias == EDGE_SYMMETRIC) {
+                    onRatio = 0.45f; offRatio = 0.45f;
+                } else if (dynamicRange > 10.0f) {
                     onRatio = 0.55f; offRatio = 0.35f;
                 } else if (dynamicRange > 4.0f) {
                     onRatio = 0.60f; offRatio = 0.30f;
@@ -102,7 +154,7 @@ namespace cw {
                     onRatio = 0.65f; offRatio = 0.25f;
                 }
 
-                float range = signalPeak - noiseFloor;
+                float range = peakRef - noiseFloor;
                 float onThresh = noiseFloor + onRatio * range;
                 float offThresh = noiseFloor + offRatio * range;
 
@@ -119,7 +171,15 @@ namespace cw {
                 if (rawState != currentState) {
                     stableSamples++;
                     if (stableSamples >= debounceLen) {
-                        events.push_back({rawState, i});
+                        // Pull the release edge earlier by the modelled stretch.
+                        // StagedCore may hand this detector an offset outside
+                        // [0,count); it only ever adds it to a running sample
+                        // counter, so an out-of-range value is well defined.
+                        int off = i;
+                        if (edgeBias == EDGE_COMPENSATE && !rawState && estimatedDitSamples > 0) {
+                            off -= (int)((onRatio - offRatio) * edgeWidthFactor * estimatedDitSamples);
+                        }
+                        events.push_back({rawState, off});
                         currentState = rawState;
                         stableSamples = 0;
                         if (rawState) {
@@ -148,6 +208,9 @@ namespace cw {
         float getSignalPeak() const { return signalPeak; }
         bool isKeyDown() const { return currentState; }
 
+        void setEdgeBias(EdgeBias b) { edgeBias = b; }
+        void setPeakTracker(PeakTracker t) { peakTracker = t; }
+
         void preseed(float level, int count) {
             sampleCount = count;
             noiseFloor = std::max(level, 1e-12f);
@@ -172,6 +235,7 @@ namespace cw {
             subsampleCounter = 0;
             impulseHoldCount = 0;
             impulseHoldValue = 0.0f;
+            peakPercentile = 0.0f;
         }
 
     private:
@@ -209,6 +273,14 @@ namespace cw {
         long long lastTransition = 0;
         long long totalProcessed = 0;
         std::vector<float> onDurations;
+
+        EdgeBias edgeBias = EDGE_RAW;
+        PeakTracker peakTracker = PEAK_INSTANT_ATTACK;
+        float peakPercentile = 0.0f;
+        // Effective edge width as a fraction of the dit. Must track
+        // StagedCore::computeFilterWindow(), whose matched filter dominates the
+        // ramp the thresholds are crossing.
+        static constexpr float edgeWidthFactor = 0.4f;
 
         // Impulse blanker state
         static constexpr float impulseThreshold = 2.5f;  // relative to signalPeak

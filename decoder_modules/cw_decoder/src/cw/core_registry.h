@@ -17,10 +17,12 @@ namespace cw {
         inline std::unique_ptr<IDecodeCore> makeStaged(
                 TimingStrategy timing,
                 float bpfCutoff = 100.0f, float bpfTrans = 100.0f,
-                MatchedFilterResize mfResize = MF_RESET) {
+                MatchedFilterResize mfResize = MF_RESET,
+                EdgeBias edgeBias = EDGE_RAW,
+                PeakTracker peak = PEAK_INSTANT_ATTACK) {
             return std::make_unique<StagedCore>(
                 std::make_unique<EnvelopeFrontEnd>(bpfCutoff, bpfTrans),
-                std::make_unique<SchmittDetector>(),
+                std::make_unique<SchmittDetector>(edgeBias, peak),
                 std::make_unique<AdaptiveTimingStage>(timing),
                 std::make_unique<BeamSymbolDecoder>(),
                 mfResize);
@@ -67,6 +69,32 @@ namespace cw {
 
             {"legacy+mf+log", "Preserved matched filter + log-duration timing",
              []{ return detail::makeStaged(TIMING_LOG, 100.0f, 100.0f, MF_PRESERVE); }},
+
+            // ── Schmitt edge-bias corrections (docs §12.1, §13). The trigger
+            //    stretches every ON by ~9.8% of a dit, so timing sees a
+            //    dah:dit ratio of 2.82 rather than 3.0. Two ways to remove it,
+            //    trading hysteresis against event-time accuracy. ──
+            {"legacy+sym", "Symmetric Schmitt thresholds (0.45/0.45), no hysteresis",
+             []{ return detail::makeStaged(TIMING_KALMAN, 100.0f, 100.0f, MF_RESET, EDGE_SYMMETRIC); }},
+
+            {"legacy+edge", "Hysteresis kept, release edge corrected for the modelled stretch",
+             []{ return detail::makeStaged(TIMING_KALMAN, 100.0f, 100.0f, MF_RESET, EDGE_COMPENSATE); }},
+
+            {"legacy+edge+log", "Edge correction + log-duration timing",
+             []{ return detail::makeStaged(TIMING_LOG, 100.0f, 100.0f, MF_RESET, EDGE_COMPENSATE); }},
+
+            {"legacy+edge+mf", "Edge correction + preserved matched filter",
+             []{ return detail::makeStaged(TIMING_KALMAN, 100.0f, 100.0f, MF_PRESERVE, EDGE_COMPENSATE); }},
+
+            // ── Threshold reference level (docs §13). Instant-attack peak
+            //    tracking lets the rising threshold chase the signal while the
+            //    falling threshold holds — an on/off asymmetry independent of
+            //    the ratios, which is why +sym barely moved the ON stretch. ──
+            {"legacy+peak", "Threshold referenced to a windowed 90th percentile, not instant peak",
+             []{ return detail::makeStaged(TIMING_KALMAN, 100.0f, 100.0f, MF_RESET, EDGE_RAW, PEAK_PERCENTILE); }},
+
+            {"legacy+peak+edge", "Percentile peak + release-edge correction",
+             []{ return detail::makeStaged(TIMING_KALMAN, 100.0f, 100.0f, MF_RESET, EDGE_COMPENSATE, PEAK_PERCENTILE); }},
 
             // ── Front-end bandwidth variants. ENBW figures measured in
             //    docs/decoder-investigation-2026-07.md §4.1. ──

@@ -251,6 +251,47 @@ TEST_CASE("matched-filter resize fix: detector and CER", "[cw][.][mf-fix]") {
     printf("\n");
 }
 
+// Edge-bias correction: does removing the +9.8% ON stretch reach CER?
+//
+// Two routes with different costs. EDGE_SYMMETRIC removes the bias by
+// collapsing the thresholds to their midpoint, which also removes the
+// hysteresis. EDGE_COMPENSATE keeps the hysteresis and corrects the event time
+// instead. Both are reported against ON stretch (does the mechanism work) and
+// CER (does it matter) — §12.3 is the standing warning that the first does not
+// imply the second.
+TEST_CASE("edge-bias correction: mechanism and CER", "[cw][.][edge-fix]") {
+    constexpr int SEEDS = 24;
+
+    struct Variant { const char* label; const char* core; cw::EdgeBias bias; cw::PeakTracker peak; };
+    const Variant vs[] = {
+        {"legacy", "legacy",      cw::EDGE_RAW,        cw::PEAK_INSTANT_ATTACK},
+        {"+sym",   "legacy+sym",  cw::EDGE_SYMMETRIC,  cw::PEAK_INSTANT_ATTACK},
+        {"+edge",  "legacy+edge", cw::EDGE_COMPENSATE, cw::PEAK_INSTANT_ATTACK},
+        {"+peak",  "legacy+peak", cw::EDGE_RAW,        cw::PEAK_PERCENTILE},
+    };
+    constexpr int N = 4;
+
+    printf("\n%-18s %32s %36s\n", "", "ON stretch (%dit)", "CER mean");
+    printf("%-18s %7s %7s %7s %7s %8s %8s %8s %8s\n",
+           "profile", "legacy", "+sym", "+edge", "+peak",
+           "legacy", "+sym", "+edge", "+peak");
+    printf("%s\n", std::string(96, '-').c_str());
+
+    for (const auto& p : detectorProfiles()) {
+        float stretch[N], cer[N];
+        for (int v = 0; v < N; v++) {
+            stretch[v] = measureDetectorMulti(p.message, p.params, SEEDS, 1000,
+                                              cw::MF_RESET, vs[v].bias, vs[v].peak).mean.onStretchPct;
+            cer[v] = runCell(vs[v].core, p.name, p.message, p.params, SEEDS).cerMean;
+        }
+        printf("%-18s %+7.2f %+7.2f %+7.2f %+7.2f %8.4f %8.4f %8.4f %8.4f\n",
+               p.name, stretch[0], stretch[1], stretch[2], stretch[3],
+               cer[0], cer[1], cer[2], cer[3]);
+        CHECK(cer[0] >= 0.0f);
+    }
+    printf("\n");
+}
+
 // Instrument self-checks. If these break, every number above is measuring the
 // harness rather than the detector.
 TEST_CASE("detector scoring recovers a clean signal exactly", "[cw][detector-self]") {
