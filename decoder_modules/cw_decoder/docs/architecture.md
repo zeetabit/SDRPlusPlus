@@ -121,6 +121,8 @@ stable. Unknown names fall back to `legacy` rather than failing.
 | `legacy+kalman2` | corrected dah gain, confidence-gated learning | better on 10/13, blocked on noise4.0 |
 | `legacy+log` | log-duration Kalman (multiplicative jitter) | best on 5, blocked on noise3.0/4.0 |
 | `legacy+logrobust` | log timing + Huberised state update | ≈ `+log`, no blocker relief |
+| `legacy+mf` | matched filter preserved across resize | 17× fewer spurious events, CER unchanged, 3 profiles worse |
+| `legacy+mf+log` | preserved matched filter + log timing | combination baseline |
 | `legacy+bpf40` | 40/50 BPF, 64 Hz ENBW | breaks clean-25 WPM |
 | `legacy+bpf30` | 30/40 BPF, 48 Hz ENBW | best on noise3.0; worse on hand-keyed |
 | `legacy+bpf20` | 20/30 BPF, 31 Hz ENBW | |
@@ -203,7 +205,9 @@ Channel.process(count, complex_t* iq)
 │  Moving-average ring buffer filter:                                          │
 │    • Pre-lock:  window = 25 samples (25ms)                                   │
 │    • Post-lock: window = 0.4 × ditSamples (adapts to WPM)                   │
-│    • Ring buffer resets on window size change                                │
+│    • Ring buffer ZEROED on window size change — injects a dropout            │
+│      mid-element. Measured defect, deliberately retained; see the             │
+│      known-defects table and `legacy+mf`.                                     │
 │    • Smooths keying transitions, suppresses impulse noise                    │
 │                                                                              │
 │  Output: mfBuf[envCount]                                                     │
@@ -649,10 +653,12 @@ decoder_modules/cw_decoder/
     ├── cw_bench_stats.h              multi-seed stats + ins/del/sub alignment
     ├── cw_matrix.h                   core × profile matrix harness
     ├── cw_oracle.h                   test-only oracle stages (perfect detector / timing)
+    ├── cw_detector_score.h           detector vs ground truth: false/miss/bias/jitter
     ├── test_benchmark_multiseed.cpp  24-seed regression gates (always run)
     ├── test_matrix.cpp               core comparison sweep (on demand, tagged [.])
     ├── test_oracle.cpp               per-stage headroom ablation + instrument self-checks
-    └── test_*.cpp                    218 tests, 1594 assertions, ~17s
+    ├── test_detector_metrics.cpp     detector characterisation, diagnostics, mf-fix
+    └── test_*.cpp                    221 tests, 1608 assertions, ~17s
 ```
 
 ## Running the benchmarks
@@ -666,6 +672,9 @@ cd decoder_modules/cw_decoder/tests/build && cmake .. && make -j8
 ./cw_decoder_tests "[matrix-bpf]"    -s   # front-end bandwidths head-to-head
 ./cw_decoder_tests "[matrix-all]"    -s   # every registry core (~2 min)
 ./cw_decoder_tests "[oracle]"        -s   # per-stage headroom ablation (~16s)
+./cw_decoder_tests "[detector-metrics]" -s # detector vs ground truth (~4s)
+./cw_decoder_tests "[mf-fix]"        -s   # legacy vs legacy+mf
+./cw_decoder_tests "[detector-diag]" -s   # spurious-event locations, resize test
 ```
 
 The matrix and oracle sweeps are tagged `[.]` so Catch2 hides them from the
@@ -743,6 +752,8 @@ look like bugs and are load-bearing — do not "fix" them without re-measuring.
 | `timing.h` LogTiming | No outlier gate on learning | Three variants tried (3σ relative, ln2 absolute, Huber). All fail: learning from outliers inflates R, which widens acceptance and keeps the filter tolerant. Rejecting them makes it brittle (qrm 0.002 → 0.393). |
 | `morse_tree.h` | Unmapped tree nodes emit `'\0'`, silently dropping the character | Real defect, not yet addressed — deletions cost the same as substitutions in CER but give the operator no cue. ⊘ magnitude never measured. |
 | `timing.h` adaptive gap centres | Farnsworth char/word split fails at ratio 2.0 | Measured, not yet fixed: oracle ablation puts the entire `farnsworth-2.0` error here (0.0141 → 0.0000 with ideal gap boundaries, detector irrelevant). Isolated and cheap. |
+| `staged_core.h` matched filter | Ring buffer zeroed on window resize — dropout mid-element, 14 spurious transitions on a *noiseless* 25 WPM signal | Fixing it (`legacy+mf`) cuts spurious events 17× and CER does not follow: `qsb`, `worstcase` and `noise2.0` all regress. The artifacts fall below `minElementMs()` and are already discarded. |
+| `tone_detector.h` | Schmitt on/off asymmetry stretches every ON by ~9.8% of a dit | Measured on a clean signal; predicted 7.65 ms vs measured 7.84 ms. Distorts the observed dah:dit ratio to 2.82. Not yet corrected — removing it costs hysteresis. First target of Phase 14. |
 
 ## Build
 

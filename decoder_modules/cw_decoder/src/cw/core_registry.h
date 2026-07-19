@@ -16,12 +16,14 @@ namespace cw {
     namespace detail {
         inline std::unique_ptr<IDecodeCore> makeStaged(
                 TimingStrategy timing,
-                float bpfCutoff = 100.0f, float bpfTrans = 100.0f) {
+                float bpfCutoff = 100.0f, float bpfTrans = 100.0f,
+                MatchedFilterResize mfResize = MF_RESET) {
             return std::make_unique<StagedCore>(
                 std::make_unique<EnvelopeFrontEnd>(bpfCutoff, bpfTrans),
                 std::make_unique<SchmittDetector>(),
                 std::make_unique<AdaptiveTimingStage>(timing),
-                std::make_unique<BeamSymbolDecoder>());
+                std::make_unique<BeamSymbolDecoder>(),
+                mfResize);
         }
     }
 
@@ -55,6 +57,16 @@ namespace cw {
 
             {"legacy+logrobust", "Log timing + Huberised update (outliers teach R, not x)",
              []{ return detail::makeStaged(TIMING_LOG_ROBUST); }},
+
+            // ── Matched-filter resize transient (docs §12). Zeroing the ring
+            //    buffer on a window change injects a dropout mid-element; at
+            //    25 WPM this produced 14 spurious transitions on a *noiseless*
+            //    signal. MF_PRESERVE refills with the running mean instead. ──
+            {"legacy+mf", "Legacy pipeline, matched filter preserved across resize",
+             []{ return detail::makeStaged(TIMING_KALMAN, 100.0f, 100.0f, MF_PRESERVE); }},
+
+            {"legacy+mf+log", "Preserved matched filter + log-duration timing",
+             []{ return detail::makeStaged(TIMING_LOG, 100.0f, 100.0f, MF_PRESERVE); }},
 
             // ── Front-end bandwidth variants. ENBW figures measured in
             //    docs/decoder-investigation-2026-07.md §4.1. ──

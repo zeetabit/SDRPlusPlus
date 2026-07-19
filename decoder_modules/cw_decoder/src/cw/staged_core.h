@@ -16,14 +16,32 @@
 
 namespace cw {
 
+    // What happens to the matched filter when the window size changes.
+    //
+    // MF_RESET zeroes the ring buffer, so the output collapses to ~0 and takes
+    // W samples to refill — a transient in the middle of a live signal. The
+    // window is int(dit x 0.4), so ordinary drift of ditEst across an integer
+    // boundary triggers it. Measured on a noiseless 25 WPM signal: 356 detected
+    // transitions against 342 keyed, every spurious pair landing 3-13 ms into
+    // an element onset. See docs/decoder-investigation-2026-07.md §12.
+    //
+    // MF_PRESERVE refills with the running mean instead, so the output is
+    // continuous across the resize.
+    enum MatchedFilterResize {
+        MF_RESET,      // historical behaviour
+        MF_PRESERVE,
+    };
+
     class StagedCore : public IDecodeCore {
     public:
         StagedCore(std::unique_ptr<IFrontEnd> fe,
                    std::unique_ptr<IDetector> det,
                    std::unique_ptr<ITiming> tim,
-                   std::unique_ptr<ISymbolDecoder> sym)
+                   std::unique_ptr<ISymbolDecoder> sym,
+                   MatchedFilterResize mfResize = MF_RESET)
             : frontEnd(std::move(fe)), detector(std::move(det)),
-              timing(std::move(tim)), symbols(std::move(sym)) {}
+              timing(std::move(tim)), symbols(std::move(sym)),
+              mfResizePolicy(mfResize) {}
 
         int id = 0;
         bool debugLog = false;
@@ -226,9 +244,13 @@ namespace cw {
         void applyMatchedFilter(const float* in, float* out, int count) {
             int targetW = computeFilterWindow();
             if (targetW != mfCurrentW) {
-                mfRingBuf.assign(targetW, 0.0f);
+                float fill = 0.0f;
+                if (mfResizePolicy == MF_PRESERVE && mfCurrentW > 0) {
+                    fill = mfRingSum / mfCurrentW;   // current output level
+                }
+                mfRingBuf.assign(targetW, fill);
                 mfRingIdx = 0;
-                mfRingSum = 0;
+                mfRingSum = fill * targetW;
                 mfCurrentW = targetW;
             }
             for (int i = 0; i < count; i++) {
@@ -322,6 +344,7 @@ namespace cw {
         int mfRingIdx = 0;
         float mfRingSum = 0;
         int mfCurrentW = 0;
+        MatchedFilterResize mfResizePolicy = MF_RESET;
 
         struct SavedEvent { bool keyDown; float timeMs; };
         std::vector<SavedEvent> preLockEvents;

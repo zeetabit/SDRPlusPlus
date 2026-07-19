@@ -37,6 +37,8 @@
 > | Log-duration timing | `legacy+log` — best on 5 profiles, blocked on heavy noise |
 > | Huberised update | `legacy+logrobust` — refuted; localises blocker to the detector |
 > | Oracle ablation | per-stage headroom measured; "physical limit" claim refuted |
+> | Detector metrics | edge bias +9.8% dit confirmed; matched-filter resize defect found |
+> | Matched-filter fix | `legacy+mf` — 17× fewer spurious events, CER unchanged, not promoted |
 >
 > **Next:** the detector (`tone_detector.h`), for the AWGN/QSB/QRN family only.
 > Oracle ablation confirms 100% of the error on those profiles is at the
@@ -312,6 +314,9 @@ Key finding: **filter bandwidth is the dominant factor** — 35 Hz vs 68 Hz = 20
 | 26 | Callsign database (SCP/Master.dta) | N/A | N/A | Low | Candidate |
 | 27 | Bell 1977 trellis core | High | Very High | Very High | Future |
 | 28 | Oracle ablation harness | N/A | N/A | Low | **Done (2026-07)** |
+| 28b | Detector ground-truth metrics | N/A | N/A | Low | **Done (2026-07)** |
+| 28c | Matched-filter resize fix | Low | Low | Low | **Measured — variant `+mf`, not promoted** |
+| 28d | Schmitt edge-bias correction | High | Medium | Low | **Next** |
 | 29 | Adaptive gap centres rewrite (Farnsworth) | N/A | Low | Low | **Candidate — measured 0.0141 → 0** |
 | 30 | Real-recording benchmark + model-mismatch profiles | N/A | N/A | Medium | **Prerequisite for #24** |
 
@@ -434,7 +439,24 @@ It also corrected a conclusion three prior experiments had not surfaced, and its
 own first version reported an instrument defect as an irreducible floor — see
 §10 "An instrument's own defects look exactly like findings".
 
-### Phase 14: Detector (NEXT)
+### Phase 14: Detector Characterisation (DONE, 2026-07)
+Ground-truth scoring of the real detector: false/miss rates, edge bias, edge
+jitter, group delay. Full results `decoder-investigation-2026-07.md` §12.
+
+- **§2.3(h) confirmed quantitatively** — every ON is stretched +9.8% of a dit on
+  a *noiseless* signal, predicted 7.65 ms vs measured 7.84 ms. A constant offset,
+  so the observed dah:dit ratio is 2.82 rather than 3.0 and the element gap is
+  0.90 dit. Every model in `timing.h` assumes exact ratios.
+- **New defect found:** the matched filter zeroes its ring buffer on window
+  resize, injecting a dropout mid-element — 14 spurious transitions on a
+  noiseless 25 WPM signal, reproducible on every seed.
+- **Fixing it does not help.** `legacy+mf` cuts spurious events 17× and CER does
+  not follow; `qsb`, `worstcase` and `noise2.0` regress. Third instance of the
+  load-bearing-bug pattern.
+- **False-event rate is a poor CER proxy.** Deletions carry the cost — at
+  `noise4.0` the miss rate is 1.384 per element and `del = 0.840`.
+
+### Phase 15: Detector Correction (NEXT)
 Scoped by Phase 13 to the AWGN/QSB/QRN family. `tone_detector.h` applies a
 fixed-fraction Schmitt threshold to a magnitude envelope and emits a hard binary
 decision, discarding the soft information before timing ever sees it.

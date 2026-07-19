@@ -1,5 +1,9 @@
 #pragma once
 #include <dsp/types.h>
+// decode()/decodeAndScore() below construct a cw::Channel. Included here rather
+// than left to the includer: relying on include order made adding a new harness
+// fail with "no type named 'Channel'" from inside this file.
+#include <cw/channel.h>
 #include <cmath>
 #include <vector>
 #include <string>

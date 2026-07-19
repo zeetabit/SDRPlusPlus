@@ -898,6 +898,9 @@ Recorded because the pattern was consistent and is likely to repeat.
 | Huber separates "move x" from "teach R" | ❌ no effect on the blocker |
 | The detector holds the heavy-noise error (§9, by elimination) | ✅ confirmed by oracle ablation, and understated |
 | Detector and timing contribute about equally on hand-keyed | ❌ hand-keyed is almost entirely timing |
+| Schmitt asymmetry biases the dit/dah ratio (§2.3h) | ✅ +9.8% dit, predicted 7.65 ms vs measured 7.84 ms |
+| `clean-25` false detections are an alignment artifact | ❌ real, deterministic, and a distinct defect |
+| Removing spurious detector events improves CER | ❌ 17× fewer, CER unchanged, 3 profiles regressed |
 
 Every correction came from measurement, not from re-reading the code. **Build the
 instrument before using it** — the multi-seed harness and the matrix each paid
@@ -946,10 +949,20 @@ compensating for something real:
    rejecting them keeps the filter brittle and wrecks QRM/QRN.
 3. **The historical dah gain being 9× too small** made a mis-seeded `ditEst`
    unrecoverable — which is why the seed defect appeared to be the root cause.
+4. **The matched-filter resize transient** (§12.2) is unambiguously a bug and
+   produces spurious events on a *noiseless* signal — but the artifacts fall
+   below `minElementMs()` and are discarded, so removing them costs more than it
+   saves (§12.3).
 
 The general shape: a local "fix" removes a compensation without addressing the
 misspecification it was compensating for, and CER gets worse. Before correcting
 a formula, check what currently absorbs its error.
+
+**Corollary — a stage metric is not the objective.** §12 built a detector-level
+instrument and the metric it was designed to optimise (false-event rate) turned
+out to be nearly uncorrelated with CER: −93% on `clean-25` bought zero, −24% on
+`noise3.0` bought 1.4%. Deletions are what cost. Always close the loop back to
+CER before treating a stage metric as a target.
 
 ### Negative results localise faults
 
@@ -1095,7 +1108,181 @@ matches what the generator keys under weight bias and Farnsworth, and that a
 clean signal with both oracles decodes at CER 0. If any of those break, every
 headroom number above is measuring the harness.
 
-## 12. Next: the detector (planning)
+## 12. Detector ground-truth metrics
+
+§11 settled *attribution* — the detector holds all the AWGN-family error. This
+settles *kind*: hallucinating events, dropping them, or misplacing their edges
+need different fixes, and CER cannot tell them apart.
+
+### Method
+
+A `RecordingDetector` decorator captures what the real detector emits, in
+absolute time. A decorator rather than a reimplementation of `StagedCore`'s
+chain: the events must come through the real front end and matched filter, or
+the group delay and edge shaping being measured are not the ones the decoder
+sees.
+
+Alignment is the hard part. The front end's latency (57–85 ms measured) exceeds
+half a dit at 25 WPM, so naive windowed matching rejects correct pairs. So:
+cross-correlate the two key-state square waves to estimate the constant lag
+(robust to heavy false detection in a way that matching the first few edges is
+not), then DP-align the transition lists allowing insertions and deletions.
+
+**Bias is reported differentially** — `ON stretch = d_up − d_down`. The constant
+group delay cancels in the decode path, because timing consumes only differences
+between event times. Only the *asymmetry* between rising and falling edges
+biases the dit/dah ratio.
+
+### Results (24 seeds, MSG_FULL)
+
+| profile | false /elem | miss /elem | ON stretch %dit | edge sd %dit | delay ms |
+|---|---|---|---|---|---|
+| clean-15wpm | 0.000 | 0.000 | **+9.80** | 4.36 | 65.0 |
+| clean-25wpm | 0.088 | 0.006 | +7.94 | 3.62 | 57.0 |
+| handkeyed-15wpm | 0.027 | 0.006 | +6.96 | 6.38 | 70.1 |
+| handkeyed-25wpm | 0.149 | 0.008 | +4.27 | 5.16 | 57.8 |
+| qsb | 0.016 | 0.010 | +2.19 | 6.73 | 65.5 |
+| qrm | 0.012 | 0.004 | +7.56 | 3.94 | 64.9 |
+| qrn | 0.009 | 0.004 | +7.50 | 3.90 | 64.9 |
+| worstcase | 0.101 | 0.116 | −2.42 | 12.50 | 77.1 |
+| snr-noise2.0 | 0.037 | 0.019 | −2.00 | 9.66 | 66.4 |
+| snr-noise3.0 | 0.411 | 0.323 | −8.79 | 16.43 | 77.7 |
+| snr-noise4.0 | 0.429 | **1.384** | −15.78 | 17.84 | 84.8 |
+
+Sweep cost: 3.7 s.
+
+### 12.1 §2.3(h) confirmed, with the mechanism verified quantitatively
+
+On a **noiseless** signal with zero false detections and zero misses, every ON is
+stretched by **9.80% of a dit** (7.84 ms). Pure bias, no noise involved.
+
+Predicted from the threshold geometry:
+
+| term | value |
+|---|---|
+| post-lock matched filter `0.4 × dit` turns a step into a ramp | 32 ms |
+| threshold gap `0.55 − 0.35` at high SNR | 0.20 |
+| crossing separation on that ramp: `0.20 × 32` | 6.40 ms |
+| keying envelope, one-pole τ = 5 ms: `τ·ln(0.35/0.45)` | 1.25 ms |
+| **predicted** | **7.65 ms** |
+| **measured** | **7.84 ms** |
+
+**The bias is a constant time offset, not a proportional one** — set by edge
+width and threshold gap, both independent of element length. So a dit becomes
+`dit + 7.8 ms` (×1.098) while a dah becomes `dah + 7.8 ms` (×1.033): the
+observed dah:dit ratio is **2.82, not 3.0**, and the element gap shrinks to
+0.90 dit. Every model in `timing.h` assumes exact 1:3 and 1:3:7 ratios and is
+being fed distorted ones.
+
+This is a candidate explanation for §11's "hand-keyed is a timing problem":
+`ClairvoyantTiming` fixes hand-keyed completely because it classifies against
+true durations and ignores what the detector reports. ⊘ Not yet tested — see §13.
+
+### 12.2 Matched-filter resize injects a dropout mid-element
+
+`clean-25wpm` showed 0.088 false detections per element on a signal with **zero
+noise and zero jitter**. Because `profileClean` has neither, the signal is
+bit-identical across seeds — and the result reproduced exactly on every seed,
+ruling out an alignment artifact:
+
+| profile | truth transitions | detected |
+|---|---|---|
+| clean-15wpm | 342 | 342 |
+| clean-25wpm | 342 | **356** |
+| handkeyed-25wpm | 342 | 358–368 |
+
+**Mechanism.** `StagedCore::applyMatchedFilter` resizes on every block from
+`int(ditDuration × 0.4)` and zeroes the ring buffer on change, so the output
+collapses to ~0 and takes W samples to refill.
+
+**Proof of attribution.** Re-running the identical signal with `ClairvoyantTiming`
+— which reports a constant dit, so the window never changes — gives exactly 342
+transitions on both profiles. The detector's only input is `mfBuf`, and the only
+timing-dependent quantity feeding it is `computeFilterWindow()`; classification
+runs *downstream* of the detector on the same buffer and cannot reach it. So
+swapping the timing stage changed detector output ⟹ it did so through the window.
+There is no other path in the data flow.
+
+**Corroboration.** Every spurious event is an UP/DOWN pair 3 ms and 13 ms into an
+element onset — `ditEst` updates in `classifyOn()` at key-*up*, so a new window
+arrives between elements and the next onset hits a freshly-zeroed filter.
+
+**Why it is quiet at 15 WPM and loud at 25 WPM:** `0.4 × dit` is 32.0 at 15 WPM
+but 19.2 at 25 WPM, and the §12.1 bias inflates measured dits, pushing `ditEst`
+toward the boundary where `int()` flips. ⊘ The second half of that (that the bias
+is what pushes it across) is inference, not measured.
+
+### 12.3 Fixing it does not reach CER — `legacy+mf`
+
+`MF_PRESERVE` refills the ring buffer with the running mean instead of zero, so
+the output is continuous across a resize.
+
+| profile | false/elem | CER | ins / del |
+|---|---|---|---|
+| clean-25wpm | 0.088 → **0.006** | 0.0000 → 0.0000 | 0.000/0.000 → 0.000/0.000 |
+| handkeyed-25wpm | 0.149 → **0.009** | 0.1309 → 0.1256 | 0.001/0.057 → 0.000/**0.076** |
+| handkeyed-15wpm | 0.027 → 0.009 | 0.1579 → 0.1567 | 0.000/0.076 → 0.000/0.084 |
+| qsb | 0.016 → 0.016 | 0.0117 → **0.0147** | — |
+| worstcase | 0.101 → 0.071 | 0.6244 → **0.6467** | 0.035/0.213 → **0.021**/0.217 |
+| snr-noise2.0 | 0.037 → 0.028 | 0.0827 → **0.1045** | 0.001/0.046 → 0.001/0.058 |
+| snr-noise3.0 | 0.411 → 0.310 | 0.8163 → 0.8052 | 0.092/0.272 → **0.050**/0.281 |
+| snr-noise4.0 | 0.429 → 0.467 | 0.9032 → 0.8967 | 0.001/0.840 → 0.002/0.809 |
+
+**17× fewer spurious events, and CER does not follow.** Three profiles regress.
+**Not promoted.** Kept as `legacy+mf` and `legacy+mf+log`.
+
+The spurious events were already absorbed: `clean-25wpm` decoded at CER 0.0000
+*with* 14 spurious transitions. The dropout is ~10 ms and `minElementMs()`
+rejects anything below `0.3 × dit` = 14.4 ms at 25 WPM, so the split does not
+create an extra element — it truncates a real one. ⊘ That mechanism is inference
+from the geometry, but it is consistent with every column: insertions fall
+(`worstcase` 0.035 → 0.021, `noise3.0` 0.092 → 0.050) while deletions rise
+(`handkeyed-25` 0.057 → 0.076, `noise2.0` 0.046 → 0.058).
+
+**Third instance of the load-bearing-bug pattern** (§10). The pipeline has three
+absorbers downstream of the detector — min-element filter, beam search,
+corrector. A defect producing only sub-minimum-element artifacts is invisible to
+CER by construction, and removing it takes away a perturbation the timing model
+had adapted to.
+
+### 12.4 The planning consequence: false-event rate is a poor CER proxy
+
+This instrument was built to identify an optimisation target. It found that the
+obvious one is the wrong one:
+
+| change | false rate | CER |
+|---|---|---|
+| `noise3.0`, legacy → +mf | −24% | −1.4% |
+| `clean-25`, legacy → +mf | −93% | 0 (already 0) |
+
+**Deletions are what cost.** At `noise4.0` the miss rate is 1.384 per element —
+~70% of transitions never fire — and `del = 0.840` dominates. Phase 14 should
+target **misses and edge bias, not false events**.
+
+One reservation: CER weights insertions and deletions equally, but §10 records
+the skimmer argument that a false spot costs more than a missed one. By *that*
+criterion `legacy+mf` is an improvement — insertions fall on every profile. The
+promotion rule is CER-based, so it stays a variant; if the product goal is
+spotting rather than transcription, this trade may be the right one. ⊘ No
+spotting-level metric exists to decide it.
+
+### Running it
+
+```bash
+./cw_decoder_tests "[detector-metrics]" -s   # the sweep (~4 s)
+./cw_decoder_tests "[mf-fix]"           -s   # legacy vs legacy+mf
+./cw_decoder_tests "[detector-diag]"    -s   # event locations, resize hypothesis
+./cw_decoder_tests "[detector-self]"         # instrument self-checks (always on)
+```
+
+The self-checks inject a known 37 ms constant latency and a known 8 ms edge
+asymmetry into synthetic transition lists and assert the scorer recovers them
+without inventing false detections. An earlier version of the diagnostic located
+spurious events at *raw* detected time without removing the group delay, which
+placed them "inside element gaps" and would have supported a wrong mechanism —
+the same class of error as the `ClairvoyantTiming` weight-bias bug in §10.
+
+## 13. Next: the detector (planning)
 
 **Why here.** `+kalman2` and `+log` are both blocked on `noise3.0`/`noise4.0`,
 and §11 measured that the entire error on those profiles sits in the detector —
@@ -1152,15 +1339,36 @@ real impulsive HF noise, where a Rayleigh-tailed likelihood *over*-reacts to
 spikes. Real recordings and model-mismatch profiles (§13) are a prerequisite,
 not a follow-up.
 
-**Immediate next step: detector ground-truth metrics.** Attribution is settled;
-the open question is *which kind* of detector error dominates. Using the same
-ground truth as §11, per profile: false key-down rate, missed elements, edge
-timing bias, edge jitter σ. Bias must be reported **differentially**
-(ON stretch = onDelay − offDelay) — the front end's constant group delay cancels
-in the decode path but not in edge scoring, and the differential is the quantity
-§2.3(h) predicts.
+**Retargeted by §12.** The obvious optimisation target turned out to be the wrong
+one: cutting false detections 17× moved CER by nothing and regressed three
+profiles. The two things that carry cost are:
 
-## 13. Open items
+1. **Misses at low SNR** — 1.384 per element at `noise4.0`, `del = 0.840`. The
+   detector goes silent rather than hallucinating. That is a threshold-too-high
+   failure and is the genuine likelihood-ratio case.
+2. **Edge bias** — a constant +7.8 ms ON stretch that distorts the observed
+   dah:dit ratio to 2.82 and shrinks the element gap to 0.90 dit, on *every*
+   profile including clean.
+
+**Cheapest experiment first, before any LLR work.** §12.1 shows the bias is a
+constant offset with a closed-form cause. Two candidate corrections, both a few
+lines:
+
+* symmetric thresholds (both 0.45) — removes the bias, costs hysteresis and
+  therefore noise immunity; measurable directly against `noise2.0`/`noise3.0`
+* subtract the estimated offset `(onRatio − offRatio) × filterWindow` from
+  element durations and add it to gaps — keeps the hysteresis
+
+If either recovers a meaningful part of hand-keyed CER, §11's "hand-keyed is a
+timing problem" is really "timing is fed a distorted ratio", and the element-model
+work (`+kalman2`, `+log`) has been compensating for a detector defect. Much
+cheaper than any rewrite, and directly testable.
+
+⊘ Note that §12.3 is a warning about this plan too: a detector metric improving
+does not imply CER improving. Both corrections must be judged on CER across all
+profiles, not on the ON-stretch number they are designed to move.
+
+## 14. Open items
 
 - Whether fixing the Kalman defects changes the QSB verdict.
 - Whether `worstCase` 0.581 → 0.364 under a narrower BPF survives 24-seed
