@@ -1,8 +1,10 @@
 #include <imgui.h>
 #include <module.h>
+#include <module_manifest.h>
 #include <gui/gui.h>
 #include <gui/smgui.h>
 #include <signal_path/signal_path.h>
+#include <signal_path/isource.h>
 #include <core.h>
 #include <utils/optionlist.h>
 #include "kcsdr.h"
@@ -16,11 +18,28 @@ SDRPP_MOD_INFO{
     /* Max instances    */ -1
 };
 
+SDRPP_MOD_INFO_V2{
+    "kcsdr_source", "KCSDR Source Module", "Ryzerth", 0, 1, 0, -1,
+    SDRPP_API_VERSION, MOD_CAP_SOURCE, 0, nullptr,
+    R"({})",
+    "kcsdr_config.json"
+};
+
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
-class KCSDRSourceModule : public ModuleManager::Instance {
+class KCSDRSourceModule : public ModuleManager::Instance, public ISource {
 public:
-    KCSDRSourceModule(std::string name) {
+    // ISource overrides. Stubs for now; bodies migrate in T6-T9 as their
+    // respective tests turn red.
+    dsp::stream<dsp::complex_t>* getStream() override { return &stream; }
+    void onSelect() override {}
+    void onDeselect() override {}
+    void start() override {}
+    void stop() override {}
+    void tune(double freq) override { this->freq = freq; }
+    void drawMenu() override {}
+
+    KCSDRSourceModule(std::string name, ModuleConfig* /*cfg*/) {
         this->name = name;
 
         sampleRate = 2000000.0;
@@ -48,11 +67,11 @@ public:
         // Select first (TODO: Select from config)
         select("");
 
-        sigpath::sourceManager.registerSource("KCSDR", &handler);
+        sigpath::sourceManager.registerSource("KCSDR", static_cast<ISource*>(this));
     }
 
     ~KCSDRSourceModule() {
-        
+        sigpath::sourceManager.unregisterSource("KCSDR");
     }
 
     void postInit() {}
@@ -311,11 +330,9 @@ MOD_EXPORT void _INIT_() {
     // Nothing here
 }
 
-MOD_EXPORT ModuleManager::Instance* _CREATE_INSTANCE_(std::string name) {
-    return new KCSDRSourceModule(name);
-}
+SDRPP_CREATE_INSTANCE_V2(KCSDRSourceModule)
 
-MOD_EXPORT void _DELETE_INSTANCE_(void* instance) {
+MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
     delete (KCSDRSourceModule*)instance;
 }
 
