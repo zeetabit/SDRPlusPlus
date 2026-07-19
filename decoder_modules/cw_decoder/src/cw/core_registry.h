@@ -27,6 +27,18 @@ namespace cw {
                 std::make_unique<BeamSymbolDecoder>(),
                 mfResize);
         }
+
+        // Dual-window peak reference has its own factory: the parameters are
+        // specific to that estimator and would bloat makeStaged for every
+        // other variant.
+        inline std::unique_ptr<IDecodeCore> makeDualPeak(float shortMs, float thresh, int persist) {
+            return std::make_unique<StagedCore>(
+                std::make_unique<EnvelopeFrontEnd>(),
+                std::make_unique<SchmittDetector>(EDGE_RAW, PEAK_DUAL_WINDOW,
+                                                  300.0f, shortMs, thresh, persist),
+                std::make_unique<AdaptiveTimingStage>(TIMING_KALMAN),
+                std::make_unique<BeamSymbolDecoder>());
+        }
     }
 
     inline const std::vector<CoreSpec>& coreRegistry() {
@@ -95,6 +107,17 @@ namespace cw {
 
             {"legacy+peak+edge", "Percentile peak + release-edge correction",
              []{ return detail::makeStaged(TIMING_KALMAN, 100.0f, 100.0f, MF_RESET, EDGE_COMPENSATE, PEAK_PERCENTILE); }},
+
+            // ── Dual-window peak reference (docs §13). Short and long
+            //    percentile windows run concurrently; sustained disagreement
+            //    between them is the fade detector. Two trade points kept:
+            //    the quiet one is best overall, the eager one is best on
+            //    hand-keyed. Neither dominates — see §13.5. ──
+            {"legacy+peakdual", "Dual-window peak reference, 500 ms short window",
+             []{ return detail::makeDualPeak(500.0f, 0.05f, 1); }},
+
+            {"legacy+peakdual16", "Dual-window peak reference, 250 ms short + 16-sample persistence",
+             []{ return detail::makeDualPeak(250.0f, 0.05f, 16); }},
 
             // ── Front-end bandwidth variants. ENBW figures measured in
             //    docs/decoder-investigation-2026-07.md §4.1. ──

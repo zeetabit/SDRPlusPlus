@@ -41,8 +41,9 @@
 > | Matched-filter fix | `legacy+mf` — 17× fewer spurious events, CER unchanged, not promoted |
 > | Edge-bias correction | `legacy+edge` — better on 6 profiles, over-corrects at low SNR |
 > | Peak-reference fix | `legacy+peak` — hand-keyed 0.1579 → 0.0628, but `qsb` regresses 43× |
+> | Threshold reference (Phase 16) | 4 experiments; `+peakdual` 7 better / 2 worse; no promotion |
 >
-> **Next:** the detector's threshold reference timescale (Phase 16). Oracle
+> **Next:** a transition-gated peak tracker (Phase 17). Oracle
 > ablation confirms 100% of the AWGN/QSB/QRN error is at the detector, and
 > Phase 15 measured that the detector *also* holds 67% of the hand-keyed
 > headroom — an earlier reading of hand-keyed as a pure timing fault was too
@@ -322,7 +323,10 @@ Key finding: **filter bandwidth is the dominant factor** — 35 Hz vs 68 Hz = 20
 | 28d | Schmitt edge-bias correction | High | Medium | Low | **Measured — variant `+edge`, not promoted** |
 | 28e | Symmetric Schmitt thresholds | N/A | N/A | Low | **Refuted (2026-07)** |
 | 28f | Percentile threshold reference | High | High | Low | **Measured — variant `+peak`, not promoted** |
-| 28g | Attack-constant sweep for the peak reference | High | High | Low | **Next** |
+| 28g | Attack-constant sweep for the peak reference | N/A | N/A | Low | **Refuted (2026-07)** |
+| 28h | Percentile window length sweep | High | Medium | Low | **Measured (2026-07)** |
+| 28i | Dual-window peak reference | High | Medium | Low | **Measured — `+peakdual`, not promoted** |
+| 28j | Transition-gated instant-attack peak | High | Medium | Low | **Next** |
 | 29 | Adaptive gap centres rewrite (Farnsworth) | N/A | Low | Low | **Candidate — measured 0.0141 → 0** |
 | 30 | Real-recording benchmark + model-mismatch profiles | N/A | N/A | Medium | **Prerequisite for #24** |
 
@@ -479,11 +483,29 @@ Full results `decoder-investigation-2026-07.md` §12.5–12.6.
   `+edge` over-corrects at low SNR because it is scaled by the ratio gap, which
   is not the cause; `+sym` is catastrophic — hysteresis is load-bearing.
 
-### Phase 16: Threshold Reference Timescale (NEXT)
-A keying edge is ~32 ms; a QSB cycle is ~3300 ms. Instant attack (0 ms) chases
-edges; a 2 s percentile cannot follow fading. An asymmetric tracker with an
-attack constant of ~200–500 ms sits between the two and has not been tried.
-Single-constant sweep, with a measured 0.095 CER at stake on hand-keyed alone.
+### Phase 16: Threshold Reference (DONE, 2026-07 — no promotion)
+Four experiments. Full results `decoder-investigation-2026-07.md` §13.
+
+- **The timescale framing was refuted.** An asymmetric EMA with a slow attack is
+  not a peak tracker — it converges to the *mean* envelope. ON stretch rises
+  monotonically with the attack constant (+9.80 → +36.53% of a dit); clean
+  15 WPM, perfect everywhere else, breaks entirely at 800 ms.
+- **The property that matters is element-independence, not timescale.** A
+  percentile window spans many key cycles; an EMA of any constant varies within
+  the element.
+- **Window length is the right knob and its mechanism holds** — QSB improves
+  monotonically as the window shortens, 0.5070 → 0.0194.
+- **But window length trades tracking against variance.** Short windows follow
+  fading, long windows estimate precisely (~1/N). No single length serves both.
+- **Dual windows make it adaptive** and fix QSB (0.0088, better than legacy),
+  7 profiles better — but cannot cleanly separate a fade from estimator noise.
+- **No promotion.** Two trade points kept: `legacy+peakdual`, `legacy+peakdual16`.
+
+### Phase 17: Transition-Gated Peak (NEXT)
+Instant attack's only defect is chasing the rising edge; its fade tracking is the
+best measured. Freeze the peak update while the key state is unstable and let it
+track instantly otherwise — keeping zero-lag fade following while removing
+edge-chasing, instead of trading one for the other.
 Scoped by Phase 13 to the AWGN/QSB/QRN family. `tone_detector.h` applies a
 fixed-fraction Schmitt threshold to a magnitude envelope and emits a hard binary
 decision, discarding the soft information before timing ever sees it.

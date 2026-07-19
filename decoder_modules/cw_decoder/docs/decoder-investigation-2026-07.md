@@ -53,13 +53,13 @@ codebase has roughly even odds.**
 
 ### What is open
 
-- **Threshold reference timescale (§13).** Instant attack chases 32 ms keying
-  edges; a 2 s percentile cannot follow a 3.3 s fade. Two orders of magnitude
-  unexplored, one constant, 0.095 CER at stake on hand-keyed alone.
+- **The threshold reference (§13).** Four experiments produced four distinct
+  trade points and no dominating one: within-element stability and fade
+  tracking are in direct opposition for windowed estimators.
 - **Farnsworth gap centres.** The only measured win with *no* identified cost,
   still untouched.
 - **Generator fidelity is unvalidated** and every number here is conditional on
-  it (§14). It has no multipath, and its AWGN makes the envelope exactly Rician
+  it (§15). It has no multipath, and its AWGN makes the envelope exactly Rician
   — the model a likelihood-ratio detector assumes, so that work would be tested
   against its own premise.
 - **18 registry variants, zero promotions.** Every candidate so far trades. The
@@ -908,6 +908,10 @@ Recorded because the pattern was consistent and is likely to repeat.
 | `clean-25` false detections are an alignment artifact | ❌ real, deterministic, and a distinct defect |
 | Removing spurious detector events improves CER | ❌ 17× fewer, CER unchanged, 3 profiles regressed |
 | Correcting the edge bias helps hand-keyed | ✅ 0.1579 → 0.0628, 67% of the headroom |
+| A slow-attack peak tracker sits between edge and fade timescales | ❌ stretch rises monotonically; a slow EMA tracks the *mean*, not the peak |
+| Shortening the percentile window fixes QSB | ✅ 0.5070 → 0.0194, monotone |
+| …and costs nothing elsewhere | ❌ estimator variance breaks stationary profiles |
+| Dual windows resolve the trade | ⚠ partly — QSB fixed (0.0088), 7 better / 2 worse, still not promotable |
 
 Every correction came from measurement, not from re-reading the code. **Build the
 instrument before using it** — the multi-seed harness and the matrix each paid
@@ -1388,7 +1392,161 @@ Needed because an earlier version of the diagnostic located spurious events at
 element gaps" and would have supported a wrong mechanism — the same class of
 error as the `ClairvoyantTiming` weight-bias bug in §10.
 
-## 13. Next: the detector (planning)
+## 13. Phase 16 — the threshold reference
+
+§12.6 localised the dominant cause of the +9.8% ON stretch to instant-attack
+peak tracking. This phase tried to remove it. Four experiments, two refuted
+hypotheses, one confirmed mechanism, and **no promotable variant** — but the
+trade is now fully characterised rather than guessed.
+
+### 13.1 Attack constant — ✗ REFUTED
+
+Hypothesis: the reference should be slow relative to a ~32 ms keying edge and
+fast relative to a ~3300 ms fade. Two orders of magnitude apart, so an
+asymmetric EMA with an attack constant in between should work.
+
+ON stretch, clean-15wpm, noiseless:
+
+| reference | instant | 50 | 100 | 200 | 300 | 500 | 800 | 1200 ms | percentile |
+|---|---|---|---|---|---|---|---|---|---|
+| stretch %dit | +9.80 | +10.90 | +12.59 | +16.41 | +19.68 | +25.28 | +30.51 | +36.53 | **+4.24** |
+
+**Monotonically worse, with no interior optimum.** Hand-keyed degrades 0.1579 →
+0.6209 and clean 15 WPM — perfect at every other setting in this investigation —
+breaks entirely at 800 ms.
+
+**Why the framing was wrong.** An asymmetric EMA with a slow attack is not a
+peak tracker with an adjustable response time; it converges to the **mean**
+envelope, ~0.5A for 50%-duty CW. The threshold becomes
+`noiseFloor + 0.55 × 0.5A` ≈ 0.275A, crossed very early on the rise and released
+very late on the fall. At 1200 ms there is no peak behaviour left at all.
+
+**What actually matters is element-independence, not timescale.** A percentile
+window spans many key cycles, so its estimate does not depend on where within an
+element the current sample sits. An EMA of *any* constant varies within the
+element: fast ones chase the edge, slow ones sag toward the duty-cycle mean.
+That is why the sweep has no interior optimum.
+
+### 13.2 Percentile window length — mechanism confirmed, second effect found
+
+The window was ~2000 ms against a 3300 ms QSB cycle, which §12.6 identified as
+why `+peak` broke on that profile. Shortening it:
+
+| profile | legacy | 250 | 500 | 750 | 1000 | 1500 | 2000 | 3000 |
+|---|---|---|---|---|---|---|---|---|
+| handkeyed-15wpm | 0.1579 | 0.1092 | 0.0951 | 0.0933 | 0.0792 | 0.0810 | **0.0628** | 0.0657 |
+| **qsb** | 0.0117 | **0.0194** | 0.1250 | 0.3809 | 0.4613 | 0.4971 | 0.5065 | 0.5070 |
+| worstcase | 0.6244 | **0.4630** | 0.5957 | 0.6761 | 0.6901 | 0.6825 | 0.6749 | 0.6989 |
+| snr-noise1.0 | 0.0000 | 0.0123 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| snr-noise3.0 | 0.8163 | 0.9748 | 0.7958 | 0.8022 | 0.8075 | 0.8275 | **0.7682** | 0.8257 |
+
+**QSB improves monotonically as the window shortens — 0.5070 → 0.0194, a 26×
+recovery.** The prediction held. `worstcase` at 250 ms reaches 0.4630, the best
+any single change has produced on that profile.
+
+**But a second effect appears.** `snr-noise1.0` (0.0000 → 0.0123) and
+`snr-noise3.0` (0.7682 → 0.9748) have a *stationary* level with nothing to
+track, and a 250 ms window holds only 31 subsampled entries. Window length
+trades two things that had been treated as one: short windows follow amplitude
+change, long windows estimate it precisely (variance ~ 1/N). No single length
+serves both a stationary and a fading signal.
+
+### 13.3 Dual window — the trade made adaptive
+
+Run 250 ms and 2000 ms concurrently; switch to the short estimate when they
+disagree by more than a relative threshold. **The disagreement is itself the
+fade detector** — no new signal model.
+
+| profile | legacy | t=0.05 | t=0.10 | t=0.25 | t=0.40 |
+|---|---|---|---|---|---|
+| handkeyed-15wpm | 0.1579 | 0.1062 | 0.1068 | 0.1056 | 0.1050 |
+| **qsb** | 0.0117 | **0.0088** | 0.0094 | 0.0252 | 0.1426 |
+| worstcase | 0.6244 | **0.4730** | 0.5070 | 0.5381 | 0.6831 |
+| snr-noise1.0 | 0.0000 | 0.0123 | 0.0123 | 0.0123 | 0.0123 |
+| snr-noise3.0 | 0.8163 | 0.9325 | 0.9536 | 0.9266 | 0.8392 |
+
+**QSB reaches 0.0088 — better than legacy**, and better on 7 profiles overall.
+First variant in this line to improve QSB at all.
+
+Remaining regressions are identical to the `250 only` column: the short window's
+own numbers leaking through on stationary profiles. **The switch was firing on
+estimator noise, not on fading.** A 250 ms window has relative standard error
+≈ 1/√31 ≈ 18% against a 5% threshold, so on a stationary signal the two windows
+disagree *by construction*. Raising the threshold does not fix it: at t=0.40 the
+switch stops firing on noise (noise3.0 → 0.8392) but also stops firing on real
+fades (qsb → 0.1426).
+
+### 13.4 Short-window length × persistence
+
+Two independent ways to make estimator noise smaller than the fade it must
+detect: lengthen the short window (lower variance), or require N consecutive
+disagreements (estimator noise is uncorrelated between subsamples, a fade is
+not).
+
+| profile | legacy | 250/1 | 250/16 | **500/1** | 500/16 |
+|---|---|---|---|---|---|
+| handkeyed-15wpm | 0.1579 | 0.1068 | **0.0640** | 0.0951 | 0.0945 |
+| handkeyed-25wpm | 0.1309 | 0.0869 | 0.0998 | 0.0974 | 0.1004 |
+| **qsb** | **0.0117** | **0.0088** | 0.0223 | 0.1215 | 0.1309 |
+| qrm | 0.0100 | 0.0070 | 0.0070 | 0.0070 | 0.0070 |
+| qrn | 0.0029 | 0.0059 | 0.0029 | 0.0035 | 0.0029 |
+| worstcase | 0.6244 | 0.4754 | 0.4953 | 0.6039 | 0.6414 |
+| snr-noise1.0 | 0.0000 | 0.0123 | **0.0000** | **0.0000** | 0.0000 |
+| snr-noise2.0 | 0.0827 | 0.0370 | 0.0411 | **0.0241** | 0.0252 |
+| snr-noise3.0 | 0.8163 | 0.9225 | 0.8656 | **0.7529** | 0.8087 |
+| snr-noise4.0 | 0.9032 | 0.9478 | 0.9102 | **0.8867** | 0.8779 |
+| **better / worse** | — | 6 / 4 | 5 / 3 | **7 / 2** | 6 / 2 |
+
+**Both refinements worked, on the same regression, by different routes.**
+Lengthening to 500 ms (62 entries, halved standard error) returns `noise1.0` to
+0.0000 and takes `noise3.0` to 0.7529, *better than legacy*. Persistence at
+250 ms achieves the same recovery and gets hand-keyed to 0.0640 — against
+0.0628, the best figure measured anywhere in this investigation.
+
+**But both work by making the switch less eager, and tracking a fade needs it
+eager.** That is the whole trade in one sentence.
+
+### 13.5 Why there is no dominating point
+
+| config | qsb | noise1.0 | noise3.0 | handkeyed-15 |
+|---|---|---|---|---|
+| legacy (instant attack) | **0.0117** | **0.0000** | 0.8163 | 0.1579 |
+| 250/1 (eager) | **0.0088** | 0.0123 | 0.9225 | 0.1068 |
+| 250/16 (persistent) | 0.0223 | **0.0000** | 0.8656 | **0.0640** |
+| 500/1 (quiet) | 0.1215 | **0.0000** | **0.7529** | 0.0951 |
+
+Legacy's instant attack is not merely adequate on QSB — at 0.0117 it is close to
+the best figure in the entire sweep, achieved by having **zero tracking lag**.
+Every percentile variant buys within-element stability with a window, and a
+window is exactly what costs fade tracking. For this estimator family the two
+requirements are in direct opposition, which is why four experiments produced
+four trade points and no dominating one.
+
+**Kept in the registry:** `legacy+peakdual` (500/1, best overall spread) and
+`legacy+peakdual16` (250/16, best on hand-keyed).
+
+### 13.6 A measurement caveat on the promotion rule
+
+`legacy+peakdual`'s two regressions are not equal. `qsb` 0.0117 → 0.1215 is real
+and 10×. `qrn` 0.0029 → 0.0035 is **≈1 character across 24 seeds of a
+71-character message** — below what this instrument resolves.
+
+The promotion rule compares point estimates with no reference to their standard
+error, so it treats those identically. That is the significance-blindness
+counterpart to the operating-regime gap noted in §7. Honestly stated,
+`legacy+peakdual` is **7 better, 1 real regression, 1 indistinguishable,
+3 ties**. Unresolved.
+
+### 13.7 Next in this line
+
+The diagnosis points somewhere untried. Instant attack's *only* defect is that
+it chases the rising edge; its fade tracking is the best in the table. Rather
+than replacing it with a windowed estimator, freeze the peak update while the
+key state is unstable (during debounce/transition) and let it track instantly
+otherwise — keeping zero-lag fade following while removing edge-chasing, instead
+of trading one for the other.
+
+## 14. Next: the detector (planning)
 
 ### Status
 
@@ -1400,27 +1558,22 @@ error as the `ClairvoyantTiming` weight-bias bug in §10.
 | Edge bias — ratio-gap route | refuted, `legacy+sym` (§12.5) |
 | Edge bias — event-time route | measured, `legacy+edge`, over-corrects at low SNR (§12.5) |
 | Edge bias — threshold-reference route | measured, `legacy+peak`, best result so far, breaks `qsb` (§12.6) |
-| **Threshold reference timescale** | **next** |
+| Threshold reference — attack constant | refuted (§13.1) |
+| Threshold reference — window length | mechanism confirmed, no promotion (§13.2–13.4) |
+| **Freeze peak update during transitions** | **next, untried (§13.7)** |
 | Likelihood-ratio detector | blocked on §14 (generator fidelity) |
 
-### Immediate next step — the threshold reference timescale
+### Threshold reference — done, no promotion (§13)
 
-§12.6 localises the dominant cause of the edge bias to instant-attack peak
-tracking, and shows both extremes failing for opposite, understood reasons:
+Four experiments. The attack-constant framing was refuted; window length is the
+right knob and its mechanism is confirmed; dual windows fix QSB but cannot
+separate a fade from estimator noise cleanly. Within-element stability and fade
+tracking are in direct opposition for windowed estimators, so there is no
+dominating configuration. Two trade points kept in the registry.
 
-| reference | attack timescale | fails on |
-|---|---|---|
-| `PEAK_INSTANT_ATTACK` | 0 ms | chases keying edges → +9.8% ON stretch |
-| `PEAK_PERCENTILE` | ~2000 ms | cannot follow QSB → `qsb` 0.0117 → 0.5065 |
-
-A keying edge is ~32 ms and a QSB cycle ~3300 ms — two orders of magnitude
-apart. An asymmetric tracker with an attack constant of ~200–500 ms, decay
-unchanged at 0.5 s, sits between them and has not been tried. Single-constant
-sweep; 0.095 CER measured at stake on hand-keyed alone.
-
-If it lands, re-derive or drop `+edge` rather than tuning it — its correction is
-scaled by `(onRatio − offRatio)`, which §12.1 shows is not the cause, and that is
-exactly why it over-corrects to −17% at low SNR.
+Remaining idea in this line (§13.7): freeze the instant-attack peak update while
+the key state is unstable, keeping zero-lag fade tracking while removing
+edge-chasing.
 
 ### After that — the likelihood-ratio detector
 
@@ -1445,7 +1598,7 @@ suite alone such a detector is tested against its own premise and is guaranteed
 to look good. One consequence is already visible: the claim that an LLR
 "subsumes the impulse blanker" holds under Gaussian noise and fails under real
 impulsive HF noise, where a Rayleigh tail *over*-reacts to spikes. Real
-recordings and model-mismatch profiles (§14) come first.
+recordings and model-mismatch profiles (§15) come first.
 
 Measurement plan: new `IDetector` → registry entries `legacy+llr` and
 `+llr+log`. `legacy` untouched, gates green. Success criterion:
@@ -1461,13 +1614,13 @@ survives.
 | On/off ratio asymmetry stretches ON | measured: real but only 11% of the bias (§12.5) |
 | `signalPeak` instant attack | measured: **57% of the bias** (§12.6); also raises thresholds for ~0.5 s after an impulse ⊘ |
 | Matched-filter resize dropout | measured; fixing it does not reach CER (§12.3) |
-| Mills 1977: amplitude likelihoods "worthless and even a source of error" under multipath | 📎 second-hand, and **untestable here** — the generator has no multipath (§14) |
+| Mills 1977: amplitude likelihoods "worthless and even a source of error" under multipath | 📎 second-hand, and **untestable here** — the generator has no multipath (§15) |
 
 ⊘ §12.3 is the standing warning for all of the above: a detector metric improving
 does not imply CER improving. Judge on CER across every profile, never on the
 number the change was designed to move.
 
-## 14. Open items
+## 15. Open items
 
 - Whether fixing the Kalman defects changes the QSB verdict.
 - Whether `worstCase` 0.581 → 0.364 under a narrower BPF survives 24-seed

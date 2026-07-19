@@ -43,13 +43,23 @@ namespace cw {
     class SchmittDetector : public IDetector {
     public:
         explicit SchmittDetector(EdgeBias bias = EDGE_RAW,
-                                 PeakTracker peak = PEAK_INSTANT_ATTACK)
-            : _bias(bias), _peak(peak) {}
+                                 PeakTracker peak = PEAK_INSTANT_ATTACK,
+                                 float peakAttackMs = 300.0f,
+                                 float peakWindowMs = 2000.0f,
+                                 float peakDualThreshold = 0.15f,
+                                 int peakDualPersist = 1)
+            : _bias(bias), _peak(peak), _attackMs(peakAttackMs),
+              _windowMs(peakWindowMs), _dualThresh(peakDualThreshold),
+              _dualPersist(peakDualPersist) {}
 
         void init(float internalRate) override {
             det.init(internalRate);
             det.setEdgeBias(_bias);
             det.setPeakTracker(_peak);
+            det.setPeakAttackMs(_attackMs);
+            det.setPeakWindowMs(_windowMs);
+            det.setPeakDualThreshold(_dualThresh);
+            det.setPeakDualPersist(_dualPersist);
         }
         void reset() override { det.reset(); }
         std::vector<KeyEvent> process(const float* env, int count) override {
@@ -72,6 +82,10 @@ namespace cw {
         ToneDetector det;
         EdgeBias _bias;
         PeakTracker _peak;
+        float _attackMs;
+        float _windowMs;
+        float _dualThresh;
+        int _dualPersist;
     };
 
     // ── Stage 3: timing ─────────────────────────────────────────

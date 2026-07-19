@@ -201,11 +201,12 @@ namespace cw_test {
     inline DetectorScore measureDetector(const std::string& message, SignalParams params,
                                          cw::MatchedFilterResize mfResize = cw::MF_RESET,
                                          cw::EdgeBias edgeBias = cw::EDGE_RAW,
-                                         cw::PeakTracker peak = cw::PEAK_INSTANT_ATTACK) {
+                                         cw::PeakTracker peak = cw::PEAK_INSTANT_ATTACK,
+                                         float peakAttackMs = 300.0f) {
         auto sig = generateMessage(message, params);
 
         auto rec = std::make_unique<RecordingDetector>(
-                       std::make_unique<cw::SchmittDetector>(edgeBias, peak));
+                       std::make_unique<cw::SchmittDetector>(edgeBias, peak, peakAttackMs));
         RecordingDetector* probe = rec.get();
 
         auto core = std::make_unique<cw::StagedCore>(
@@ -239,13 +240,14 @@ namespace cw_test {
                                               unsigned seedBase = 1000,
                                               cw::MatchedFilterResize mfResize = cw::MF_RESET,
                                               cw::EdgeBias edgeBias = cw::EDGE_RAW,
-                                              cw::PeakTracker peak = cw::PEAK_INSTANT_ATTACK) {
+                                              cw::PeakTracker peak = cw::PEAK_INSTANT_ATTACK,
+                                              float peakAttackMs = 300.0f) {
         DetectorStats out;
         out.seeds = nSeeds;
         DetectorScore acc;
         for (int i = 0; i < nSeeds; i++) {
             params.seed = seedBase + (unsigned)i * 7919u;
-            auto s = measureDetector(message, params, mfResize, edgeBias, peak);
+            auto s = measureDetector(message, params, mfResize, edgeBias, peak, peakAttackMs);
             acc.groupDelayMs  += s.groupDelayMs;
             acc.falseRate     += s.falseRate;
             acc.missRate      += s.missRate;

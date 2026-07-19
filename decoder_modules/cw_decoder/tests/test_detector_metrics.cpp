@@ -292,6 +292,235 @@ TEST_CASE("edge-bias correction: mechanism and CER", "[cw][.][edge-fix]") {
     printf("\n");
 }
 
+// Phase 16: the threshold reference's attack constant.
+//
+// Both known extremes fail for opposite reasons — instant attack chases a
+// ~32 ms keying edge (+9.8% ON stretch), a ~2 s percentile cannot follow a
+// ~3.3 s QSB cycle (qsb 0.0117 -> 0.5065). Two orders of magnitude between
+// them, one constant. This sweeps it.
+TEST_CASE("peak attack constant sweep", "[cw][.][attack-sweep]") {
+    constexpr int SEEDS = 24;
+    const float taus[] = {50.0f, 100.0f, 200.0f, 300.0f, 500.0f, 800.0f, 1200.0f};
+    constexpr int NT = sizeof(taus) / sizeof(taus[0]);
+
+    auto slowAttackCore = [](float tauMs) {
+        return CoreFactory([tauMs](const GeneratedSignal&) {
+            return std::unique_ptr<cw::IDecodeCore>(new cw::StagedCore(
+                std::make_unique<cw::EnvelopeFrontEnd>(),
+                std::make_unique<cw::SchmittDetector>(cw::EDGE_RAW,
+                                                      cw::PEAK_SLOW_ATTACK, tauMs),
+                std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),
+                std::make_unique<cw::BeamSymbolDecoder>()));
+        });
+    };
+
+    printf("\n%-18s %8s", "profile", "legacy");
+    for (float t : taus) { printf(" %7.0f", t); }
+    printf("   %8s\n", "+pctile");
+    printf("%s\n", std::string(100, '-').c_str());
+
+    for (const auto& p : detectorProfiles()) {
+        printf("%-18s %8.4f", p.name,
+               runCell("legacy", p.name, p.message, p.params, SEEDS).cerMean);
+        for (int t = 0; t < NT; t++) {
+            printf(" %7.4f", runCellWith(slowAttackCore(taus[t]), "slow",
+                                         p.name, p.message, p.params, SEEDS).cerMean);
+        }
+        printf("   %8.4f\n",
+               runCell("legacy+peak", p.name, p.message, p.params, SEEDS).cerMean);
+    }
+
+    // ON stretch on a noiseless signal: does the bias actually come out?
+    printf("\nON stretch %%dit (clean-15wpm, noiseless):\n  legacy %+.2f",
+           measureDetectorMulti(MSG_FULL(), profileClean(80.0f), SEEDS).mean.onStretchPct);
+    for (float t : taus) {
+        printf("   %.0fms %+.2f", t,
+               measureDetectorMulti(MSG_FULL(), profileClean(80.0f), SEEDS, 1000,
+                                    cw::MF_RESET, cw::EDGE_RAW,
+                                    cw::PEAK_SLOW_ATTACK, t).mean.onStretchPct);
+    }
+    printf("\n\n");
+    CHECK(NT > 0);
+}
+
+// Phase 16b: the percentile window length.
+//
+// The attack sweep refuted the timescale framing — an EMA of any constant
+// varies within an element (fast ones chase the edge, slow ones sag toward the
+// duty-cycle mean). What makes the percentile work is element-INDEPENDENCE: its
+// window spans many key cycles. So the knob is the window length, and it has a
+// genuine interior optimum: long enough to span several elements, short enough
+// to follow a fade. The default 2000 ms against a 3300 ms QSB cycle is why
+// `+peak` breaks on that profile.
+TEST_CASE("peak percentile window sweep", "[cw][.][window-sweep]") {
+    constexpr int SEEDS = 24;
+    const float wins[] = {250.0f, 500.0f, 750.0f, 1000.0f, 1500.0f, 2000.0f, 3000.0f};
+    constexpr int NW = sizeof(wins) / sizeof(wins[0]);
+
+    auto pctileCore = [](float winMs) {
+        return CoreFactory([winMs](const GeneratedSignal&) {
+            return std::unique_ptr<cw::IDecodeCore>(new cw::StagedCore(
+                std::make_unique<cw::EnvelopeFrontEnd>(),
+                std::make_unique<cw::SchmittDetector>(cw::EDGE_RAW,
+                                                      cw::PEAK_PERCENTILE, 300.0f, winMs),
+                std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),
+                std::make_unique<cw::BeamSymbolDecoder>()));
+        });
+    };
+
+    printf("\n%-18s %8s", "profile", "legacy");
+    for (float w : wins) { printf(" %7.0f", w); }
+    printf("\n%s\n", std::string(90, '-').c_str());
+
+    double bestSum = 1e9; int bestIdx = -1;
+    std::vector<std::vector<float>> grid;
+
+    for (const auto& p : detectorProfiles()) {
+        std::vector<float> row;
+        printf("%-18s %8.4f", p.name,
+               runCell("legacy", p.name, p.message, p.params, SEEDS).cerMean);
+        for (int w = 0; w < NW; w++) {
+            float c = runCellWith(pctileCore(wins[w]), "pctile",
+                                  p.name, p.message, p.params, SEEDS).cerMean;
+            row.push_back(c);
+            printf(" %7.4f", c);
+        }
+        printf("\n");
+        grid.push_back(row);
+    }
+
+    for (int w = 0; w < NW; w++) {
+        double sum = 0;
+        for (auto& row : grid) { sum += row[w]; }
+        if (sum < bestSum) { bestSum = sum; bestIdx = w; }
+    }
+    printf("\nlowest CER sum: %.0f ms (%.4f across %zu profiles)\n",
+           wins[bestIdx], bestSum, grid.size());
+    printf("NOTE: sum is a search aid, not a promotion criterion — promotion is\n"
+           "      no-worse-on-every-profile, judged from the table above.\n\n");
+    CHECK(bestIdx >= 0);
+}
+
+// Phase 16c: dual-window peak reference.
+//
+// The window sweep showed short windows track fading and long windows estimate
+// precisely, with no single length serving both. Running 250 ms and 2000 ms
+// concurrently and switching on their relative disagreement makes the
+// disagreement itself the fade detector. This sweeps the switch threshold.
+TEST_CASE("dual-window peak reference", "[cw][.][dual-window]") {
+    constexpr int SEEDS = 24;
+    const float thresholds[] = {0.05f, 0.10f, 0.15f, 0.25f, 0.40f};
+    constexpr int NT = sizeof(thresholds) / sizeof(thresholds[0]);
+
+    auto dualCore = [](float thresh) {
+        return CoreFactory([thresh](const GeneratedSignal&) {
+            return std::unique_ptr<cw::IDecodeCore>(new cw::StagedCore(
+                std::make_unique<cw::EnvelopeFrontEnd>(),
+                std::make_unique<cw::SchmittDetector>(cw::EDGE_RAW, cw::PEAK_DUAL_WINDOW,
+                                                      300.0f, 250.0f, thresh),
+                std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),
+                std::make_unique<cw::BeamSymbolDecoder>()));
+        });
+    };
+
+    printf("\n%-18s %8s", "profile", "legacy");
+    for (float t : thresholds) { printf("  t=%.2f", t); }
+    printf("  %7s %7s\n", "250only", "2000only");
+    printf("%s\n", std::string(88, '-').c_str());
+
+    for (const auto& p : detectorProfiles()) {
+        printf("%-18s %8.4f", p.name,
+               runCell("legacy", p.name, p.message, p.params, SEEDS).cerMean);
+        for (int t = 0; t < NT; t++) {
+            printf(" %7.4f", runCellWith(dualCore(thresholds[t]), "dual",
+                                         p.name, p.message, p.params, SEEDS).cerMean);
+        }
+        auto only = [&](float w) {
+            return runCellWith(CoreFactory([w](const GeneratedSignal&) {
+                       return std::unique_ptr<cw::IDecodeCore>(new cw::StagedCore(
+                           std::make_unique<cw::EnvelopeFrontEnd>(),
+                           std::make_unique<cw::SchmittDetector>(cw::EDGE_RAW,
+                                                                 cw::PEAK_PERCENTILE, 300.0f, w),
+                           std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),
+                           std::make_unique<cw::BeamSymbolDecoder>()));
+                   }), "only", p.name, p.message, p.params, SEEDS).cerMean;
+        };
+        printf("  %7.4f %7.4f\n", only(250.0f), only(2000.0f));
+    }
+    printf("\n");
+    CHECK(NT > 0);
+}
+
+// Phase 16d: short-window length x disagreement persistence.
+//
+// The dual sweep's remaining regressions were all on stationary profiles, with
+// the short window's own numbers leaking through: a 250 ms window holds 31
+// entries, so its 90th percentile has ~18% relative standard error against a 5%
+// switch threshold — the two windows disagree by construction. Two independent
+// ways to make estimator noise smaller than the fade it must detect.
+TEST_CASE("dual-window: short length and persistence", "[cw][.][dual-refine]") {
+    constexpr int SEEDS = 24;
+    struct Cfg { float shortMs; int persist; };
+    const Cfg cfgs[] = {
+        {250.0f, 1}, {250.0f, 4}, {250.0f, 8}, {250.0f, 16},
+        {500.0f, 1}, {500.0f, 4}, {500.0f, 8}, {500.0f, 16},
+    };
+    constexpr int NC = sizeof(cfgs) / sizeof(cfgs[0]);
+
+    auto dualCore = [](Cfg c) {
+        return CoreFactory([c](const GeneratedSignal&) {
+            return std::unique_ptr<cw::IDecodeCore>(new cw::StagedCore(
+                std::make_unique<cw::EnvelopeFrontEnd>(),
+                std::make_unique<cw::SchmittDetector>(cw::EDGE_RAW, cw::PEAK_DUAL_WINDOW,
+                                                      300.0f, c.shortMs, 0.05f, c.persist),
+                std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),
+                std::make_unique<cw::BeamSymbolDecoder>()));
+        });
+    };
+
+    printf("\n%-18s %8s", "profile", "legacy");
+    for (auto c : cfgs) { printf(" %4.0f/%-2d", c.shortMs, c.persist); }
+    printf("\n%s\n", std::string(90, '-').c_str());
+
+    std::vector<std::vector<float>> grid;
+    std::vector<float> base;
+    for (const auto& p : detectorProfiles()) {
+        float lg = runCell("legacy", p.name, p.message, p.params, SEEDS).cerMean;
+        base.push_back(lg);
+        printf("%-18s %8.4f", p.name, lg);
+        std::vector<float> row;
+        for (int c = 0; c < NC; c++) {
+            float v = runCellWith(dualCore(cfgs[c]), "dual",
+                                  p.name, p.message, p.params, SEEDS).cerMean;
+            row.push_back(v);
+            printf(" %7.4f", v);
+        }
+        printf("\n");
+        grid.push_back(row);
+    }
+
+    // Promotion is no-worse-on-every-profile. Report the count directly so the
+    // table does not have to be eyeballed.
+    printf("\n%-18s", "worse than legacy:");
+    for (int c = 0; c < NC; c++) {
+        int worse = 0;
+        for (size_t r = 0; r < grid.size(); r++) {
+            if (grid[r][c] > base[r] + 1e-6f) { worse++; }
+        }
+        printf(" %7d", worse);
+    }
+    printf("\n%-18s", "better:");
+    for (int c = 0; c < NC; c++) {
+        int better = 0;
+        for (size_t r = 0; r < grid.size(); r++) {
+            if (grid[r][c] < base[r] - 1e-6f) { better++; }
+        }
+        printf(" %7d", better);
+    }
+    printf("\n\n");
+    CHECK(NC > 0);
+}
+
 // Instrument self-checks. If these break, every number above is measuring the
 // harness rather than the detector.
 TEST_CASE("detector scoring recovers a clean signal exactly", "[cw][detector-self]") {

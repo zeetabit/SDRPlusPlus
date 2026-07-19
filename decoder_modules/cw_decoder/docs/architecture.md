@@ -129,6 +129,8 @@ stable. Unknown names fall back to `legacy` rather than failing.
 | `legacy+edge+mf` | edge correction + preserved matched filter | comparison baseline |
 | `legacy+peak` | threshold referenced to windowed 90th percentile | **best hand-keyed result measured** (0.1579 → 0.0628); `qsb` regresses 43× |
 | `legacy+peak+edge` | percentile reference + edge correction | combination baseline |
+| `legacy+peakdual` | dual-window peak reference, 500 ms short | **best spread measured** — 7 profiles better, `qsb` and `qrn` worse |
+| `legacy+peakdual16` | dual-window, 250 ms short + persistence | best hand-keyed (0.0640); `qsb`/noise3/4 worse |
 | `legacy+bpf40` | 40/50 BPF, 64 Hz ENBW | breaks clean-25 WPM |
 | `legacy+bpf30` | 30/40 BPF, 48 Hz ENBW | best on noise3.0; worse on hand-keyed |
 | `legacy+bpf20` | 20/30 BPF, 31 Hz ENBW | |
