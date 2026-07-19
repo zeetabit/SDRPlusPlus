@@ -42,9 +42,9 @@ SDRPP_MOD_CONFIG(config);
 #define INPUT_SAMPLE_RATE   2.048e6
 #define VFO_BANDWIDTH       1.6e6
 
-class M17DecoderModule : public ModuleManager::Instance {
+class DABDecoderModule : public ModuleManager::Instance {
 public:
-    M17DecoderModule(std::string name, ModuleConfig* cfg)  {
+    DABDecoderModule(std::string name, ModuleConfig* cfg)  {
         this->name = name;
 
         file = std::ofstream("sync4.f32", std::ios::out | std::ios::binary);
@@ -66,7 +66,7 @@ public:
         gui::menu.registerEntry(name, menuHandler, this, this);
     }
 
-    ~M17DecoderModule() {
+    ~DABDecoderModule() {
         gui::menu.removeEntry(name);
         // Stop DSP Here
         if (enabled) {
@@ -113,7 +113,7 @@ public:
 
 private:
     static void menuHandler(void* ctx) {
-        M17DecoderModule* _this = (M17DecoderModule*)ctx;
+        DABDecoderModule* _this = (DABDecoderModule*)ctx;
 
         float menuWidth = ImGui::GetContentRegionAvail().x;
 
@@ -127,7 +127,7 @@ private:
     std::ofstream file;
 
     static void handler(dsp::complex_t* data, int count, void* ctx) {
-        M17DecoderModule* _this = (M17DecoderModule*)ctx;
+        DABDecoderModule* _this = (DABDecoderModule*)ctx;
         //_this->file.write((char*)data, count * sizeof(dsp::complex_t));
 
         dsp::complex_t* buf = _this->constDiagram.acquireBuffer();
@@ -152,10 +152,10 @@ MOD_EXPORT void _INIT_() {
     sdrppInitModuleConfig(config, "dab_decoder_config.json");
 }
 
-SDRPP_CREATE_INSTANCE_V2(M17DecoderModule)
+SDRPP_CREATE_INSTANCE_V2(DABDecoderModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
-    delete (M17DecoderModule*)instance;
+    delete (DABDecoderModule*)instance;
 }
 
 MOD_EXPORT void _END_() {

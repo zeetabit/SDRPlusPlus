@@ -41,9 +41,9 @@ SDRPP_MOD_CONFIG(config);
 
 #define INPUT_SAMPLE_RATE 6000
 
-class M17DecoderModule : public ModuleManager::Instance {
+class KGSSTVDecoderModule : public ModuleManager::Instance {
 public:
-    M17DecoderModule(std::string name, ModuleConfig* cfg) : diag(0.8, 480) {
+    KGSSTVDecoderModule(std::string name, ModuleConfig* cfg) : diag(0.8, 480) {
         this->name = name;
         this->cfg = cfg;
 
@@ -77,7 +77,7 @@ public:
         gui::menu.registerEntry(name, menuHandler, this, this);
     }
 
-    ~M17DecoderModule() {
+    ~KGSSTVDecoderModule() {
         if (enabled) { disable(); }
         gui::menu.removeEntry(name);
     }
@@ -116,7 +116,7 @@ public:
 
 private:
     static void menuHandler(void* ctx) {
-        M17DecoderModule* _this = (M17DecoderModule*)ctx;
+        KGSSTVDecoderModule* _this = (KGSSTVDecoderModule*)ctx;
 
         float menuWidth = ImGui::GetContentRegionAvail().x;
 
@@ -142,7 +142,7 @@ private:
     }
 
     static void _diagHandler(float* data, int count, void* ctx) {
-        M17DecoderModule* _this = (M17DecoderModule*)ctx;
+        KGSSTVDecoderModule* _this = (KGSSTVDecoderModule*)ctx;
         float* buf = _this->diag.acquireBuffer();
         memcpy(buf, data, count * sizeof(float));
         _this->diag.releaseBuffer();
@@ -169,10 +169,10 @@ MOD_EXPORT void _INIT_() {
     sdrppInitModuleConfig(config, "kg_sstv_decoder_config.json");
 }
 
-SDRPP_CREATE_INSTANCE_V2(M17DecoderModule)
+SDRPP_CREATE_INSTANCE_V2(KGSSTVDecoderModule)
 
 MOD_EXPORT void _DELETE_INSTANCE_(ModuleManager::Instance* instance) {
-    delete (M17DecoderModule*)instance;
+    delete (KGSSTVDecoderModule*)instance;
 }
 
 MOD_EXPORT void _END_() {
