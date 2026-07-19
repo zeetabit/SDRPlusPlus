@@ -1,0 +1,114 @@
+#pragma once
+#include "core.h"
+#include "dsp.h"
+#include "tone_detector.h"
+#include "timing.h"
+#include "morse_tree.h"
+
+// Adapters binding the existing concrete components to the stage interfaces in
+// core.h. These add no behaviour — every method forwards. They exist so
+// StagedCore can hold stages polymorphically and so alternative
+// implementations can be dropped in beside them.
+
+namespace cw {
+
+    // ── Stage 1: front end ──────────────────────────────────────
+
+    class EnvelopeFrontEnd : public IFrontEnd {
+    public:
+        // Filter geometry is a constructor parameter: pre-detection bandwidth
+        // is a decoding design choice, and the benchmark matrix varies it.
+        EnvelopeFrontEnd(float bpfCutoff = 100.0f, float bpfTrans = 100.0f,
+                         float smoothCutoff = 80.0f, float smoothTrans = 100.0f)
+            : _bpfCutoff(bpfCutoff), _bpfTrans(bpfTrans),
+              _smoothCutoff(smoothCutoff), _smoothTrans(smoothTrans) {}
+
+        void init(float toneFreq, float sampleRate, float internalRate) override {
+            dsp.init(toneFreq, sampleRate, internalRate,
+                     _bpfCutoff, _bpfTrans, _smoothCutoff, _smoothTrans);
+        }
+        void setToneFreq(float freq) override { dsp.setToneFreq(freq); }
+        int process(int count, const dsp::complex_t* in, float* out) override {
+            return dsp.process(count, in, out);
+        }
+        const char* name() const override { return "envelope"; }
+
+    private:
+        EnvelopeDSP dsp;
+        float _bpfCutoff, _bpfTrans, _smoothCutoff, _smoothTrans;
+    };
+
+    // ── Stage 2: detector ───────────────────────────────────────
+
+    class SchmittDetector : public IDetector {
+    public:
+        void init(float internalRate) override { det.init(internalRate); }
+        void reset() override { det.reset(); }
+        std::vector<KeyEvent> process(const float* env, int count) override {
+            return det.process(env, count);
+        }
+        float getSNR() const override { return det.getSNR(); }
+        bool isKeyDown() const override { return det.isKeyDown(); }
+        const char* name() const override { return "schmitt"; }
+        void preseed(float level, int count) override { det.preseed(level, count); }
+
+    private:
+        ToneDetector det;
+    };
+
+    // ── Stage 3: timing ─────────────────────────────────────────
+
+    class AdaptiveTimingStage : public ITiming {
+    public:
+        explicit AdaptiveTimingStage(TimingStrategy s = TIMING_KALMAN) : _strategy(s) {}
+
+        void init(float internalRate) override { t.init(internalRate, _strategy); }
+        void reset() override { t.reset(); }
+        TimingEvent classifyOn(float ms) override { return t.classifyOn(ms); }
+        TimingEvent classifyOff(float ms) override { return t.classifyOff(ms); }
+        float getDitDuration() const override { return t.getDitDuration(); }
+        float getWPM() const override { return t.getWPM(); }
+        bool isLocked() const override { return t.isLocked(); }
+
+        const char* name() const override {
+            switch (_strategy) {
+                case TIMING_KMEANS:  return "kmeans";
+                case TIMING_MEDIAN:  return "median";
+                case TIMING_BIMODAL: return "bimodal";
+                case TIMING_KALMAN:    return "kalman";
+                case TIMING_KALMAN_V2: return "kalman2";
+                case TIMING_LOG:        return "log";
+                case TIMING_LOG_ROBUST: return "logrobust";
+            }
+            return "unknown";
+        }
+
+        std::unique_ptr<ITiming> makeFresh() const override {
+            return std::make_unique<AdaptiveTimingStage>(_strategy);
+        }
+
+    private:
+        AdaptiveTiming t;
+        TimingStrategy _strategy;
+    };
+
+    // ── Stage 4: symbol decoder ─────────────────────────────────
+
+    class BeamSymbolDecoder : public ISymbolDecoder {
+    public:
+        void init() override { d.init(); }
+        void reset() override { d.reset(); }
+        void addElement(Element e, float conf) override { d.addElement(e, conf); }
+        char characterBreak() override { return d.characterBreak(); }
+        const char* name() const override { return "beam"; }
+
+        std::unique_ptr<ISymbolDecoder> makeFresh() const override {
+            auto p = std::make_unique<BeamSymbolDecoder>();
+            p->init();
+            return p;
+        }
+
+    private:
+        MorseDecoder d;
+    };
+}

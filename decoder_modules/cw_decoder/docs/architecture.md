@@ -6,6 +6,14 @@ Multi-channel CW (Morse code) decoder for SDR++. Captures a 3 kHz VFO bandwidth 
 
 V2 module API. Single-file main.cpp delegates all logic to the `cw/` component library.
 
+**Decoding is pluggable.** A `Channel` hosts one `IDecodeCore` selected by name from
+a registry; post-processing (spelling correction, conversation tracking, text
+buffering) lives in `Channel` and is identical for every core. See
+[Pluggable Decode Cores](#pluggable-decode-cores) below — that section is the
+entry point for anyone changing decoding behaviour. The Stage 1–8 pipeline
+documented further down describes the **`legacy` core specifically**, which
+remains the production default.
+
 ## Top-Level Data Flow
 
 ```
@@ -53,9 +61,89 @@ V2 module API. Single-file main.cpp delegates all logic to the `cw/` component l
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Per-Channel Processing Pipeline
+## Pluggable Decode Cores
 
-Each `Channel` owns the entire processing chain from IQ to decoded text. All blocks run inline in the DSP thread callback — no internal threads.
+Two levels, because two kinds of decoder must coexist.
+
+```
+Channel  (owns post-processing, implements CharSink)
+    │
+    ├── IDecodeCore ─── IQ in, characters out. The outer contract.
+    │     │
+    │     ├── StagedCore ─── composes independently swappable stages
+    │     │      IFrontEnd       EnvelopeFrontEnd (filter geometry parameterized)
+    │     │      IDetector       SchmittDetector
+    │     │      ITiming         AdaptiveTimingStage (6 strategies)
+    │     │      ISymbolDecoder  BeamSymbolDecoder
+    │     │      + inline sequencing: pre-lock capture, retroDecode, flush, freeze
+    │     │
+    │     ├── BellCore   (future) ─── implements IDecodeCore DIRECTLY
+    │     └── MillsCore  (future)
+    │
+    └── corrector + conversation + TextBuffer   (shared by ALL cores)
+```
+
+**Why Bell/Mills-style decoders cannot be stages.** Bell 1977 is "a set of linear
+Kalman filters operating on a dynamically evolving trellis" — detection, timing
+and symbol decoding are one inseparable computation. Routing it through
+`IDetector`→`ITiming`→`ISymbolDecoder` would destroy the joint estimation that
+makes it work. Such cores implement `IDecodeCore` directly and sit beside
+`StagedCore` as peers. `IDecodeCore::process()` therefore takes **raw IQ**, not
+an envelope.
+
+**Why sequencing is inline rather than a fifth stage.** A jointly-estimating core
+replaces that logic wholesale, so there is no second implementation to validate
+an `ISequencer` interface against. Extract it when one exists.
+
+**Why post-processing sits outside every core.** A core reaches decoded text only
+through `CharSink` (`emitChar` / `flushWord` / `emitWordGap` / `clearEmitted`).
+Correction and conversation tracking are therefore identical across cores, so the
+benchmark matrix measures *decoding*, not post-processing.
+
+**Why front-end bandwidth is a declared core parameter.** Pre-detection bandwidth
+alone moves CER by up to 38× (`decoder-investigation-2026-07.md` §4). If cores
+could quietly narrow their own filter, one could "win" the benchmark without
+decoding better. Declaring it keeps the comparison honest.
+
+### Registry
+
+`core_registry.h` is the single list of benchmarkable configurations. The config
+UI lists it; the benchmark matrix iterates it. Adding a core or a stage
+combination is one entry. Names are persisted in module config — keep them
+stable. Unknown names fall back to `legacy` rather than failing.
+
+| name | configuration | status |
+|---|---|---|
+| `legacy` | Schmitt + Kalman V1 + beam search | **production default** |
+| `legacy+kmeans` | K-means timing | worse on jitter and QRM/QRN |
+| `legacy+median` | median-split timing | worst overall |
+| `legacy+bimodal` | bimodal-histogram timing | best on handkeyed-25; poor at high noise |
+| `legacy+kalman2` | corrected dah gain, confidence-gated learning | better on 10/13, blocked on noise4.0 |
+| `legacy+log` | log-duration Kalman (multiplicative jitter) | best on 5, blocked on noise3.0/4.0 |
+| `legacy+logrobust` | log timing + Huberised state update | ≈ `+log`, no blocker relief |
+| `legacy+bpf40` | 40/50 BPF, 64 Hz ENBW | breaks clean-25 WPM |
+| `legacy+bpf30` | 30/40 BPF, 48 Hz ENBW | best on noise3.0; worse on hand-keyed |
+| `legacy+bpf20` | 20/30 BPF, 31 Hz ENBW | |
+
+**Promotion rule:** a variant becomes the default only when it is no worse on
+*every* profile. "Better on average" is not sufficient — a profile that decoded
+better before and worse after is a regression. Variants that lose are kept, not
+deleted: they are the comparison baseline for future cores.
+
+**What the registry deliberately excludes.** Oracle cores — a perfect detector
+or a perfect timing model — live in `tests/cw_oracle.h`, never here. They need
+ground truth only the signal generator has, so they cannot run on a real signal
+and must not reach the config UI. `Channel::initWithCore()` exists to host a
+core the registry cannot construct; `init(id, tone, coreName)` is a wrapper over
+it.
+
+## Per-Channel Processing Pipeline (the `legacy` core)
+
+This section describes the **`legacy`** core — the production default. Other
+registry variants differ only in the stage noted in the table above.
+
+`Channel` owns the front-end-to-text chain via its core. All blocks run inline in
+the DSP thread callback — no internal threads.
 
 ```
 Channel.process(count, complex_t* iq)
@@ -81,8 +169,9 @@ Channel.process(count, complex_t* iq)
 │           ▼                                                                  │
 │  ┌─────────────────┐                                                         │
 │  │  Narrow BPF      │  Complex FIR lowpass: 100 Hz cutoff, 100 Hz trans      │
-│  │  (VOLK dot_prod)  │  ~20 taps, ~200 Hz effective passband                │
-│  │                  │  Rejects signals >200 Hz from tone center              │
+│  │  (VOLK dot_prod)  │  38 taps, 167.6 Hz ENBW (measured, not the 200 Hz     │
+│  │                  │  nominal — the Nuttall window rolls off the corners)   │
+│  │                  │  Group delay 18.5 ms                                   │
 │  └────────┬─────────┘                                                        │
 │           │ complex_t[count/8] @ 1000 Hz (narrowband)                        │
 │           ▼                                                                  │
@@ -94,13 +183,16 @@ Channel.process(count, complex_t* iq)
 │           ▼                                                                  │
 │  ┌─────────────────┐                                                         │
 │  │  Smoothing LPF   │  Float FIR lowpass: 80 Hz cutoff, 100 Hz trans        │
-│  │  (VOLK dot_prod)  │  ~20 taps                                            │
-│  │                  │  Removes HF noise from magnitude                       │
+│  │                  │  Post-detection: narrowing this HURTS (measured) —     │
+│  │  (VOLK dot_prod)  │  magnitude is nonlinear, so it cannot recover         │
+│  │                  │  pre-detection SNR. Leave it alone.                    │
 │  └────────┬─────────┘                                                        │
 │           │ float[envCount] @ 1000 Hz (smooth envelope)                      │
 │           ▼                                                                  │
 │  Output: envBuf[envCount], where envCount = count / 8                        │
-│  Settling time: ~44ms total (< 40ms dit at 30 WPM)                          │
+│  Group delay: 18.5 ms (BPF) + smoothing + matched filter ≈ 37 ms+            │
+│  ⚠ EXCEEDS one dit at 30 WPM (40 ms). Previously documented as "~44ms        │
+│    total (< 40ms dit at 30 WPM)", which is self-contradictory.               │
 └──────────────────────────────────────────────────────────────────────────────┘
     │
     │ float[envCount] @ 1000 Hz
@@ -280,9 +372,10 @@ Channel.process(count, complex_t* iq)
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  STAGE 7: Morse Decoding (MorseDecoder)                                      │
 │                                                                              │
-│  Static binary tree, 63 nodes (depth 6):                                     │
+│  Static binary tree, 127 nodes (depth 7):                                    │
 │    root(0) → dit: 2i+1, dah: 2i+2                                           │
-│    Covers: A-Z, 0-9, / = ?                                                  │
+│    Covers: A-Z, 0-9, / = ? and prosigns AR, SK                              │
+│    ~40 of 127 nodes carry a character; the rest emit '\0' (see defects)      │
 │                                                                              │
 │  ┌─ Multi-Path Beam Search (8 paths) ──────────────────────────────────┐    │
 │  │                                                                      │    │
@@ -292,7 +385,7 @@ Channel.process(count, complex_t* iq)
 │  │                                                                      │    │
 │  │    For each active path:                                              │    │
 │  │      Fork into dit-child (prob × pDit) and dah-child (prob × pDah)  │    │
-│  │      If at tree boundary (node >= 63): keep at current node          │    │
+│  │      If at tree boundary (node >= 127): keep at current node         │    │
 │  │                                                                      │    │
 │  │    Prune to top 8 paths by probability                                │    │
 │  │    Normalize probabilities (prevent underflow)                        │    │
@@ -528,12 +621,17 @@ Shared state protection:
 decoder_modules/cw_decoder/
 ├── CMakeLists.txt
 ├── docs/
-│   ├── architecture.md               this file
-│   └── decoding-improvement-plan.md  decoder quality plan + research
+│   ├── architecture.md                    this file — what the code does
+│   ├── decoding-improvement-plan.md       historical plan + research (see caveats inside)
+│   └── decoder-investigation-2026-07.md   audit, experiments, measured baselines, proposal
 ├── src/
 │   ├── main.cpp                      V2 module: VFO, sink, menu handler
 │   └── cw/
-│       ├── channel.h                 per-channel pipeline + retroDecode + correction
+│       ├── core.h                    IDecodeCore, stage interfaces, CharSink, registry types
+│       ├── core_registry.h           the single list of benchmarkable configurations
+│       ├── stages.h                  adapters binding concrete components to stage interfaces
+│       ├── staged_core.h             pipeline as composed stages + sequencing/retroDecode
+│       ├── channel.h                 hosts a core; implements CharSink; owns correction
 │       ├── channel_manager.h         multi-channel lifecycle + overlay
 │       ├── conversation.h            QSO state machine + context-aware correction
 │       ├── corrector.h               post-decode error correction (Levenshtein)
@@ -541,17 +639,63 @@ decoder_modules/cw_decoder/
 │       ├── menu.h                    ImGui UI: channel list, controls, text display
 │       ├── morse_tree.h              beam search (8/12 paths, 127-node tree, prosigns)
 │       ├── text_buffer.h             thread-safe text + in-place replaceLastN
-│       ├── timing.h                  Kalman + Bayesian + adaptive gap centers
-│       ├── tone_detector.h           CFAR detector + impulse blanker
+│       ├── timing.h                  6 strategies: kmeans/median/bimodal/kalman/kalman2/log
+│       ├── tone_detector.h           Schmitt detector + impulse blanker
 │       ├── tone_scanner.h            FFT tone scanning + spectral averaging
 │       └── vocabulary.h              CW dictionary + callsign/Q-code/RST patterns
 └── tests/
     ├── CMakeLists.txt                Catch2 + volk + fftw3f
-    ├── cw_test_signals.h             IQ generator + CER/WER + Farnsworth
-    └── test_*.cpp                    197 tests, 527 assertions, <0.5s
+    ├── cw_test_signals.h             IQ generator + ground truth + CER/WER + Farnsworth
+    ├── cw_bench_stats.h              multi-seed stats + ins/del/sub alignment
+    ├── cw_matrix.h                   core × profile matrix harness
+    ├── cw_oracle.h                   test-only oracle stages (perfect detector / timing)
+    ├── test_benchmark_multiseed.cpp  24-seed regression gates (always run)
+    ├── test_matrix.cpp               core comparison sweep (on demand, tagged [.])
+    ├── test_oracle.cpp               per-stage headroom ablation + instrument self-checks
+    └── test_*.cpp                    218 tests, 1594 assertions, ~17s
 ```
 
+## Running the benchmarks
+
+```bash
+cd decoder_modules/cw_decoder/tests/build && cmake .. && make -j8
+
+./cw_decoder_tests                       # full suite incl. 24-seed gates (~17s)
+./cw_decoder_tests "[characterize]" -s    # per-profile CER distribution table
+./cw_decoder_tests "[matrix-timing]" -s   # timing strategies head-to-head
+./cw_decoder_tests "[matrix-bpf]"    -s   # front-end bandwidths head-to-head
+./cw_decoder_tests "[matrix-all]"    -s   # every registry core (~2 min)
+./cw_decoder_tests "[oracle]"        -s   # per-stage headroom ablation (~16s)
+```
+
+The matrix and oracle sweeps are tagged `[.]` so Catch2 hides them from the
+default run: the always-on suite keeps the `legacy` regression gates, the
+exploratory sweeps are opt-in. The oracle *self-checks* (`[oracle-self]`) are
+deliberately not hidden — if the instrument breaks, every headroom number it
+produces is measuring the harness.
+
+**Comparison vs attribution.** The matrix ranks cores against each other; it
+cannot express how close any of them is to what is achievable. Oracle ablation
+replaces a stage with a perfect one and reads off that stage's headroom. Both
+are needed: the matrix gates changes, the oracle decides where to spend effort.
+Results in `decoder-investigation-2026-07.md` §11.
+
+**Measurement discipline.** Every degradation profile is scored over 24
+independent seeds and asserted on the **mean**. Single-seed CER is quantized to
+1/refChars and carries no variance estimate, so it cannot distinguish a real
+change from a lucky draw — the pre-2026-07 benchmark table was single-seed
+(`seed = 42`) and materially understated hand-keyed error. Thresholds are
+ratchets: lower them when a change earns it, never raise them to admit one.
+
 ## Constants
+
+> ⊘ **EVIDENCE NEEDED — the Rationale column is design intent, not
+> measurement.** Only the filter geometry (measured in
+> `decoder-investigation-2026-07.md` §4.1), the benchmark seed count, and the
+> learn/Huber thresholds (§8–9) have been measured. Every other threshold here
+> was chosen by reasoning and has never been swept. Several are known to be
+> load-bearing in ways their rationale does not describe — see the defects
+> table below.
 
 | Constant | Value | Location | Rationale |
 |----------|-------|----------|-----------|
@@ -561,8 +705,8 @@ decoder_modules/cw_decoder/
 | `CW_MAX_CHANNELS` | 10 | `channel_manager.h` | Per-channel cost trivial |
 | `CW_TONE_MATCH_HZ` | 120 Hz | `channel_manager.h` | > BPF bandwidth / 2 |
 | `CW_IDLE_TIMEOUT` | 40 frames | `channel_manager.h` | ~5 seconds |
-| BPF cutoff | 100 Hz / 100 Hz | `dsp.h` | ~20 taps, 200 Hz passband |
-| Smoothing cutoff | 80 Hz / 100 Hz | `dsp.h` | ~20 taps |
+| BPF cutoff | 100 Hz / 100 Hz | `dsp.h` | 38 taps, 167.6 Hz ENBW, 18.5 ms delay (measured) |
+| Smoothing cutoff | 80 Hz / 100 Hz | `dsp.h` | narrowing measured to *hurt* — do not tune |
 | Noise subsample | every 8th | `tone_detector.h` | 250-element buffer, ~2s window |
 | Convergence | ≥ 10 subsamples | `tone_detector.h` | ~80 samples at 1 kHz |
 | Soft squelch | 3-10 dB ramp | `channel.h` | Linear confidence scaling |
@@ -580,8 +724,25 @@ decoder_modules/cw_decoder/
 | Context boost | +10 score | `corrector.h` | For conversation-expected words |
 | New QSO detection | CQ conf > 0.8 | `conversation.h` | Resets state in unexpected position |
 | WPM consistency | ±30% | `conversation.h` | Rejects cross-channel CQ |
-| Flush timeout | 4×dit | `channel.h` | Emit pending character |
-| Word timeout | 6×dit | `channel.h` | Emit space |
+| Flush timeout | 4×dit | `staged_core.h` | Emit pending character |
+| Word timeout | 6×dit | `staged_core.h` | Emit space |
+| Timing freeze | 30×dit silence | `staged_core.h` | Prevents noise-induced drift |
+| Learn threshold | conf ≥ 0.60 | `timing.h` | kalman2/log: skip state update below this |
+| Huber k | 2.0 σ | `timing.h` | logrobust only: downweight outlier state updates |
+| Benchmark seeds | 24 | `cw_bench_stats.h` | Mean CER stderr ≈ 0.01–0.05 |
+
+### Known defects deliberately left in place
+
+Documented in `decoder-investigation-2026-07.md`; each has a code comment. These
+look like bugs and are load-bearing — do not "fix" them without re-measuring.
+
+| Location | Defect | Why it stays |
+|---|---|---|
+| `timing.h` KalmanTiming | R adapts on the **posterior residual**, not the innovation | Correcting it regresses hand-keyed 0.158 → 0.223. The low R keeps the gain high, compensating for the linear-ms coordinate being wrong. Fix only with the log-domain move. |
+| `timing.h` KalmanTiming | Seed dead branch: ambiguous seed assumed all-dits | Deferring the seed also defers timing lock and retroDecode, breaking clean decoding (WPM sweep 0.01 → 0.364). Correct fix needs gap durations, which `classifyOn()` cannot see. |
+| `timing.h` LogTiming | No outlier gate on learning | Three variants tried (3σ relative, ln2 absolute, Huber). All fail: learning from outliers inflates R, which widens acceptance and keeps the filter tolerant. Rejecting them makes it brittle (qrm 0.002 → 0.393). |
+| `morse_tree.h` | Unmapped tree nodes emit `'\0'`, silently dropping the character | Real defect, not yet addressed — deletions cost the same as substitutions in CER but give the operator no cue. ⊘ magnitude never measured. |
+| `timing.h` adaptive gap centres | Farnsworth char/word split fails at ratio 2.0 | Measured, not yet fixed: oracle ablation puts the entire `farnsworth-2.0` error here (0.0141 → 0.0000 with ideal gap boundaries, detector irrelevant). Isolated and cheap. |
 
 ## Build
 

@@ -20,7 +20,10 @@ namespace cw {
         TIMING_KMEANS,
         TIMING_MEDIAN,
         TIMING_BIMODAL,
-        TIMING_KALMAN,      // Kalman filter with Bayesian gap classification
+        TIMING_KALMAN,      // Kalman filter with Bayesian gap classification (V1, historical)
+        TIMING_KALMAN_V2,   // + corrected dah gain, confidence-gated learning, fixed R floor
+        TIMING_LOG,         // log-duration Kalman: multiplicative jitter model (Mills 1977)
+        TIMING_LOG_ROBUST,  // + Huberised state update: outliers teach R but barely move x
     };
 
     // ════════════════════════════════════════════════════════════
@@ -242,9 +245,156 @@ namespace cw {
     //   P(dah|d) ~ N(d; 3*ditEst, 9*P + R)
     //   Pick whichever has higher likelihood, update accordingly.
     // ════════════════════════════════════════════════════════════
+    // V1 is the historical implementation, preserved byte-for-byte as the
+    // production default and as the comparison baseline. V2 carries the Stage-1
+    // corrections. Both stay in the tree: a variant is only promoted once it is
+    // better on every profile, never on an average.
+    enum KalmanVariant { KALMAN_V1, KALMAN_V2 };
+
+    // ════════════════════════════════════════════════════════════
+    // Strategy 5: Log-Domain Kalman
+    //
+    // State: x = ln(dit duration in ms), NOT the duration itself.
+    //
+    // Hand-keying jitter is multiplicative, not additive — a 10% timing error
+    // on a dah is three times as many milliseconds as the same error on a dit.
+    // Mills (TR-554, 1977) models this directly, with observation variance
+    // proportional to duration. Working in log space makes that variance
+    // constant, which collapses three separate defects in the linear model:
+    //
+    //   * dit and dah differ by a fixed offset ln(3), so there is ONE state and
+    //     one offset instead of two independently-drifting means.
+    //   * measurement noise is the same R for dit and dah, so the Kalman gain
+    //     is P/(P+R) in BOTH branches — the 81x dah-gain error of the linear
+    //     model (2.1a) becomes inexpressible.
+    //   * gap centres 1:3:7 become additive offsets 0 : ln3 : ln7, so
+    //     Farnsworth stretching is a shift rather than a scale change.
+    // ════════════════════════════════════════════════════════════
+    class LogTiming {
+    public:
+        void init() { reset(); }
+        void setRobust(bool r) { robust = r; }
+
+        TimingEvent classifyOn(float durationMs) {
+            TimingEvent evt;
+            evt.type = TimingEvent::KEY_ELEMENT;
+            evt.durationMs = durationMs;
+            if (durationMs < 1.0f) durationMs = 1.0f;
+
+            elementCount++;
+            float ld = logf(durationMs);
+
+            // Bootstrap: shortest seed element is taken as a dit.
+            if (elementCount <= seedCount) {
+                seedBuf[elementCount - 1] = ld;
+                float minL = seedBuf[0];
+                for (int i = 1; i < elementCount; i++) {
+                    if (seedBuf[i] < minL) minL = seedBuf[i];
+                }
+                if (elementCount == seedCount) {
+                    x = minL;
+                    P = 0.25f;   // ln-space variance: ~50% duration uncertainty
+                    R = 0.04f;   // ~20% duration measurement noise
+                }
+                evt.element = (ld < minL + LN3 * 0.5f) ? DIT : DAH;
+                evt.confidence = 0.3f;
+                return evt;
+            }
+
+            P += processNoise;
+
+            // Homoscedastic: both hypotheses share variance V, so the Gaussian
+            // normalisers cancel and this is a pure distance comparison.
+            float V = P + R;
+            float dDit = ld - x;
+            float dDah = ld - (x + LN3);
+            float ditLik = expf(-0.5f * dDit * dDit / V) * ditPrior;
+            float dahLik = expf(-0.5f * dDah * dDah / V);
+
+            float total = ditLik + dahLik;
+            float conf = (total > 0) ? std::max(ditLik, dahLik) / total : 0.5f;
+
+            // Same gain for both branches — the offset differs, the noise does not.
+            float innovation;
+            if (ditLik >= dahLik) { evt.element = DIT; innovation = dDit; }
+            else                  { evt.element = DAH; innovation = dDah; }
+
+            // Two independent gates, measuring different things:
+            //
+            //   conf      — can we tell dit from dah? Low when the duration
+            //               falls between the two hypotheses.
+            //   mahalanobis — is this a plausible element AT ALL? Distance to
+            //               the NEAREST hypothesis in sigma. A noise spike far
+            //               below both means scores conf ~ 1.0 (it is obviously
+            //               "more dit than dah") while being 14 sigma from any
+            //               real element. Without this test the filter learns
+            //               from spikes with full confidence.
+            // A hard outlier gate was tried here and rejected: it fixes the
+            // heavy-noise garbage flood (noise3.0 1.084 -> 0.703) but wrecks
+            // interference profiles at every threshold (qrm 0.002 -> 0.197 at
+            // 3 sigma, -> 0.393 at ln(2)). The reason is that rejecting an
+            // outlier suppresses TWO effects at once, and only one is harmful:
+            //
+            //   moving x  — harmful: a spike must not redefine the dit length
+            //   raising R — helpful: it widens acceptance and keeps the filter
+            //               tolerant, which is what qrm/qrn depend on
+            //
+            // ROBUST mode separates them with a Huber weight: the state update
+            // is downweighted for outliers, while R always learns from the full
+            // innovation. PLAIN mode keeps the unweighted update for comparison.
+            if (conf >= learnThreshold) {
+                float K = P / (P + R);
+                float w = 1.0f;
+                if (robust) {
+                    float z = fabsf(innovation) / sqrtf(V);
+                    if (z > huberK) { w = huberK / z; }
+                }
+                x += w * K * innovation;
+                P *= (1.0f - w * K);
+                R = R * 0.95f + 0.05f * innovation * innovation;
+            }
+
+            x = std::clamp(x, LN_DIT_MIN, LN_DIT_MAX);   // 8-35 WPM
+            P = std::clamp(P, 1e-4f, 0.25f);
+            R = std::clamp(R, 1e-3f, 0.25f);
+
+            evt.confidence = conf;
+            return evt;
+        }
+
+        float getDitDuration() const { return expf(x); }
+        float getWPM() const { float d = expf(x); return d < 1.0f ? 0 : 1200.0f / d; }
+        bool isLocked() const { return elementCount >= seedCount + 4; }
+
+        void reset() {
+            x = logf(80.0f);
+            P = 0.25f;
+            R = 0.04f;
+            elementCount = 0;
+        }
+
+    private:
+        static constexpr float LN3 = 1.0986123f;          // ln 3
+        static constexpr float LN_DIT_MIN = 3.526361f;    // ln 34 ms
+        static constexpr float LN_DIT_MAX = 5.010635f;    // ln 150 ms
+        static constexpr int seedCount = 3;
+        static constexpr float processNoise = 0.001f;
+        static constexpr float learnThreshold = 0.60f;
+        static constexpr float ditPrior = 1.2f;
+        static constexpr float huberK = 2.0f;   // innovations beyond 2 sigma are downweighted
+        bool robust = false;
+
+        float seedBuf[8] = {};
+        float x = 4.382027f;   // ln 80 ms
+        float P = 0.25f;
+        float R = 0.04f;
+        int elementCount = 0;
+    };
+
     class KalmanTiming {
     public:
         void init() { reset(); }
+        void setVariant(KalmanVariant v) { variant = v; }
 
         TimingEvent classifyOn(float durationMs) {
             TimingEvent evt;
@@ -254,20 +404,32 @@ namespace cw {
 
             elementCount++;
 
-            // Bootstrap: collect first few elements to get initial estimate
+            // Bootstrap: collect elements until the seed set contains BOTH
+            // dits and dahs, so that min(seed) is known to be a dit.
+            //
+            // A seed set whose elements are all within 1.8x of each other is
+            // ambiguous: they could be all dits or all dahs, and assuming dits
+            // seeds ditEst at a dah for messages opening with O, MM or TT — a
+            // 3x speed error that retroDecode then replays across the whole
+            // buffer. Collect more elements instead of guessing.
             if (elementCount <= seedCount) {
                 seedBuf[elementCount - 1] = durationMs;
                 if (elementCount == seedCount) {
                     float minD = seedBuf[0], maxD = seedBuf[0];
-                    for (int i = 1; i < seedCount; i++) {
+                    for (int i = 1; i < elementCount; i++) {
                         if (seedBuf[i] < minD) minD = seedBuf[i];
                         if (seedBuf[i] > maxD) maxD = seedBuf[i];
                     }
-                    if (maxD / minD > 1.8f) {
-                        ditEst = minD;
-                    } else {
-                        ditEst = minD;
-                    }
+                    // KNOWN DEFECT: when maxD/minD <= 1.8 the seed set is all
+                    // one element type and minD may be a DAH, seeding ditEst 3x
+                    // too high (messages opening O, MM, TT). Deferring the seed
+                    // until the set is unambiguous was tried and regresses clean
+                    // decoding badly (WPM sweep CER 0.01 -> 0.364) because it
+                    // also defers timing lock and retroDecode. The correct fix
+                    // uses gap durations to disambiguate -- gaps within a
+                    // character are element gaps ~= 1 dit -- which classifyOn()
+                    // cannot see. See docs/decoder-investigation-2026-07.md 2.1(c).
+                    ditEst = minD;
                     P = ditEst * ditEst * 0.25f;  // initial uncertainty: 50% of dit
                     R = ditEst * ditEst * 0.04f;   // measurement noise: 20% of dit
                 }
@@ -296,27 +458,59 @@ namespace cw {
             // Prior: dits are slightly more common than dahs in English Morse
             ditLik *= 1.2f;
 
+            // Classification confidence, computed BEFORE any state update so it
+            // can gate learning. An element whose dit/dah likelihoods are close
+            // carries almost no information about the true dit duration;
+            // updating from it injects noise into the estimate. This matters
+            // because the dah gain below is now correct (~0.9), so the filter
+            // tracks fast and a corrupted measurement moves it a long way.
+            float totalLikPre = ditLik + dahLik;
+            float confPre = (totalLikPre > 0) ? std::max(ditLik, dahLik) / totalLikPre : 0.5f;
+            bool learn = (variant == KALMAN_V1) || (confPre >= learnThreshold);
+
             if (ditLik >= dahLik) {
                 evt.element = DIT;
-                float K = P / (P + R);
-                ditEst += K * (durationMs - ditEst);
-                P *= (1.0f - K);
-                // Adapt R slowly — prevents QSB-induced outliers from blowing it up
+                if (learn) {
+                    float K = P / (P + R);
+                    ditEst += K * (durationMs - ditEst);
+                    P *= (1.0f - K);
+                }
+                // NOTE: this residual is POSTERIOR (after the update), not the
+                // innovation, so it is shrunk by the gain and biases R low.
+                // Formally wrong, but correcting it regresses CER both alone
+                // (hand-keyed 0.158 -> 0.223) and combined with the dah-gain
+                // fix (worstcase 0.383 -> 0.397). The low R keeps the gain high
+                // and compensates for this model being in the wrong coordinate:
+                // linear ms with additive noise, when jitter is multiplicative
+                // (Mills 1977). Fix with the move to log-duration, not before.
+                // See docs/decoder-investigation-2026-07.md 2.1(b).
                 float residual = durationMs - ditEst;
                 R = R * 0.95f + 0.05f * residual * residual;
             } else {
                 evt.element = DAH;
-                float impliedDit = durationMs / 3.0f;
-                float dahR = 9.0f * R;
-                float K = P / (P + dahR);
-                ditEst += K * (impliedDit - ditEst);
-                P *= (1.0f - K);
+                // Measurement is d = 3*dit + v. Expressed against
+                // impliedDit = d/3 the noise variance is R/9, not 9R — the
+                // classifier above already assumes R_dah = R (dahVar = 9P + R).
+                // The old 9R made dah observations move the estimate ~9x less
+                // than they should.
+                if (learn) {
+                    float impliedDit = durationMs / 3.0f;
+                    float dahR = (variant == KALMAN_V1) ? (9.0f * R) : (R / 9.0f);
+                    float K = P / (P + dahR);
+                    ditEst += K * (impliedDit - ditEst);
+                    P *= (1.0f - K);
+                }
             }
 
             // Clamp to practical WPM range (8-35 WPM)
             ditEst = std::clamp(ditEst, 34.0f, 150.0f);
             P = std::clamp(P, 1.0f, ditEst * ditEst * 0.25f);
-            R = std::clamp(R, std::max(ditEst * 0.05f, 4.0f), ditEst * ditEst * 0.1f);
+            // R is a variance (ms^2), so the floor must be quadratic in dit.
+            // The old floor was linear (ditEst * 0.05), which is dimensionally
+            // meaningless and evaluated to ~4 ms^2 at every speed.
+            float rFloor = (variant == KALMAN_V1) ? std::max(ditEst * 0.05f, 4.0f)
+                                                  : std::max(0.05f * ditEst * 0.05f * ditEst, 4.0f);
+            R = std::clamp(R, rFloor, ditEst * ditEst * 0.1f);
 
             float totalLik = ditLik + dahLik;
             evt.confidence = (totalLik > 0) ? std::max(ditLik, dahLik) / totalLik : 0.5f;
@@ -344,6 +538,8 @@ namespace cw {
         }
 
         static constexpr int seedCount = 3;
+        static constexpr float learnThreshold = 0.60f;  // V2: skip state update below this classification confidence
+        KalmanVariant variant = KALMAN_V1;
         static constexpr float processNoise = 0.001f;  // slow drift allowed
 
         float seedBuf[8] = {};
@@ -370,6 +566,8 @@ namespace cw {
         void init(float sampleRate, TimingStrategy strategy = TIMING_KALMAN) {
             _sampleRate = sampleRate;
             _strategy = strategy;
+            kalman.setVariant(strategy == TIMING_KALMAN_V2 ? KALMAN_V2 : KALMAN_V1);
+            logTiming.setRobust(strategy == TIMING_LOG_ROBUST);
             reset();
         }
 
@@ -379,7 +577,10 @@ namespace cw {
                 case TIMING_KMEANS:  result = kmeans.classifyOn(durationMs); break;
                 case TIMING_MEDIAN:  result = median.classifyOn(durationMs); break;
                 case TIMING_BIMODAL: result = bimodal.classifyOn(durationMs); break;
-                case TIMING_KALMAN:  result = kalman.classifyOn(durationMs); break;
+                case TIMING_KALMAN:
+                case TIMING_KALMAN_V2: result = kalman.classifyOn(durationMs); break;
+                case TIMING_LOG:
+                case TIMING_LOG_ROBUST: result = logTiming.classifyOn(durationMs); break;
                 default:             result = kalman.classifyOn(durationMs); break;
             }
             // Track element durations for gap sigma estimation
@@ -462,7 +663,10 @@ namespace cw {
                 case TIMING_KMEANS:  return kmeans.getWPM();
                 case TIMING_MEDIAN:  return median.getWPM();
                 case TIMING_BIMODAL: return bimodal.getWPM();
-                case TIMING_KALMAN:  return kalman.getWPM();
+                case TIMING_KALMAN:
+                case TIMING_KALMAN_V2: return kalman.getWPM();
+                case TIMING_LOG:
+                case TIMING_LOG_ROBUST: return logTiming.getWPM();
             }
             return 0;
         }
@@ -472,7 +676,10 @@ namespace cw {
                 case TIMING_KMEANS:  return kmeans.getDitDuration();
                 case TIMING_MEDIAN:  return median.getDitDuration();
                 case TIMING_BIMODAL: return bimodal.getDitDuration();
-                case TIMING_KALMAN:  return kalman.getDitDuration();
+                case TIMING_KALMAN:
+                case TIMING_KALMAN_V2: return kalman.getDitDuration();
+                case TIMING_LOG:
+                case TIMING_LOG_ROBUST: return logTiming.getDitDuration();
             }
             return 80.0f;
         }
@@ -482,7 +689,10 @@ namespace cw {
                 case TIMING_KMEANS:  return kmeans.isLocked();
                 case TIMING_MEDIAN:  return median.isLocked();
                 case TIMING_BIMODAL: return bimodal.isLocked();
-                case TIMING_KALMAN:  return kalman.isLocked();
+                case TIMING_KALMAN:
+                case TIMING_KALMAN_V2: return kalman.isLocked();
+                case TIMING_LOG:
+                case TIMING_LOG_ROBUST: return logTiming.isLocked();
             }
             return false;
         }
@@ -492,6 +702,7 @@ namespace cw {
             median.reset();
             bimodal.reset();
             kalman.reset();
+            logTiming.reset();
             elementDurations.clear();
             gapDurations.clear();
         }
@@ -587,6 +798,7 @@ namespace cw {
         MedianTiming median;
         BimodalTiming bimodal;
         KalmanTiming kalman;
+        LogTiming logTiming;
 
         std::vector<float> elementDurations;  // recent ON-durations for sigma estimation
         std::vector<float> gapDurations;      // recent OFF-durations for gap center estimation

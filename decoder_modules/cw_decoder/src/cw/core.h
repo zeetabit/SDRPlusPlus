@@ -1,0 +1,159 @@
+#pragma once
+#include <dsp/types.h>
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+#include "timing.h"
+
+namespace cw {
+
+    // ════════════════════════════════════════════════════════════
+    // Pluggable decoding architecture.
+    //
+    // Two levels, because two kinds of decoder must coexist:
+    //
+    //   IDecodeCore  — IQ in, characters out. The outer contract.
+    //                  Jointly-estimating decoders (Bell 1977 trellis, HMM/EM)
+    //                  implement this DIRECTLY: their detection, timing and
+    //                  symbol decoding are one inseparable computation and
+    //                  cannot be expressed as a pipeline of stages.
+    //
+    //   StagedCore   — one implementation of IDecodeCore that composes
+    //                  independently swappable stages (front end, detector,
+    //                  timing, symbol decoder). The current decoder is a
+    //                  configuration of this. Mixing stages happens here.
+    //
+    // Both appear in the same registry, so the module config UI and the
+    // benchmark matrix enumerate cores identically and neither needs to know
+    // which kind it is holding.
+    //
+    // Post-processing (corrector, conversation, TextBuffer) is owned by Channel
+    // and is identical for every core — a core never touches decoded text
+    // directly, only the CharSink. That keeps the benchmark measuring decoding.
+    // ════════════════════════════════════════════════════════════
+
+    struct CoreStats {
+        float snr        = 0;
+        float wpm        = 0;
+        float confidence = 0;
+        bool  locked     = false;
+    };
+
+    // Where decoded characters go.
+    class CharSink {
+    public:
+        virtual ~CharSink() = default;
+        virtual void emitChar(char c, float confidence) = 0;
+        // Word boundary reached: run spelling correction on the pending word,
+        // but do NOT append a space. emitWordGap() = flushWord() + space.
+        virtual void flushWord() = 0;
+        virtual void emitWordGap() = 0;
+        // Discard everything emitted so far — used when a core retro-decodes
+        // and replaces provisional output with a better-timed reconstruction.
+        virtual void clearEmitted() = 0;
+    };
+
+    // ── Outer contract ──────────────────────────────────────────
+
+    class IDecodeCore {
+    public:
+        virtual ~IDecodeCore() = default;
+
+        virtual void init(float sampleRate, float internalRate, float toneFreq) = 0;
+        virtual void setToneFreq(float freq) = 0;
+        virtual void reset() = 0;
+
+        virtual void process(int count, const dsp::complex_t* iq, CharSink& sink) = 0;
+
+        virtual CoreStats stats() const = 0;
+
+        // Envelope for the UI waveform display. Empty = nothing to show.
+        virtual const float* diagnostic(int& countOut) const { countOut = 0; return nullptr; }
+
+        // Optional: pre-charge noise estimation. No-op for cores without one.
+        virtual void preseed(float level, int count) { (void)level; (void)count; }
+    };
+
+    // ── Swappable stages (used by StagedCore only) ──────────────
+
+    struct KeyEvent;   // from tone_detector.h
+
+    // Stage 1: IQ → envelope at the internal rate.
+    class IFrontEnd {
+    public:
+        virtual ~IFrontEnd() = default;
+        virtual void init(float toneFreq, float sampleRate, float internalRate) = 0;
+        virtual void setToneFreq(float freq) = 0;
+        // Returns the number of envelope samples written to `out`.
+        virtual int process(int count, const dsp::complex_t* in, float* out) = 0;
+        virtual const char* name() const = 0;
+    };
+
+    // Stage 2: envelope → key up/down events.
+    class IDetector {
+    public:
+        virtual ~IDetector() = default;
+        virtual void init(float internalRate) = 0;
+        virtual void reset() = 0;
+        virtual std::vector<KeyEvent> process(const float* envelope, int count) = 0;
+        virtual float getSNR() const = 0;
+        virtual bool isKeyDown() const = 0;
+        virtual const char* name() const = 0;
+        // Pre-charge the noise estimator so detection can start immediately.
+        virtual void preseed(float level, int count) { (void)level; (void)count; }
+    };
+
+    // Stage 3: durations → DIT/DAH and gap classes.
+    // AdaptiveTiming already implements four strategies behind one type; this
+    // interface exists so a log-domain or discrete-speed model can replace it.
+    class ITiming {
+    public:
+        virtual ~ITiming() = default;
+        virtual void init(float internalRate) = 0;
+        virtual void reset() = 0;
+        virtual TimingEvent classifyOn(float durationMs) = 0;
+        virtual TimingEvent classifyOff(float durationMs) = 0;
+        virtual float getDitDuration() const = 0;
+        virtual float getWPM() const = 0;
+        virtual bool isLocked() const = 0;
+        virtual const char* name() const = 0;
+        // A fresh instance of the same implementation and configuration.
+        // Retro-decoding replays saved events through a second, seeded model.
+        virtual std::unique_ptr<ITiming> makeFresh() const = 0;
+    };
+
+    // Stage 4: element sequence → character.
+    class ISymbolDecoder {
+    public:
+        virtual ~ISymbolDecoder() = default;
+        virtual void init() = 0;
+        virtual void reset() = 0;
+        virtual void addElement(Element e, float confidence) = 0;
+        virtual char characterBreak() = 0;
+        virtual const char* name() const = 0;
+        virtual std::unique_ptr<ISymbolDecoder> makeFresh() const = 0;
+    };
+
+    // ── Registry ────────────────────────────────────────────────
+    //
+    // One named entry per benchmarkable configuration. The config UI lists
+    // these; the benchmark matrix iterates them. Adding a core or a stage
+    // combination means adding a registry entry and nothing else.
+
+    struct CoreSpec {
+        std::string name;         // stable id, e.g. "legacy", "legacy+median"
+        std::string description;
+        std::function<std::unique_ptr<IDecodeCore>()> make;
+    };
+
+    // Defined in core_registry.h once concrete cores exist.
+    const std::vector<CoreSpec>& coreRegistry();
+
+    inline const CoreSpec* findCore(const std::string& name) {
+        for (const auto& s : coreRegistry()) {
+            if (s.name == name) { return &s; }
+        }
+        return nullptr;
+    }
+}

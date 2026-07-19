@@ -24,6 +24,10 @@ add_executable(cw_decoder_tests
     test_edge_cases.cpp
     test_weak_signal.cpp
     test_benchmark.cpp
+    test_benchmark_multiseed.cpp
+    test_registry.cpp
+    test_matrix.cpp
+    test_oracle.cpp
     test_debug_decode.cpp
     test_speed.cpp
     test_farnsworth.cpp

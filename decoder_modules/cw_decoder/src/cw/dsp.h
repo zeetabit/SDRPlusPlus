@@ -18,7 +18,12 @@ namespace cw {
     // Output: float envelope at INTERNAL_RATE (1000 Hz)
     class EnvelopeDSP {
     public:
-        void init(float toneFreq, float sampleRate, float internalRate) {
+        // Filter geometry is parameterized because pre-detection bandwidth is a
+        // decoding design choice, not a fixed constant — the benchmark matrix
+        // varies it. Defaults reproduce the historical behaviour exactly.
+        void init(float toneFreq, float sampleRate, float internalRate,
+                  float bpfCutoff = 100.0, float bpfTrans = 100.0,
+                  float smoothCutoff = 80.0, float smoothTrans = 100.0) {
             _sampleRate = sampleRate;
             _internalRate = internalRate;
             _decimRatio = (int)(sampleRate / internalRate);
@@ -30,7 +35,7 @@ namespace cw {
             // 100 Hz cutoff, 100 Hz transition → ~200 Hz effective BW, ~20 taps.
             // Must be wide enough for CW keying bandwidth (50-80 Hz at typical WPM)
             // while rejecting adjacent signals 200+ Hz away.
-            bpfTaps = dsp::taps::lowPass(100.0, 100.0, _internalRate);
+            bpfTaps = dsp::taps::lowPass(bpfCutoff, bpfTrans, _internalRate);
             bpfBufSize = bpfTaps.size - 1;
             bpfBuffer = dsp::buffer::alloc<dsp::complex_t>(bpfBufSize + 65536);
             dsp::buffer::clear(bpfBuffer, bpfBufSize);
@@ -40,7 +45,7 @@ namespace cw {
             // 80 Hz cutoff, 100 Hz transition → ~20 taps.
             // Wider bandwidth preserves edge timing for jittery/QSB signals.
             // The matched filter in channel.h provides additional narrowing.
-            smoothTaps = dsp::taps::lowPass(80.0, 100.0, _internalRate);
+            smoothTaps = dsp::taps::lowPass(smoothCutoff, smoothTrans, _internalRate);
             smoothBufSize = smoothTaps.size - 1;
             smoothBuffer = dsp::buffer::alloc<float>(smoothBufSize + 65536);
             dsp::buffer::clear(smoothBuffer, smoothBufSize);

@@ -161,9 +161,43 @@ namespace cw_test {
 
     // ── Full message generator: text → IQ samples ──
 
+    // Ground truth: what the generator actually keyed, sample-exact.
+    //
+    // Oracle ablation replaces a pipeline stage with a perfect one to measure
+    // that stage's headroom. Detector scoring compares emitted key events
+    // against these boundaries. Both need the semantic label, not just the
+    // edge, so segments carry their element/gap class.
+    enum TruthKind {
+        TRUTH_DIT, TRUTH_DAH,
+        TRUTH_ELEMENT_GAP, TRUTH_CHAR_GAP, TRUTH_WORD_GAP,
+        TRUTH_WARMUP, TRUTH_TRAILING
+    };
+
+    struct TruthSegment {
+        bool tone;
+        long long startSample;   // inclusive, at params.sampleRate
+        long long endSample;     // exclusive
+        TruthKind kind;
+    };
+
+    // The durations the generator actually keys, before jitter. Recorded here
+    // rather than re-derived by consumers: weightBias and farnsworthRatio move
+    // these away from the nominal 1:3 and 1:3:7 ratios, and an oracle that
+    // re-derives them silently drifts when the generator changes.
+    struct ElementModel {
+        float nominalDitMs = 0;   // 1200/WPM — the speed, unaffected by weighting
+        float ditMs = 0;          // weighted
+        float dahMs = 0;          // weighted
+        float elemGapMs = 0;
+        float charGapMs = 0;      // Farnsworth-stretched
+        float wordGapMs = 0;      // Farnsworth-stretched
+    };
+
     struct GeneratedSignal {
         std::vector<dsp::complex_t> samples;
         std::string sourceText;  // canonical text that was encoded
+        std::vector<TruthSegment> segments;
+        ElementModel model;
     };
 
     inline GeneratedSignal generateMessage(const std::string& text, SignalParams params) {
@@ -173,33 +207,39 @@ namespace cw_test {
         GeneratedSignal result;
         result.sourceText = "";
 
+        // Taken from the generator itself, so the two cannot disagree.
+        result.model.nominalDitMs = params.ditMs;
+        result.model.ditMs       = gen.weightedDit();
+        result.model.dahMs       = gen.weightedDah();
+        result.model.elemGapMs   = params.ditMs;
+        result.model.charGapMs   = params.ditMs * 3.0f * params.farnsworthRatio;
+        result.model.wordGapMs   = params.ditMs * 7.0f * params.farnsworthRatio;
+
         // 200ms warmup silence — enough for noise floor to converge
         int warmupSamples = (int)(0.2f * params.sampleRate);
         result.samples.resize(warmupSamples);
         gen.generate(result.samples.data(), warmupSamples, false);
+        result.segments.push_back({false, 0, warmupSamples, TRUTH_WARMUP});
 
         int chunkMax = 65536;
         std::vector<dsp::complex_t> buf(chunkMax);
 
-        auto appendSilence = [&](float ms) {
+        // Single append path so tone/silence draw from the RNG in the same
+        // order as before the truth recording was added.
+        auto append = [&](float ms, bool tone, TruthKind kind) {
             int samples = std::max(1, (int)(ms / 1000.0f * params.sampleRate));
             buf.resize(std::max((int)buf.size(), samples));
-            gen.generate(buf.data(), samples, false);
+            gen.generate(buf.data(), samples, tone);
+            long long start = (long long)result.samples.size();
             result.samples.insert(result.samples.end(), buf.data(), buf.data() + samples);
-        };
-
-        auto appendTone = [&](float ms) {
-            int samples = std::max(1, (int)(ms / 1000.0f * params.sampleRate));
-            buf.resize(std::max((int)buf.size(), samples));
-            gen.generate(buf.data(), samples, true);
-            result.samples.insert(result.samples.end(), buf.data(), buf.data() + samples);
+            result.segments.push_back({tone, start, start + samples, kind});
         };
 
         for (size_t ci = 0; ci < text.size(); ci++) {
             char c = toupper(text[ci]);
             if (c == ' ') {
                 // Word gap: 7 dit lengths, stretched by Farnsworth ratio.
-                appendSilence(gen.jitter(params.ditMs * 7.0f * params.farnsworthRatio));
+                append(gen.jitter(params.ditMs * 7.0f * params.farnsworthRatio), false, TRUTH_WORD_GAP);
                 result.sourceText += ' ';
                 continue;
             }
@@ -210,22 +250,23 @@ namespace cw_test {
             result.sourceText += c;
 
             for (size_t ei = 0; ei < morse.size(); ei++) {
-                float onMs = (morse[ei] == '.') ? gen.jitter(gen.weightedDit())
-                                                 : gen.jitter(gen.weightedDah());
-                appendTone(onMs);
+                bool isDit = (morse[ei] == '.');
+                float onMs = isDit ? gen.jitter(gen.weightedDit())
+                                   : gen.jitter(gen.weightedDah());
+                append(onMs, true, isDit ? TRUTH_DIT : TRUTH_DAH);
                 if (ei + 1 < morse.size()) {
-                    appendSilence(gen.jitter(params.ditMs));  // element gap
+                    append(gen.jitter(params.ditMs), false, TRUTH_ELEMENT_GAP);
                 }
             }
 
             // Character gap (3 dit lengths), stretched by Farnsworth ratio.
             if (ci + 1 < text.size() && text[ci + 1] != ' ') {
-                appendSilence(gen.jitter(params.ditMs * 3.0f * params.farnsworthRatio));
+                append(gen.jitter(params.ditMs * 3.0f * params.farnsworthRatio), false, TRUTH_CHAR_GAP);
             }
         }
 
         // Trailing word gap to flush decoder
-        appendSilence(gen.jitter(params.ditMs * 10.0f));
+        append(gen.jitter(params.ditMs * 10.0f), false, TRUTH_TRAILING);
 
         return result;
     }

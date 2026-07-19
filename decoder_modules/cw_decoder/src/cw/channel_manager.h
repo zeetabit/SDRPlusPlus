@@ -45,7 +45,9 @@ namespace cw {
     // A mutex protects entries during structural changes.
     class ChannelManager {
     public:
-        bool debugLog = false;  // Set from module entrypoint to enable channel debug output
+        // Propagated to every Channel on creation. Toggle via the "debugLog"
+        // config key (read once at module init in main.cpp).
+        bool debugLog = false;
 
         void init(float sampleRate) {
             scanner.init(sampleRate, 1024);

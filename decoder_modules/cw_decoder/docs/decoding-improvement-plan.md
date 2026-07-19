@@ -1,5 +1,49 @@
 # CW Decoder — Decoding Improvement Plan
 
+> **STATUS (2026-07): this document is now partly historical.**
+>
+> It records Phases 1–10 and the research behind them, and remains the reference
+> for *why* the current design looks the way it does. But several of its
+> measurements and two of its research claims did not survive re-testing.
+> Superseding document: **`decoder-investigation-2026-07.md`** — audit,
+> controlled experiments, 24-seed baselines, and the current proposal.
+>
+> Corrections are marked inline below with ⚠ and an evidence-strength label.
+> Where evidence is not yet conclusive the claim is marked CONTESTED rather than
+> rewritten — it should be amended only once the evidence is decisive.
+>
+> **Evidence markers** (shared across the module docs; legend in
+> `decoder-investigation-2026-07.md` §1): ⊘ EVIDENCE NEEDED, ⚠ CONTESTED,
+> ✗ REFUTED, 📎 SECOND-HAND.
+>
+> ⊘ **This document predates the measurement discipline.** Its "Key Insights",
+> "What Was Tried and Didn't Work" and "Research" sections record reasoning and
+> single-seed observations, not multi-seed measurement. Treat every ranking or
+> causal claim in them as unverified unless the investigation document confirms
+> it.
+>
+> **The single most important caveat:** every benchmark number in this document
+> is a **single noise realization on `seed = 42`**. See the Benchmark Results
+> section.
+>
+> ### Work completed since (all in the registry, none promoted)
+>
+> | stage | outcome |
+> |---|---|
+> | Multi-seed harness | 24-seed gates; hand-keyed found ~4× worse than documented |
+> | Pluggable cores | `IDecodeCore` + stages + registry; `legacy` byte-identical |
+> | Benchmark matrix | core × profile × {CER/WER, ins/del/sub, latency/CPU, WPM RMS} |
+> | Kalman corrections | `legacy+kalman2` — worstcase 0.624 → 0.350 |
+> | Log-duration timing | `legacy+log` — best on 5 profiles, blocked on heavy noise |
+> | Huberised update | `legacy+logrobust` — refuted; localises blocker to the detector |
+> | Oracle ablation | per-stage headroom measured; "physical limit" claim refuted |
+>
+> **Next:** the detector (`tone_detector.h`), for the AWGN/QSB/QRN family only.
+> Oracle ablation confirms 100% of the error on those profiles is at the
+> detector. It also corrects the scope: hand-keyed profiles are a *timing*
+> fault, Farnsworth is a *gap-classification* fault, and `worstcase` needs both
+> the detector and the duration model fixed together.
+
 ## Current State (after Phase 1-10 implementation)
 
 ### Implemented
@@ -29,6 +73,30 @@
 
 ### Benchmark Results
 
+> **⚠ MEASUREMENT CAVEAT (added 2026-07).** Every figure in this table is a
+> **single noise realization on `seed = 42`** (`cw_test_signals.h:62`; only one
+> test in the suite ever overrides it). The numbers below reproduce exactly and
+> are not arithmetic errors — but a single draw carries no variance estimate,
+> and CER is quantized to 1/23 = 0.043 on `MSG_CQ`, so no value between 0 and
+> 0.043 is distinguishable from zero.
+>
+> Verified by ablation (`test_benchmark_multiseed.cpp`, "single-seed vs
+> multi-seed"), varying seed count alone on the identical message:
+>
+> | Profile | this table (seed 42) | **24 seeds, same message** |
+> |---|---|---|
+> | Hand-keyed 15 WPM | 0.0 "Perfect" | **0.134** |
+> | Hand-keyed 20 WPM | 0.043 | **0.156** |
+> | Hand-keyed 25 WPM | 0.043 | **0.150** |
+>
+> **Status: the jitter rows are superseded** — see
+> `decoder-investigation-2026-07.md` §3.1 for the 24-seed baseline. The clean,
+> mild-noise, moderate-noise and Farnsworth-1.5 rows were re-measured at 24
+> seeds and **hold at 0.000**.
+>
+> **Not yet re-measured (treat as single-seed until confirmed):** QSB, QRM, QRN,
+> contest, Farnsworth 2.0, worst case.
+
 | Profile | CER | Notes |
 |---------|-----|-------|
 | Clean 15 WPM | 0.0 | Perfect across 8-35 WPM range |
@@ -53,7 +121,12 @@
 
 ### Key Insights
 
-#### RetroDecoding is the Single Biggest Improvement
+#### RetroDecoding is the Single Biggest Improvement ⊘
+
+> ⊘ **EVIDENCE NEEDED for the ranking.** The mechanism below is real and the
+> code does what it says, but "single biggest" was never measured against the
+> alternatives — no ablation removing retroDecode was ever run. The oracle
+> harness (`decoder-investigation-2026-07.md` §11) can now settle this directly.
 
 The naive approach — run detector, feed timing, emit text as you go — fails because timing needs ~7 elements to lock. Before lock, element classification uses the default estimate (often wrong), garbling the first 2-3 characters.
 
@@ -77,6 +150,24 @@ Standard CW: element gaps = 1×dit, char gaps = 3×dit, word gaps = 7×dit. Farn
 Fix: track observed gap durations in a 40-element sliding window. Split into short (elements) and long (char+word) clusters. Within long cluster, find the largest gap to split char from word. Use observed centers as Gaussian means instead of hardcoded ratios.
 
 #### Noise+QSB is a Physical Limit
+
+> **✗ REFUTED (2026-07). This heading is retained for history; the conclusion
+> below is wrong.**
+>
+> Oracle ablation takes `worstCase` from **0.6244 to 0.0792** — an 87%
+> reduction with no change whatsoever to the signal, only to the decoder. A
+> profile that improves 8× under a better decoder is not at a physical limit.
+>
+> Evidence: 24 seeds, in-tree, `decoder-investigation-2026-07.md` §11. Three
+> independent lines now agree — timing corrections alone gave 0.624 → 0.350
+> (§8), a narrower BPF gave 0.581 → 0.364 at 16 seeds (§4.5), and the oracle
+> bound is 0.0792.
+>
+> **What is true instead:** `worstCase` is a *two-stage* failure. Perfect
+> detection alone reaches 0.4149; a perfect duration model alone reaches
+> 0.3644; together they reach 0.0792. The stages are strongly super-additive,
+> so fixing either one in isolation recovers only ~40% and looks like hitting a
+> wall. That is the observation the "physical limit" reading came from.
 
 Diagnostic breakdown of worst-case profile (noiseAmp=1.5, jitter=20%, QSB 0.5Hz/50%, QRM, QRN):
 
@@ -128,12 +219,30 @@ Key fix: QRN garble "+Q" → "CQ" (edit distance 1 from dictionary word "CQ", lo
 
 ## Research: How Others Handle CW
 
+> 📎 **SECOND-HAND — applies to this entire section.** Every figure below is
+> quoted from another project, blog post or paper and none has been reproduced
+> in-tree. The AG1LE CER/SNR table in particular is the basis for this module's
+> filter-bandwidth reasoning, and a controlled in-tree experiment
+> (`decoder-investigation-2026-07.md` §4) found the achievable gain to be about
+> **half** what a noise-bandwidth reading of that table predicts.
+
 ### fldigi (source: cw.cxx)
 - `agc_peak`: fast attack (factor 20) / slow decay (factor 800) envelope follower
 - Dual thresholds: `CWupper` / `CWlower` with state machine (RS_IDLE → RS_IN_TONE → RS_AFTER_TONE)
 - `cw_adaptive_receive_threshold`: tracks 2×dit duration via tracking filter
 - FFT sin(x)/x filter — very steep lowpass, optimum for CW in white noise
 - SOM (Self-Organizing Map) decoder gives ~5% better CER than legacy at -13 dB
+  > **⚠ CONTESTED (2026-07) — verify against fldigi source before relying on
+  > this.** A source read of `fldigi/src/cw_rtty/cw.cxx` reports `som_table[]`
+  > is a *hardcoded, hand-written* codebook (weights `0.33` dit / `1.0` dah,
+  > never trained) and `find_winner()` is plain nearest-neighbour Euclidean
+  > distance over a 7-element vector — i.e. a fixed template matcher, not a
+  > self-organizing map. AG1LE's trained-SOM experiments were real but may
+  > never have shipped.
+  >
+  > Evidence strength: **second-hand source read, not verified first-hand.**
+  > The "~5% better CER at -13 dB" figure also has no located primary source.
+  > Recheck by reading `cw.cxx` directly before amending or striking.
 - Matched filter automatically sets bandwidth optimal for CW speed
 
 ### AG1LE CER vs SNR Data (fldigi, 20 WPM)
@@ -163,6 +272,16 @@ Key finding: **filter bandwidth is the dominant factor** — 35 Hz vs 68 Hz = 20
 
 ### Approaches Matrix
 
+> ⊘ **EVIDENCE NEEDED for every row not marked Done.** The Jitter / Noise /
+> Complexity columns on candidate and future rows are *estimates made before
+> implementation*, not measurements. Rows #14–16 and #24–27 in particular carry
+> no data. Rows marked **Done** have measured CER in the results table above or
+> in `decoder-investigation-2026-07.md`.
+>
+> The scorecard in that document (§10) puts pre-implementation predictions at
+> roughly 50% accuracy, so these ratings should not be used to order work
+> without an oracle-ablation estimate of the headroom first.
+
 | # | Approach | Jitter | Noise | Complexity | Status |
 |---|---------|--------|-------|-----------|--------|
 | 1 | Kalman filter timing | High | Medium | Medium | **Done** |
@@ -181,6 +300,43 @@ Key finding: **filter bandwidth is the dominant factor** — 35 Hz vs 68 Hz = 20
 | 14 | ATC (W7AY) | Medium | High | Medium | Candidate |
 | 15 | Coherent detection (PLL) | Medium | Very High | High | Candidate |
 | 16 | LSTM RNN | Very High | Very High | Very High | Future |
+| 17 | Multi-seed benchmark harness | N/A | N/A | Low | **Done (2026-07)** |
+| 18 | Pluggable decode cores + registry | N/A | N/A | Medium | **Done (2026-07)** |
+| 19 | Core × profile benchmark matrix | N/A | N/A | Medium | **Done (2026-07)** |
+| 20 | Kalman dah-gain correction | High | Medium | Low | **Done — variant `+kalman2`** |
+| 21 | Log-duration timing (Mills) | Very High | Medium | Medium | **Done — variant `+log`** |
+| 22 | Narrow pre-detection BPF | Low (−) | Very High | Low | **Measured — variants `+bpf*`** |
+| 23 | Huberised robust timing update | Low | None | Low | **Refuted (2026-07)** |
+| 24 | Likelihood-ratio detector | Medium | High | High | **Next** |
+| 25 | Gap ambiguity inside the beam | High | Medium | Medium | Candidate |
+| 26 | Callsign database (SCP/Master.dta) | N/A | N/A | Low | Candidate |
+| 27 | Bell 1977 trellis core | High | Very High | Very High | Future |
+| 28 | Oracle ablation harness | N/A | N/A | Low | **Done (2026-07)** |
+| 29 | Adaptive gap centres rewrite (Farnsworth) | N/A | Low | Low | **Candidate — measured 0.0141 → 0** |
+| 30 | Real-recording benchmark + model-mismatch profiles | N/A | N/A | Medium | **Prerequisite for #24** |
+
+### Results of 2026-07 work (24 seeds, MSG_FULL, mean CER)
+
+`legacy` is unchanged and remains the default; nothing below was promoted.
+Full tables and method: `decoder-investigation-2026-07.md` §8–10.
+
+| profile | `legacy` | `+kalman2` | `+log` | `+bimodal` |
+|---|---|---|---|---|
+| clean 15/25 WPM | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| hand-keyed 15 WPM | 0.1579 | 0.0340 | **0.0288** | 0.0399 |
+| hand-keyed 20 WPM | 0.2001 | 0.0446 | **0.0329** | 0.0469 |
+| hand-keyed 25 WPM | 0.1309 | 0.1320 | 0.0857 | **0.0563** |
+| QSB | 0.0117 | **0.0070** | 0.0100 | 0.0364 |
+| QRM | 0.0100 | **0.0018** | **0.0018** | 0.0053 |
+| QRN | 0.0029 | 0.0023 | **0.0006** | **0.0006** |
+| worst case | 0.6244 | **0.3498** | 0.3615 | 0.6408 |
+| noise 2.0 | 0.0827 | 0.0399 | **0.0340** | 0.0915 |
+| noise 3.0 | 0.8163 | **0.7060** | 1.0839 | 1.0681 |
+| noise 4.0 | **0.9032** | 0.9888 | 1.5487 | 1.3762 |
+
+**worst case improved 44% from timing corrections alone** (0.624 → 0.350) — more
+than any filter change achieved, and further evidence against the "physical
+limit" framing marked CONTESTED above.
 
 ## Phase Details
 
@@ -246,3 +402,51 @@ Key finding: **filter bandwidth is the dominant factor** — 35 Hz vs 68 Hz = 20
 - **Real-world validation** — W1AW recordings, contest recordings, A/B vs fldigi
 - **Coherent detection** — PLL locked to CW tone for better SNR in noise+QSB
 - **Narrowband adaptive filter** — runtime BPF tap update matched to locked WPM (needs glitch-free filter transition)
+
+### Phase 11: Measurement + Modularity (DONE, 2026-07)
+- Multi-seed benchmark harness (`cw_bench_stats.h`, 24 seeds, mean + p95 + stderr)
+- Error-type breakdown (ins/del/sub) — distinguishes a decoder that goes silent
+  from one that emits garbage; aggregate CER cannot
+- Pluggable `IDecodeCore` + swappable stages + name-keyed registry
+- Core × profile benchmark matrix, on-demand (`[matrix]`)
+- Verified by byte-identical characterization output before/after the refactor
+
+### Phase 12: Timing Corrections (DONE, 2026-07 — variants, not promoted)
+- `+kalman2`: dah measurement gain corrected (was 81× too small), confidence-gated
+  learning, R floor made dimensionally correct
+- `+log`: state is `ln(dit)` — dit/dah differ by a constant `ln 3`, jitter is
+  homoscedastic, so the dah-gain class of bug becomes inexpressible
+- `+logrobust`: Huberised state update — refuted, no blocker relief
+
+### Phase 13: Oracle Ablation (DONE, 2026-07)
+Ground truth recorded in the signal generator (`TruthSegment[]`, `ElementModel`)
+plus two test-only oracle stages, run as a 2×2. Measures per-stage headroom
+instead of only ranking cores against each other.
+
+Results and caveats: `decoder-investigation-2026-07.md` §11. Headlines:
+- 100% of AWGN/QSB/QRN error is at the detector; timing contributes nothing there
+- hand-keyed is almost entirely *timing* (0.1579 → 0.0153 with `+tim` alone)
+- Farnsworth is purely *gap classification* (0.0141 → 0.0000)
+- `worstcase` is super-additive: 0.6244 → 0.0792 only with both stages
+- "Noise+QSB is a physical limit" refuted
+
+It also corrected a conclusion three prior experiments had not surfaced, and its
+own first version reported an instrument defect as an irreducible floor — see
+§10 "An instrument's own defects look exactly like findings".
+
+### Phase 14: Detector (NEXT)
+Scoped by Phase 13 to the AWGN/QSB/QRN family. `tone_detector.h` applies a
+fixed-fraction Schmitt threshold to a magnitude envelope and emits a hard binary
+decision, discarding the soft information before timing ever sees it.
+
+Immediate step is **detector ground-truth metrics** — attribution is settled, so
+the open question is which kind of detector error dominates (false key-downs vs
+edge bias vs jitter).
+
+**Prerequisite (#30):** the generator adds complex Gaussian noise, so its
+envelope is exactly Rician — the model a likelihood-ratio detector assumes.
+Benchmarked on this suite alone such a detector is being tested against its own
+generative assumptions. Real recordings and model-mismatch profiles are required
+before committing to the rewrite, not after.
+
+Planning: `decoder-investigation-2026-07.md` §12.
