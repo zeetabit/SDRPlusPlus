@@ -68,6 +68,14 @@ namespace cw {
             tree[68].character = '*';  // ...-.- (SK — end of contact)
             // BT (-...-) is same as '=' at tree[48], already mapped
 
+            // Punctuation. Absent until 2026-07-20, which made every period
+            // decode as '*' (nearest mapped node, SK) and every comma vanish.
+            // Invisible to the synthetic suite: MSG_CQ and MSG_FULL are the
+            // only messages it sends and neither contains punctuation. Real
+            // ARRL code practice text is 23 periods and 21 commas per session.
+            tree[84].character  = '.';  // .-.-.- (AR at tree[41] plus a dah)
+            tree[114].character = ',';  // --..-- (Z at tree[27] plus two dahs)
+
             // English letter frequency prior (relative, used for tie-breaking)
             memset(letterPrior, 0, sizeof(letterPrior));
             letterPrior['E'-'A'] = 13.0f; letterPrior['T'-'A'] = 9.1f;

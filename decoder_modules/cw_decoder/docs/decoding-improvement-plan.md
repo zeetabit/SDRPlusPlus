@@ -46,14 +46,22 @@
 > | Guard probe (Phase 18) | confirmed Phase 17's mechanism; key-up instant attack is load-bearing |
 > | Guard sweep (Phase 19) | guard is honest, 1.8 Pareto-optimal; detector line closed |
 > | Test hardening | every Phase 16–19 sweep had a non-failing assertion; all replaced (§13.11) |
-> | Farnsworth gap centres (Phase 21) | **first promotion in seven phases** — `farnsworth-2.0` 0.0141 → 0.0000; cause was one cold-start gap, not the clustering (§16) |
+> | Farnsworth gap centres (Phase 21) | cause found (one cold-start gap, not the clustering); fix **not shipped** — fragile by 0.5 ms and breaks a gate. Retro gap seeding promoted instead: `qrm` 0.0100 → 0.0035 (§16) |
+> | Gap classification under noise (Phase 22) | ⊘ item closed, measurement only. Error multiplication **confirmed**: 12.2% of structurally intact gaps misclassified at noise 3.0 vs 0.0% clean — but the driver is a **+38.9% dit overestimate**, not gap fragmentation. Two new measured defects; #29 reframed (§17) |
 >
-> **Next:** real recordings (#30) — now the only untried line. Phase 21 closed
-> Farnsworth (#29) with the first promotion in seven phases, though not a clean
-> one: it relaxed the no-regression rule for ~4 edits on already-failing
-> profiles (§16.3). One cheaper follow-up remains open — ⊘ whether `retroDecode`
-> already replays gap classification, which would fix Farnsworth with no
-> cold-start change and therefore no perturbation at all (§16.4). The detector
+> **Next:** the **+38.9% dit overestimate at noise 3.0** (§17.3.2) — Phase 22
+> turned the gap-classification question into a duration-model question, and this
+> is now the largest unexplained number in the docs. Gap centres derive from
+> `dit`, so nothing downstream can be fixed while its input is 39% wrong. Then
+> the min-element filter's hand-keyed bias (§17.3.4, small and self-contained),
+> then #29 in log-duration space — but scored against the *noisy* Farnsworth
+> profile, since §17.3.7 showed the cold-start bug is only 8 of 35 errors there.
+> Real recordings (#30) remain the standing prerequisite for the LLR detector.
+> Phase 21 found the Farnsworth cause exactly but shipped a different fix: the
+> cold-start correction is fragile by 0.5 ms and breaks a gate, so
+> `farnsworth-2.0` stays at 0.0141 (§16.2). Retro gap seeding shipped instead
+> (`qrm` 0.0100 → 0.0035). ✓ Gap classification under noise is now measured
+> (§17), closing the §16.4 ⊘ item. The detector
 > line is closed — see Phase 19. Oracle ablation confirms 100% of the
 > AWGN/QSB/QRN error is at the detector, and Phase 15 measured that the detector
 > *also* holds 67% of the hand-keyed headroom — an earlier reading of hand-keyed
@@ -119,8 +127,21 @@
 > mild-noise, moderate-noise and Farnsworth-1.5 rows were re-measured at 24
 > seeds and **hold at 0.000**.
 >
-> **Not yet re-measured (treat as single-seed until confirmed):** QSB, QRM, QRN,
-> contest, Farnsworth 2.0, worst case.
+> **Superseded by 24-seed measurement (Phase 21, §16).** The remaining rows now
+> have multiseed values; the single-seed figures below understate several of
+> them and are kept only for history:
+>
+> | profile | this table (1 seed) | 24-seed mean |
+> |---|---|---|
+> | QSB | 0.0 | 0.0117 |
+> | QRM | 0.0 | **0.0035** (was 0.0100 before retro gap seeding) |
+> | QRN | 0.0 | 0.0023 |
+> | Contest | 0.0 | 0.0031 |
+> | Farnsworth 2.0 | 0.043 | **0.0141** |
+> | Worst case | 0.57 | 0.6232 |
+>
+> Note the direction: single-seed reported **0.0** for four profiles that are
+> non-zero over 24 seeds, and *overstated* Farnsworth 2.0 by 3×.
 
 | Profile | CER | Notes |
 |---------|-----|-------|
@@ -138,11 +159,11 @@
 | QSB fading (0.3Hz, 70%) | 0.0 | Soft squelch through fades |
 | Contest (20 WPM, mixed) | **0.0** | B/6 confusion fixed |
 | Farnsworth ratio 1.5 | 0.0 | Perfect |
-| Farnsworth ratio 2.0 | 0.043 | Adaptive gap centers |
+| Farnsworth ratio 2.0 | 0.043 | ⚠ misattributed — adaptive gap centres are **not** the fault; the error is one cold-start gap (§16.1). 24-seed value is 0.0141 |
 | Worst case (all combined) | 0.57 | Improved from 0.61 by corrector (+Q→CQ) — ⚠ see note |
 | Worst case long message | 0.45 | More data → better timing |
 
-**Test suite: 197 tests, 527 assertions, <0.5s runtime.**
+**Test suite (2026-07-20): 221 test cases, 1617 assertions always-on, plus opt-in `[.]` sweeps.**
 
 ### Key Insights
 
@@ -610,19 +631,22 @@ before committing to the rewrite, not after.
 
 Planning: `decoder-investigation-2026-07.md` §13.7 and §14.
 
-### Phase 21: Farnsworth gap centres (#29) — PROMOTED (with a documented regression)
+### Phase 21: Farnsworth gap centres (#29) — CAUSE FOUND, FIX NOT SHIPPED
 The plan framing was stale: 2-means gap clustering already existed and converges
-to the generator's centres exactly at every ratio, clamps never firing. The
-entire `farnsworth-2.0` deficit was **one gap** — the first char gap, classified
-inside the 10-gap cold window against `dit*3`/`dit*7`, which are a hardcoded
-Farnsworth-ratio-1.0 assumption. At ratio 2.0 a 6·dit char gap is nearer the
-default word centre than the default char centre by seven orders of magnitude in
-likelihood, so no prior can rescue it. Bootstrapping the char centre from the
-smallest observed long gap, gated to fire only above 5.5·dit, gives
-`farnsworth-2.0` 0.0141 → **0.0000** on all 24 seeds.
+to the generator's centres exactly at every ratio. The entire `farnsworth-2.0`
+deficit is **one gap** — the first char gap, classified inside the cold window
+against `dit*3`/`dit*7`, a hardcoded ratio-1.0 assumption. Decoded output is
+`'C Q CQ CQ ...'`: one spurious space, 1/71 = 0.0141.
 
-Not a clean win: three already-degraded profiles move up by 0.0006–0.0023, all
-below their own seed-to-seed spread. Promoted on the asymmetry of *kind* — the
-win is structural and stderr 0.0000, the losses are perturbation-level and could
-flip sign on other seeds. Revert with `setGapBootstrap(false)`. Gating on
-`isLocked()` was tried and is strictly worse (§16.2). Details: §16.
+The cold-start bootstrap that fixes it fires by **0.5 ms** of margin and breaks
+the `worstcase` gate (0.6087 > 0.6) when combined with the retro fix — while that
+same profile's 24-seed *mean* improved, which is why the single-seed gates exist.
+At ratio 2.0 a stretched char gap (6·dit) and a standard word gap (7·dit) are
+near-indistinguishable from one observation: an information limit. `retroDecode`
+cannot help (the gap is post-lock, `RETRO events=8`), and delaying lock to reach
+it is known harmful. **#29 is closed as understood-but-not-fixable** without the
+log-duration reformulation, where Farnsworth becomes an additive shift (§5.3b).
+
+**Shipped instead:** retro gap seeding — `makeFresh()` restored the element model
+but dropped the gap model, so every replay re-entered a cold gap window. 5
+profiles better, 1 worse, 221/221 gates pass, `qrm` 0.0100 → **0.0035**. Details: §16.

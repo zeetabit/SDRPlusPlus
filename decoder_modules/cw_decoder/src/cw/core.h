@@ -121,6 +121,12 @@ namespace cw {
         // A fresh instance of the same implementation and configuration.
         // Retro-decoding replays saved events through a second, seeded model.
         virtual std::unique_ptr<ITiming> makeFresh() const = 0;
+
+        // Opt-in, defaulted to a no-op: a timing stage that keeps no learned gap
+        // model has nothing to relax, and should not be forced to describe this.
+        // Retro replay sets it because it holds the complete pre-lock gap set and
+        // will never receive more, so the live sample floor does not apply.
+        virtual void setRetroMode(bool) {}
     };
 
     // Stage 4: element sequence → character.

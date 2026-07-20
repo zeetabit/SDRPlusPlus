@@ -73,7 +73,7 @@ Channel  (owns post-processing, implements CharSink)
     │     ├── StagedCore ─── composes independently swappable stages
     │     │      IFrontEnd       EnvelopeFrontEnd (filter geometry parameterized)
     │     │      IDetector       SchmittDetector
-    │     │      ITiming         AdaptiveTimingStage (7 strategies)
+    │     │      ITiming         AdaptiveTimingStage (7 strategies, + setRetroMode)
     │     │      ISymbolDecoder  BeamSymbolDecoder
     │     │      + inline sequencing: pre-lock capture, retroDecode, flush, freeze
     │     │
@@ -323,12 +323,20 @@ Channel.process(count, complex_t* iq)
 │  STAGE 5: Timing Lock + RetroDecoding                                        │
 │                                                                              │
 │  Trigger: timing.isLocked() == true (Kalman: seedCount + 4 = 7 elements)    │
+│  NOTE: lock is early — a 4-element leading character means retro often       │
+│  sees only ~8 events, so most of the message is decoded live, not replayed.  │
 │                                                                              │
 │  ┌─ retroDecode() ──────────────────────────────────────────────────────┐    │
 │  │                                                                      │    │
 │  │  1. Get lockedDit from main timing (e.g. 80ms for 15 WPM)           │    │
 │  │                                                                      │    │
 │  │  2. Create retroTiming, seed with 8 × (dit, 3*dit) pairs            │    │
+│  │     + setRetroMode(true): relax the gap-sample floor 10 → 4          │    │
+│  │                                                                      │    │
+│  │  2b. Seed the GAP window: pre-pass over preLockEvents feeding        │    │
+│  │      every gap to classifyOff before anything is classified.         │    │
+│  │      makeFresh() restores only the element model, so without         │    │
+│  │      this the replay re-enters a cold gap window (docs §16.3).       │    │
 │  │                                                                      │    │
 │  │  3. Replay preLockEvents[] through retroTiming + retroMorse:         │    │
 │  │     ┌────────────────────────────────────────────────────────┐       │    │
@@ -682,7 +690,8 @@ decoder_modules/cw_decoder/
     ├── test_matrix.cpp               core comparison sweep (on demand, tagged [.])
     ├── test_oracle.cpp               per-stage headroom ablation + instrument self-checks
     ├── test_detector_metrics.cpp     detector characterisation, diagnostics, mf-fix
-    └── test_*.cpp                    221 tests, 1616 assertions, ~17s
+    └── test_*.cpp                    221 tests, 1617 assertions, ~17s
+                                      (test_recording.cpp is NOT in the build — see defects)
 ```
 
 ## Running the benchmarks
@@ -708,7 +717,8 @@ cd decoder_modules/cw_decoder/tests/build && cmake .. && make -j8
 ./cw_decoder_tests "[peak-gate]"     -s   # transition-gated peak (refuted, kept for history)
 ./cw_decoder_tests "[guard-probe]"   -s   # dynamic-range guard: rejection during key-down
 ./cw_decoder_tests "[guard-sweep]"   -s   # guard constant sweep (~2 min)
-./cw_decoder_tests "[farnsworth-probe]" -s # gap-classifier confusion matrix, detector bypassed
+./cw_decoder_tests "[farnsworth-probe]" -s # gap-classifier confusion matrix (structurally noise-blind)
+./cw_decoder_tests "[gap-noise]"     -s   # gap classification under noise, detector-derived (§17)
 ```
 
 The matrix and oracle sweeps are tagged `[.]` so Catch2 hides them from the
@@ -758,7 +768,7 @@ Learned the hard way; each one has an incident behind it.
 | A profile that decoded better before and worse after is a **regression, not a trade** | The one exception that proves it: `worstcase` was called a "physical limit" for exactly this reason, then improved 8×. |
 | Keep losing variants in the registry | They are the comparison baseline for future cores, and re-deriving them costs more than the entry. |
 | `legacy` must stay **byte-identical**; verify with the characterization table before/after | A "pure refactor" that changes behaviour is the hardest bug class to find later. |
-| Mark unmeasured claims (⊘ / ⚠ / ✗ / 📎) | Of 20 predictions made from code reading, 11 were wrong. Unmarked plausible claims have roughly even odds. |
+| Mark unmeasured claims (⊘ / ⚠ / ✗ / 📎) | Of 22 predictions made from code reading, 13 were wrong. Unmarked plausible claims have roughly even odds. The 22nd: §16.4 predicted noise would degrade gap classification by *fragmenting gaps*. Compounding was confirmed, but the driver is a **39% dit overestimate** — the right chain, the wrong corrupted duration (§17.3.2). |
 | Close the loop back to **CER** before treating a stage metric as a target | Cutting detector false events 17× moved CER by nothing; the ON-stretch metric misled twice. |
 | Before "fixing" an apparent bug, check what currently **absorbs its error** | Four separate mechanisms in this codebase are load-bearing defects. |
 | Subagents must **never** run `git checkout` / `stash` / `restore` | The working tree carries uncommitted work; one such call destroyed an unrelated edit. Back up with `cp`, restore with `cp`. |
@@ -766,6 +776,16 @@ Learned the hard way; each one has an incident behind it.
 | Every parameter sweep asserts that its **parameter reaches the code** | Otherwise a dead knob prints one value N times and every conclusion drawn from the table is vacuous. Pattern: some cell must differ from the baseline column. |
 | A sweep that overrides a constant asserts the **default column is a no-op** | `guard-sweep` checks `g=1.8` reproduces registry `legacy` exactly on all 12 profiles; without it the sweep could be measuring the plumbing, not the constant. |
 | Run only the tests the change can affect | The hidden sweeps are minutes each; re-running the whole battery to re-check one edit is the single biggest time sink in this work. |
+| A **multiseed mean can improve while a single-seed gate breaks** — check both | Phase 21: `worstcase`'s 24-seed mean went 0.6244 → 0.6232 while the seed behind its gate crossed 0.6 (0.6087). Averaging hides the tail; the config with the best table was the only one that failed. |
+| A probe that **bypasses a stage cannot measure what enters through it** | `[farnsworth-probe]` walks truth segments, so noise — which reaches gap classification only via the detector — is invisible to it. Adding a noisy profile produced a byte-identical table. Structural blindness reads exactly like a clean pass. |
+| A probe whose predecessor was blind must **assert that it is not** | `[gap-noise]` gates on `damage(noise-3.0) > damage(clean)`. Without it the probe could regress into the same blindness and still print a full green table. The self-check is the deliverable, not decoration. |
+| **Separate "the stage was given bad input" from "the stage did the wrong thing"** before attributing | `[gap-noise]` counts a gap as *damaged* (detector dropped/invented an edge) or *misclassified* (intact gap, wrong label), never both. They turned out to be effects of similar size at noise 3.0 — 11.0% and 12.2% — and lumping them would have attributed all of it to the detector. |
+| A claim measured in **one regime, stated unconditionally** | §16.1 said the gap sanity clamps "never fire." True noise-free; they fire **199 times** at noise 3.0. The sentence was not wrong so much as silently scoped. Record the regime with the claim. |
+| A filter that rejects outliers is also a **bias on the surviving mean** | The decoder's min-element filter exists to drop noise spikes; enabling it moves hand-keyed dit error +5.9% → +11.3%, because short elements are exactly what hand-keying produces. Rejection and estimation are not separable. |
+| Two individually safe changes may **not compose**; measure the combination | Phase 21 configs A and B each passed all 221 gates; A+B failed one. Attribution requires re-measuring the pair, not reasoning from the parts. |
+| A fix that fires by **sub-threshold margin is a coincidence, not a mechanism** | The Farnsworth bootstrap triggered on a 468.0 ms gap against a 467.5 ms gate — 0.5 ms. A slightly different `dit` estimate and it silently stops working. |
+| "Replay with better parameters" must restore **all** learned state | `retroDecode` carefully restored the element model from `lockedDit` and dropped the gap model, so every replay re-entered a cold gap window — the exact condition it existed to repair. |
+| When a check no longer holds because a fix was **not** shipped, assert the **known defect magnitude** rather than deleting it | `[farnsworth-probe]` asserts `errs <= 1` at ratio ≥ 2.0, so the check fails on both a regression and a silent fix. Deleting it would have lost the ratchet. |
 
 **CER is not bounded by 1.0.** It is edits ÷ reference length and insertions are
 unbounded, so a decoder emitting garbage scores above 1 — `snr-noise4.0` reaches
@@ -845,11 +865,15 @@ look like bugs and are load-bearing — do not "fix" them without re-measuring.
 | `timing.h` KalmanTiming | Seed dead branch: ambiguous seed assumed all-dits | Deferring the seed also defers timing lock and retroDecode, breaking clean decoding (WPM sweep 0.01 → 0.364). Correct fix needs gap durations, which `classifyOn()` cannot see. |
 | `timing.h` LogTiming | No outlier gate on learning | Three variants tried (3σ relative, ln2 absolute, Huber). All fail: learning from outliers inflates R, which widens acceptance and keeps the filter tolerant. Rejecting them makes it brittle (qrm 0.002 → 0.393). |
 | `morse_tree.h` | Unmapped tree nodes emit `'\0'`, silently dropping the character | Real defect, not yet addressed — deletions cost the same as substitutions in CER but give the operator no cue. ⊘ magnitude never measured. |
-| `timing.h` adaptive gap centres | Farnsworth char/word split failed at ratio 2.0 | **Fixed (§16), with a documented regression.** The clustering was never the fault — it converges to the generator's centres exactly at every ratio and its sanity clamps never fire. The whole 0.0141 was **one gap**: the cold window classifies against `dit*3`/`dit*7`, which *are* a hardcoded ratio-1.0 assumption, so the first char gap (6·dit) is read as a word gap and inserts a space. Bootstrapping the char centre from the smallest long gap, gated to fire only above 5.5·dit, takes `farnsworth-2.0` to 0.0000 on all 24 seeds. Costs ~4 edits across the run on three already-degraded profiles, all sub-stderr. Revert with `setGapBootstrap(false)`. |
+| `timing.h` adaptive gap centres | Farnsworth char/word split fails at ratio 2.0 | **Mechanism fully understood, fix not shipped (§16).** The clustering was never the fault — it converges to the generator's centres exactly at every ratio and its clamps never fire. The whole 0.0141 is **one gap**: the cold window classifies against `dit*3`/`dit*7`, which *are* a hardcoded ratio-1.0 assumption, so the first char gap (6·dit) is read as a word gap. A cold-start bootstrap does take it to 0.0000, but fires by **0.5 ms** of margin (gap 468.0 ms vs gate 467.5 ms) and breaks the `worstcase` gate when combined with the retro fix. At ratio 2.0 a stretched char gap (6·dit) and a standard word gap (7·dit) are near-indistinguishable from one sample — an information limit, not a tuning problem. `retroDecode` cannot reach it: the gap is post-lock. **§17 reframes the priority:** under noise 1.5 the cold-start bug is only 8 of 35 Farnsworth errors — the other 26 are `W>C` (lost word boundaries). A cold-start fix addresses under a quarter of the real problem, so #29 must be scored against the noisy profile. |
+| `timing.h` dit estimate under noise | Learned dit is **+38.9%** at noise 3.0 (§17.3.2) | **Measured, unexplained — the largest open number in these docs.** Gap centres derive from `dit` and `boundary = dit*2` decides which gaps feed the element cluster, so a 39% inflation pulls true char gaps into that cluster and contaminates it. The confusion pattern confirms it: errors flow toward CHAR from both directions (`E>C 65`, `W>C 37`). Nothing in gap classification can be fixed while its input is this wrong. ⊘ Not traced to CER. |
+| `tests/test_recording.cpp` | Not in `tests/CMakeLists.txt` — never compiled or run | **Found 2026-07-20 (§17.5), not fixed.** A complete real-recording harness (WAV reader, audio→IQ beat-note mixing, `Channel` wiring) that no build has ever seen. Contains two further defects that are invisible while it is out of the build: it sets the dead `debugLog` flag, and a missing recording takes an early `return` before its only `REQUIRE`, so it would pass silently. Its hardcoded path resolves to a real file — **#30 is not blocked on data.** |
+| `staged_core.h:265` min-element filter | Biases the duration model on hand-keyed | **Measured (§17.3.4), not fixed.** Enabling it moves hand-keyed dit +5.9% → +11.3% and triples clamp fires (20 → 58). Rejecting short elements raises the mean of the survivors, and short elements are the defining feature of hand-keying. Small and self-contained. ⊘ Not traced to CER. |
 | `staged_core.h` matched filter | Ring buffer zeroed on window resize — dropout mid-element, 14 spurious transitions on a *noiseless* 25 WPM signal | Fixing it (`legacy+mf`) cuts spurious events 17× and CER does not follow: `qsb`, `worstcase` and `noise2.0` all regress. The artifacts fall below `minElementMs()` and are already discarded. |
 | `tone_detector.h` | Every ON is stretched by ~9.8% of a dit, distorting the observed dah:dit ratio to 2.82 | Confirmed on a noiseless signal. **Cause is unknown.** Two attributions have been refuted: the threshold ratio gap (by `legacy+sym`, 11%) and instant-attack peak tracking (by `legacy+peakgate`, §13.8 — removing key-up attack entirely reproduces the stretch to 4 s.f.). `PEAK_PERCENTILE` does cut it 57%, but the mechanism for that is now ⊘ unexplained. Correcting it is worth 0.095 CER on hand-keyed; no variant yet avoids regressing `qsb`. |
 | `tone_detector.h` | `dynamicRange < 1.8` skips the sample, so while it holds detection is **off**, not merely biased | **Not a defect — swept and confirmed (§13.10).** Disabling it takes blindness to 0% and makes noise4.0 CER *worse* (0.9032 → 0.9173): it reports the SNR limit rather than causing it, and 1.8 is Pareto-optimal. Separately load-bearing (§13.9): legacy's key-up instant attack keeps `peakRef` above it, so 100% of legacy's rejections on noise2.0 land in key-up where they cost nothing. Remove that prop and detection goes blind for 40–65% of key-down time. |
 | `tone_detector.h` | `signalPeak` instant attack: the threshold reference chases the rising edge but holds on the falling one | The asymmetry above. `PEAK_PERCENTILE` removes it and reaches the oracle-detector bound on hand-keyed, but a ~2 s window cannot follow QSB. **Four replacement estimators measured (§13); none promotable** — within-element stability and fade tracking are in direct opposition for windowed estimators. Instant attack's fade tracking (`qsb` 0.0117) is still the best measured. A fifth, gating the update on key state rather than replacing the estimator, was also refuted: it reproduced legacy's ON stretch exactly, so the asymmetry above is **not** the cause of the stretch and its mechanism is now unexplained (§13.8). |
+| `channel.h` / `staged_core.h` | `debugLog` is declared on both `Channel` and `StagedCore` but **never wired between them** | `IDecodeCore` has no route to pass it through, so the entire fprintf debug trace is unreachable from the public API. Obtaining the Phase 21 retro trace required editing the `StagedCore` default by hand. Not fixed — wiring it widens `IDecodeCore` for a debug concern. |
 
 ## Build
 

@@ -279,12 +279,33 @@ namespace cw {
             if (preLockEvents.empty()) { return; }
 
             float lockedDit = timing->getDitDuration();
+            if (debugLog) fprintf(stderr, "[CW ch%d] RETRO events=%d dit=%.1f\n",
+                                  id, (int)preLockEvents.size(), lockedDit);
 
             auto retroTiming = timing->makeFresh();
             retroTiming->init(_internalRate);
+            retroTiming->setRetroMode(true);
             for (int i = 0; i < 8; i++) {
                 retroTiming->classifyOn(lockedDit);
                 retroTiming->classifyOn(lockedDit * 3.0f);
+            }
+
+            // Seed the gap-centre window before classifying anything. makeFresh()
+            // returns a blank estimator and the loop above restores only the
+            // element model, so without this the replay re-enters the same
+            // cold-start it exists to repair: the first char gap is classified
+            // against the hardcoded 1:3:7 defaults, which are a Farnsworth
+            // ratio-1.0 assumption (docs §16). Every gap is already in hand
+            // here, so there is no reason to classify any of them cold.
+            if (retroGapSeed) {
+                float seedLastKeyUp = -1;
+                for (auto& evt : preLockEvents) {
+                    if (evt.keyDown) {
+                        if (seedLastKeyUp >= 0) { retroTiming->classifyOff(evt.timeMs - seedLastKeyUp); }
+                    } else {
+                        seedLastKeyUp = evt.timeMs;
+                    }
+                }
             }
 
             auto retroSymbols = symbols->makeFresh();
@@ -336,6 +357,7 @@ namespace cw {
         std::unique_ptr<ISymbolDecoder> symbols;
 
         float _internalRate = 1000.0f;
+        bool retroGapSeed = true;   // docs §16.4; settable for the paired A/B
         float* envBuf = nullptr;
         float* mfBuf = nullptr;
         int diagCount = 0;

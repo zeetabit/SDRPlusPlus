@@ -132,6 +132,11 @@ namespace cw {
             return std::make_unique<AdaptiveTimingStage>(_strategy);
         }
 
+        void setRetroMode(bool on) override {
+            t.setMinGapSamples(on ? 4 : 10);
+            t.setGapBootstrap(on);
+        }
+
     private:
         AdaptiveTiming t;
         TimingStrategy _strategy;

@@ -710,6 +710,13 @@ namespace cw {
         TimingStrategy getStrategy() const { return _strategy; }
         void setStrategy(TimingStrategy s) { _strategy = s; reset(); }
 
+        // Retro replay holds the complete pre-lock gap set and will never
+        // receive more, so it can cluster from fewer samples than live
+        // classification should trust, and can fall back to the single-sample
+        // bootstrap when the split is still unavailable. Enabling either in the
+        // live path perturbs the noisy profiles for no gain (docs §16.4).
+        void setMinGapSamples(int n) { minGapSamples = n; }
+
         // Cold-start gap bootstrap (docs §16). Settable so the A/B against the
         // hardcoded 1:3:7 cold start is a paired measurement on identical seeds
         // rather than a rebuild, and so the losing arm stays reproducible.
@@ -799,30 +806,41 @@ namespace cw {
             // contradicts the ratio-1.0 assumption. Char gaps outnumber word
             // gaps roughly 2.5:1 and are the shorter class, so the smallest long
             // gap seen is the best single-sample estimate of the char centre.
-            if ((int)gapDurations.size() < 10) {
-                if (longGaps.empty() || !gapBootstrap) return GAPC_COLD;
+            // Single-sample fallback, shared by both paths that cannot run the
+            // split: too few gaps overall, and enough gaps but only one long one.
+            // The pre-lock window routinely hits the second case — one char gap
+            // and no word gap yet — so a bootstrap wired only into the first
+            // never fires where Farnsworth needs it.
+            //
+            // Only override the default when the observation contradicts it. The
+            // default model flips char->word just above the 5*dit midpoint of its
+            // own 3:7 centres, so a shortest long gap below that is already
+            // classified correctly and overriding can only add error — which is
+            // what an ungated bootstrap did on every noisy profile, where an early
+            // spurious gap became the char centre for the rest of the window. 5.5
+            // rather than 5.0 keeps standard-timing signals untouched; ratio 1.5
+            // (4.5*dit) already decodes clean.
+            //
+            // Gating on isLocked() was tried and is strictly worse (docs §16): the
+            // first char gap arrives after four elements, before the filter locks,
+            // so requiring lock disables the fix exactly where it is needed.
+            auto bootstrap = [&]() -> bool {
+                if (!gapBootstrap || longGaps.empty()) return false;
                 float minLong = *std::min_element(longGaps.begin(), longGaps.end());
-                // Only override the default when the observation contradicts it.
-                // The default model flips char->word just above the 5*dit midpoint
-                // of its own 3:7 centres, so a shortest long gap below that is
-                // already classified correctly and overriding can only add error —
-                // which is what an ungated bootstrap did on every noisy profile,
-                // where an early spurious gap became the char centre for the rest
-                // of the cold window. 5.5 rather than 5.0 keeps standard-timing
-                // signals untouched; ratio 1.5 (4.5*dit) already decodes clean.
-                // Gating this on isLocked() was tried and is strictly worse
-                // (docs §16): the first char gap arrives after four elements,
-                // before the filter locks, so requiring lock disables the fix
-                // exactly where it is needed while still firing later in the
-                // cold window — losing the win and keeping the perturbation.
-                if (minLong < dit * 5.5f) return GAPC_COLD;
+                if (minLong < dit * 5.5f) return false;
                 charMean = minLong;
                 wordMean = charMean * (7.0f / 3.0f);
-                return GAPC_BOOTSTRAP;
+                return true;
+            };
+
+            if ((int)gapDurations.size() < minGapSamples) {
+                return bootstrap() ? GAPC_BOOTSTRAP : GAPC_COLD;
             }
 
             if (nElem >= 3) elemMean = sumElem / nElem;
-            if (longGaps.size() < 2) return GAPC_NOSPLIT;  // can't split char/word
+            if (longGaps.size() < 2) {  // can't split char/word
+                return bootstrap() ? GAPC_BOOTSTRAP : GAPC_NOSPLIT;
+            }
 
             // Split long gaps into char and word by finding the largest gap
             std::sort(longGaps.begin(), longGaps.end());
@@ -858,7 +876,8 @@ namespace cw {
 
         std::vector<float> elementDurations;  // recent ON-durations for sigma estimation
         std::vector<float> gapDurations;      // recent OFF-durations for gap center estimation
-        bool gapBootstrap = true;             // config, not state: survives reset()
+        bool gapBootstrap = false;            // config, not state: survives reset()
+        int  minGapSamples = 10;              // relaxed only for retro replay (docs §16.4)
     };
 
 }

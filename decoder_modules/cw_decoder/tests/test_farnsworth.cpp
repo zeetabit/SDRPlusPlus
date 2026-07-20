@@ -98,8 +98,8 @@ namespace {
         return 0;
     }
 
-    GapProbe probeGaps(const char* message, float ratio) {
-        SignalParams params = profileFarnsworth(80.0f, ratio);
+    GapProbe probeGaps(const char* message, SignalParams params, int seed) {
+        params.seed = seed;
         auto sig = generateMessage(message, params);
 
         GapProbe out;
@@ -136,21 +136,28 @@ TEST_CASE("Farnsworth: gap classifier probe", "[cw][.][farnsworth-probe]") {
     const float ratios[] = {1.0f, 1.5f, 2.0f, 3.0f};
     const char* srcName[] = {"cold", "bootstrap", "nosplit", "clamped", "adapted"};
 
+    // This probe is STRUCTURALLY NOISE-BLIND and only isolates the classifier.
+    // It walks the generator's truth segments, so the durations it feeds in are
+    // identical at every noise level — noise reaches gap classification only via
+    // the detector, which this bypasses on purpose. Adding a noisy profile here
+    // produces a byte-identical table; it was tried and removed. Measuring what
+    // noise does to gap classification needs DETECTOR-derived gaps aligned to
+    // truth by group delay, as the guard probe does (docs §16.5, ⊘ open).
     printf("\n=== Gap classifier probe (detector bypassed) ===\n");
-    printf("%-6s %6s %8s  %-26s %-22s %s\n",
-           "ratio", "gaps", "err", "confusion truth->cls", "centres est/true", "source");
+    printf("%-6s %-7s %6s %8s  %-26s %-22s %s\n",
+           "ratio", "noise", "gaps", "err", "confusion truth->cls", "centres est/true", "source");
 
     for (float r : ratios) {
-        GapProbe p = probeGaps(MSG_FULL(), r);
+        GapProbe p = probeGaps(MSG_FULL(), profileFarnsworth(80.0f, r), 12345);
 
         int errs = 0;
         for (int t = 0; t < 3; t++)
             for (int c = 0; c < 3; c++)
                 if (t != c) errs += p.confusion[t][c];
 
-        printf("%-6.1f %6d %8d  E>C%2d E>W%2d C>E%2d C>W%2d W>C%2d  "
+        printf("%-6.1f %-7s %6d %8d  E>C%2d E>W%2d C>E%2d C>W%2d W>C%2d  "
                "c=%.0f/%.0f w=%.0f/%.0f  ",
-               r, p.totalGaps, errs,
+               r, "n/a", p.totalGaps, errs,
                p.confusion[0][1], p.confusion[0][2],
                p.confusion[1][0], p.confusion[1][2], p.confusion[2][1],
                p.finalChar, p.trueChar, p.finalWord, p.trueWord);
@@ -163,6 +170,13 @@ TEST_CASE("Farnsworth: gap classifier probe", "[cw][.][farnsworth-probe]") {
         CHECK(p.totalGaps > 0);
         CHECK(p.trueChar == Approx(80.0f * 3.0f * r));
         CHECK(p.trueWord == Approx(80.0f * 7.0f * r));
+
+        // Ratchet on the known defect (docs §16). Below ratio 2.0 the cold-start
+        // defaults still classify correctly, so nothing may fail. At or above
+        // it, exactly one gap is misread — the first char gap, before the
+        // estimator has data. Asserting the magnitude rather than deleting the
+        // check catches both a regression and a silent fix.
+        CHECK(errs <= (r >= 2.0f ? 1 : 0));
     }
 }
 
@@ -177,3 +191,4 @@ TEST_CASE("Farnsworth: word gaps preserved at ratio 2.0", "[cw][farnsworth]") {
     INFO("word count=" << words.size());
     REQUIRE(words.size() >= 4);  // CQ CQ CQ DE ... at least 4 words
 }
+

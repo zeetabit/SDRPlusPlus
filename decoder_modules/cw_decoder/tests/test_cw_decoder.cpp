@@ -118,6 +118,64 @@ TEST_CASE("MorseDecoder decodes prosigns", "[cw][morse][prosign]") {
     }
 }
 
+TEST_CASE("MorseDecoder decodes punctuation", "[cw][morse][punctuation]") {
+    // Added 2026-07-20. Both were unmapped, which made every period decode as
+    // '*' (SK, the nearest mapped node) and every comma vanish. The defect
+    // survived 221 tests because MSG_CQ and MSG_FULL carry no punctuation —
+    // it was only visible against real ARRL code-practice text.
+    cw::MorseDecoder decoder;
+    decoder.init();
+
+    struct TC { const char* pattern; char expected; const char* name; };
+    TC cases[] = {
+        {".-.-.-", '.', "period"},
+        {"--..--", ',', "comma"},
+    };
+
+    for (auto& tc : cases) {
+        decoder.reset();
+        for (const char* p = tc.pattern; *p; p++) {
+            decoder.addElement(*p == '.' ? cw::DIT : cw::DAH, 1.0f);
+        }
+        INFO("Punctuation: " << tc.name << " pattern: " << tc.pattern);
+        REQUIRE(decoder.characterBreak() == tc.expected);
+    }
+}
+
+TEST_CASE("MorseDecoder punctuation does not shadow its prefixes", "[cw][morse][punctuation]") {
+    // Period sits directly below AR (.-.-.) and comma two below Z (--..).
+    // A tree edit that captured a parent node would break these instead, and
+    // the prosign test alone would not catch the comma/Z case.
+    cw::MorseDecoder decoder;
+    decoder.init();
+
+    struct TC { const char* pattern; char expected; };
+    TC cases[] = {
+        {".-.-.",  '+'},   // AR — period's parent
+        {"--..",   'Z'},   // Z — comma's grandparent
+    };
+
+    for (auto& tc : cases) {
+        decoder.reset();
+        for (const char* p = tc.pattern; *p; p++) {
+            decoder.addElement(*p == '.' ? cw::DIT : cw::DAH, 1.0f);
+        }
+        INFO("Prefix: " << tc.pattern);
+        REQUIRE(decoder.characterBreak() == tc.expected);
+    }
+
+    // Comma's parent (--..-, node 56) is unmapped, but characterBreak never
+    // returns '\0' while any beam path sits on a mapped node — confidence is
+    // clamped to 0.95, so the alternate branch always survives and this
+    // resolves to '7' at the neighbouring node. The property that matters is
+    // narrower: the deeper comma must not capture the shallower pattern.
+    decoder.reset();
+    for (const char* p = "--..-"; *p; p++) {
+        decoder.addElement(*p == '.' ? cw::DIT : cw::DAH, 1.0f);
+    }
+    REQUIRE(decoder.characterBreak() != ',');
+}
+
 TEST_CASE("MorseDecoder resets after characterBreak", "[cw][morse]") {
     cw::MorseDecoder decoder;
     decoder.init();
