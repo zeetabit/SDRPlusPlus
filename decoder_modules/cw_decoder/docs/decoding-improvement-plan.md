@@ -48,20 +48,26 @@
 > | Test hardening | every Phase 16–19 sweep had a non-failing assertion; all replaced (§13.11) |
 > | Farnsworth gap centres (Phase 21) | cause found (one cold-start gap, not the clustering); fix **not shipped** — fragile by 0.5 ms and breaks a gate. Retro gap seeding promoted instead: `qrm` 0.0100 → 0.0035 (§16) |
 > | Gap classification under noise (Phase 22) | ⊘ item closed, measurement only. Error multiplication **confirmed**: 12.2% of structurally intact gaps misclassified at noise 3.0 vs 0.0% clean — but the driver is a **+38.9% dit overestimate**, not gap fragmentation. Two new measured defects; #29 reframed (§17) |
+> | Real recordings — ARRL W1AW (Phase 23) | **#30 closed as a blocker.** Paired audio + published text, five sessions pinned and gated; 15 and 20 WPM decode at **CER 0.0000**. Found and fixed two defects the synthetic suite cannot express: a broken audio→IQ conversion and unmapped period/comma (§18) |
+> | Registry vs real audio (Phase 24) | `legacy+mf` fixes the 35 WPM errors (0.0089 → 0.0000), so §12.3's refutation was scope-limited — but timing-only cores fix them too, so they are **marginal**, not proof of the matched-filter mechanism. **Nothing promotable**: every candidate regresses on ≥1 synthetic profile; the real-audio winner doubles CER on heavy noise (§19) |
 >
-> **Next:** the **+38.9% dit overestimate at noise 3.0** (§17.3.2) — Phase 22
-> turned the gap-classification question into a duration-model question, and this
-> is now the largest unexplained number in the docs. Gap centres derive from
-> `dit`, so nothing downstream can be fixed while its input is 39% wrong. Then
-> the min-element filter's hand-keyed bias (§17.3.4, small and self-contained),
-> then #29 in log-duration space — but scored against the *noisy* Farnsworth
-> profile, since §17.3.7 showed the cold-start bug is only 8 of 35 errors there.
-> Real recordings (#30) remain the standing prerequisite for the LLR detector.
-> Phase 21 found the Farnsworth cause exactly but shipped a different fix: the
-> cold-start correction is fragile by 0.5 ms and breaks a gate, so
-> `farnsworth-2.0` stays at 0.0141 (§16.2). Retro gap seeding shipped instead
-> (`qrm` 0.0100 → 0.0035). ✓ Gap classification under noise is now measured
-> (§17), closing the §16.4 ⊘ item. The detector
+> **Next:** **noisy real recordings** (§19.4). Phase 24 resolved the 35 WPM
+> question and, in doing so, made coverage the binding constraint rather than
+> ideas: all five real recordings are high-SNR (19-76 dB), every variant that
+> wins there loses under noise, and that deciding regime is arbitrated entirely
+> by synthetic profiles of unvalidated fidelity (§15). Off-air W1AW would carry
+> real propagation *and* published text. Then the **+38.9% dit overestimate at
+> noise 3.0** (§17.3.2), the largest unexplained number in the docs and upstream
+> of all gap classification; then the min-element filter's hand-keyed bias
+> (§17.3.4); then #29 in log-duration space, scored against the *noisy*
+> Farnsworth profile since §17.3.7 showed the cold-start bug is only 8 of 35
+> errors there. #30 is closed as a blocker (§18).
+>
+> **Standing context.** Phase 21 found the Farnsworth cause exactly but shipped a
+> different fix: the cold-start correction is fragile by 0.5 ms and breaks a
+> gate, so `farnsworth-2.0` stays at 0.0141 (§16.2). Retro gap seeding shipped
+> instead (`qrm` 0.0100 → 0.0035). ✓ Gap classification under noise is now
+> measured (§17), closing the §16.4 ⊘ item. The detector
 > line is closed — see Phase 19. Oracle ablation confirms 100% of the
 > AWGN/QSB/QRN error is at the detector, and Phase 15 measured that the detector
 > *also* holds 67% of the hand-keyed headroom — an earlier reading of hand-keyed
@@ -163,7 +169,7 @@
 | Worst case (all combined) | 0.57 | Improved from 0.61 by corrector (+Q→CQ) — ⚠ see note |
 | Worst case long message | 0.45 | More data → better timing |
 
-**Test suite (2026-07-20): 221 test cases, 1617 assertions always-on, plus opt-in `[.]` sweeps.**
+**Test suite (2026-07-20): 223 test cases, 1622 assertions always-on, plus opt-in `[.]` sweeps.**
 
 ### Key Insights
 

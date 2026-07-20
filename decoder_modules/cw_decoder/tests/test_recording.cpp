@@ -1,146 +1,354 @@
 #include <catch.hpp>
 #include <cw/channel.h>
+#include "cw_test_signals.h"
 #include <cmath>
-#include <vector>
-#include <fstream>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <string>
+#include <vector>
 
-// Minimal WAV reader for mono 16-bit PCM
-struct WavData {
-    int sampleRate = 0;
-    int channels = 0;
-    std::vector<float> samples;  // normalized to [-1, 1]
-};
+using namespace cw_test;
 
-static WavData loadWav(const std::string& path) {
-    WavData wav;
-    std::ifstream f(path, std::ios::binary);
-    if (!f.is_open()) return wav;
+// ============================================================
+// Real-recording gate — ARRL W1AW code practice (docs §18)
+//
+// Every other test in this suite scores the decoder against signals this
+// repository generated, so it can only confirm the decoder agrees with the
+// generator's assumptions (§15). These are real transmissions published with
+// their exact text, so they are the only ground truth here that the decoder's
+// own model did not produce.
+//
+// Audio is not committed — it is ARRL's and the text derives from QST. Run
+// tests/fetch_recordings.sh to populate the cache.
+//
+// This test is opt-in ([.]) so the default suite stays offline, and it FAILS
+// rather than skips when the cache is missing. The version of this file that
+// preceded it returned early on a missing recording, before its only REQUIRE,
+// so it would have passed silently had it ever been in the build — which it
+// never was (§17.5).
+// ============================================================
 
-    char riff[4]; f.read(riff, 4);
-    if (std::memcmp(riff, "RIFF", 4) != 0) return wav;
+namespace {
 
-    uint32_t fileSize; f.read((char*)&fileSize, 4);
-    char wave[4]; f.read(wave, 4);
-    if (std::memcmp(wave, "WAVE", 4) != 0) return wav;
+    struct WavData {
+        int sampleRate = 0;
+        std::vector<float> samples;
+    };
 
-    uint16_t audioFormat = 0, numChannels = 0, bitsPerSample = 0;
-    uint32_t sampleRate = 0, dataSize = 0;
+    WavData loadWav(const std::string& path) {
+        WavData wav;
+        std::ifstream f(path, std::ios::binary);
+        if (!f.is_open()) { return wav; }
 
-    while (f.good()) {
-        char chunkId[4]; f.read(chunkId, 4);
-        uint32_t chunkSize; f.read((char*)&chunkSize, 4);
-        if (!f.good()) break;
+        char riff[4]; f.read(riff, 4);
+        if (std::memcmp(riff, "RIFF", 4) != 0) { return wav; }
+        uint32_t fileSize; f.read((char*)&fileSize, 4);
+        char wave[4]; f.read(wave, 4);
+        if (std::memcmp(wave, "WAVE", 4) != 0) { return wav; }
 
-        if (std::memcmp(chunkId, "fmt ", 4) == 0) {
-            f.read((char*)&audioFormat, 2);
-            f.read((char*)&numChannels, 2);
-            f.read((char*)&sampleRate, 4);
-            uint32_t byteRate; f.read((char*)&byteRate, 4);
-            uint16_t blockAlign; f.read((char*)&blockAlign, 2);
-            f.read((char*)&bitsPerSample, 2);
-            if (chunkSize > 16) f.seekg(chunkSize - 16, std::ios::cur);
-        }
-        else if (std::memcmp(chunkId, "data", 4) == 0) {
-            dataSize = chunkSize;
-            int numSamples = dataSize / (bitsPerSample / 8) / numChannels;
-            wav.samples.resize(numSamples);
-            wav.sampleRate = sampleRate;
-            wav.channels = numChannels;
+        uint16_t channels = 0, bits = 0;
+        uint32_t rate = 0;
+        while (f.good()) {
+            char id[4]; f.read(id, 4);
+            if (!f.good()) { break; }
+            uint32_t size; f.read((char*)&size, 4);
+            if (!f.good()) { break; }
 
-            if (bitsPerSample == 16) {
-                std::vector<int16_t> raw(numSamples * numChannels);
-                f.read((char*)raw.data(), dataSize);
-                for (int i = 0; i < numSamples; i++) {
-                    wav.samples[i] = raw[i * numChannels] / 32768.0f;
+            if (!std::memcmp(id, "fmt ", 4)) {
+                uint16_t fmt; f.read((char*)&fmt, 2);
+                f.read((char*)&channels, 2);
+                f.read((char*)&rate, 4);
+                uint32_t byteRate; f.read((char*)&byteRate, 4);
+                uint16_t align; f.read((char*)&align, 2);
+                f.read((char*)&bits, 2);
+                if (size > 16) { f.seekg(size - 16, std::ios::cur); }
+            } else if (!std::memcmp(id, "data", 4)) {
+                if (bits != 16 || channels < 1) { return wav; }
+                const int total = size / (bits / 8);
+                wav.samples.reserve(total / channels);
+                for (int i = 0; i < total; i++) {
+                    int16_t s; f.read((char*)&s, 2);
+                    if (i % channels == 0) { wav.samples.push_back(s / 32768.0f); }
                 }
+                wav.sampleRate = rate;
+                break;
+            } else {
+                f.seekg(size, std::ios::cur);
             }
-            break;
         }
-        else {
-            f.seekg(chunkSize, std::ios::cur);
-        }
+        return wav;
     }
-    return wav;
+
+    // Real audio carries the CW tone on a real-valued signal. Handing the
+    // samples over as the I component with Q at zero puts the wanted component
+    // at DC once the channel translates by -toneFreq, and leaves the image at
+    // -2*toneFreq where the complex low-pass rejects it.
+    //
+    // The previous version of this file instead computed audio(t)*exp(j*w*t),
+    // which places the signal at w±tone; translating by -w returns it to
+    // ±tone, outside the ±100 Hz filter for ANY choice of w. Measured against
+    // a real recording it decodes noise: SNR 3.0 and "T ET T E ET E EE"
+    // where this conversion reaches CER 0.007.
+    std::vector<dsp::complex_t> audioToIQ(const WavData& audio) {
+        std::vector<dsp::complex_t> iq(audio.samples.size());
+        for (size_t i = 0; i < audio.samples.size(); i++) {
+            iq[i].re = audio.samples[i];
+            iq[i].im = 0.0f;
+        }
+        return iq;
+    }
+
+    // ARRL text files are CRLF with a trailing DOS EOF, and mark prosigns with
+    // bare '<' and '>'. The control characters are file artifacts that were
+    // never keyed. The angle brackets were: which prosign each denotes is not
+    // stated in the files, so rather than guess a mapping to '+'/'*' they are
+    // dropped from the reference. A decoder that emits a prosign there scores
+    // an insertion, which is the conservative direction.
+    std::string cleanReference(const std::string& raw) {
+        std::string out;
+        for (char c : raw) {
+            if (c == '\r' || c == '\x1a' || c == '<' || c == '>') { continue; }
+            out += c;
+        }
+        return out;
+    }
+
+    std::string recordingsDir() {
+        if (const char* env = std::getenv("CW_RECORDINGS_DIR")) { return env; }
+        return std::string(CW_TESTS_DIR) + "/recordings";
+    }
+
+    struct RecordingResult {
+        DecodeScore score;
+        float wpm = 0;
+        float snr = 0;
+        int decodedChars = 0;
+        float durationSec = 0;
+    };
+
+    struct LoadedSession {
+        std::vector<dsp::complex_t> iq;
+        std::string reference;
+        float durationSec = 0;
+    };
+
+    // Loads once so the core sweep does not re-read a 15 MB WAV per core.
+    LoadedSession loadSession(const std::string& stem) {
+        const std::string dir = recordingsDir();
+        WavData audio = loadWav(dir + "/" + stem + ".wav");
+        std::ifstream tf(dir + "/" + stem + ".txt");
+        std::string truth((std::istreambuf_iterator<char>(tf)),
+                           std::istreambuf_iterator<char>());
+
+        INFO("Recording cache: " << dir);
+        INFO("Run tests/fetch_recordings.sh to populate it.");
+        REQUIRE_FALSE(audio.samples.empty());
+        REQUIRE_FALSE(truth.empty());
+        REQUIRE(audio.sampleRate == 8000);
+
+        LoadedSession s;
+        s.durationSec = (float)audio.samples.size() / audio.sampleRate;
+        s.reference = cleanReference(truth);
+        s.iq.resize(audio.samples.size());
+        for (size_t i = 0; i < audio.samples.size(); i++) {
+            s.iq[i].re = audio.samples[i];
+            s.iq[i].im = 0.0f;
+        }
+        return s;
+    }
+
+    DecodeScore scoreWithCore(const LoadedSession& s, const std::string& coreName,
+                              float toneFreq) {
+        cw::Channel ch;
+        ch.init(0, toneFreq, coreName);
+        // init() falls back to DEFAULT_CORE for an unknown name rather than
+        // failing, so an unchecked sweep would silently measure legacy.
+        REQUIRE(ch.coreName() == coreName);
+        for (int off = 0; off < (int)s.iq.size(); off += 512) {
+            int n = std::min(512, (int)s.iq.size() - off);
+            ch.process(n, &s.iq[off]);
+        }
+        return score(s.reference, ch.text.getText());
+    }
+
+    RecordingResult decodeRecording(const std::string& stem, float toneFreq) {
+        const std::string dir = recordingsDir();
+        const std::string wavPath = dir + "/" + stem + ".wav";
+        const std::string txtPath = dir + "/" + stem + ".txt";
+
+        WavData audio = loadWav(wavPath);
+        std::ifstream tf(txtPath);
+        std::string truth((std::istreambuf_iterator<char>(tf)),
+                           std::istreambuf_iterator<char>());
+
+        INFO("Recording cache: " << dir);
+        INFO("Run tests/fetch_recordings.sh to populate it.");
+        REQUIRE_FALSE(audio.samples.empty());
+        REQUIRE_FALSE(truth.empty());
+        REQUIRE(audio.sampleRate == 8000);
+
+        auto iq = audioToIQ(audio);
+
+        cw::Channel ch;
+        ch.init(0, toneFreq);
+        for (int off = 0; off < (int)iq.size(); off += 512) {
+            int n = std::min(512, (int)iq.size() - off);
+            ch.process(n, &iq[off]);
+        }
+
+        RecordingResult r;
+        const std::string decoded = ch.text.getText();
+        r.score = score(cleanReference(truth), decoded);
+        r.wpm = ch.wpm;
+        r.snr = ch.snr;
+        r.decodedChars = (int)decoded.size();
+        r.durationSec = (float)audio.samples.size() / audio.sampleRate;
+        return r;
+    }
+
+    struct RecordingCase {
+        const char* stem;
+        const char* label;
+        float maxCer;
+        float maxWer;
+        float wpmLow, wpmHigh;   // expected reported speed, not the label speed
+    };
+
+    // Thresholds are ratchets measured on the pinned sessions in
+    // fetch_recordings.sh. Lower them when a change earns it; never raise one
+    // to admit a change.
+    //
+    // Measured 2026-07-20: 0.0087/0.0044/0.0000/0.0000/0.0089 CER. The 15 and
+    // 20 WPM sessions decode a real 6-to-7 minute transmission with zero
+    // character errors, so their gate is exact equality — anything above zero
+    // is a regression, not noise. Decoding a fixed WAV is deterministic.
+    //
+    // The 5 and 10 WPM sessions report 12.0 and 13.2 WPM, far above their
+    // label, and carry the highest error of the five; the wpm bounds gate that
+    // measured behaviour. WHY their character speed exceeds the label is not
+    // established: Farnsworth keying would explain it, but the gap ratios in
+    // these files have not been measured (docs §18.6.1, ⊘ open).
+    const RecordingCase RECORDINGS[] = {
+        {"w1aw_5wpm",  "5 WPM (char ~12)",  0.010f, 0.070f, 10.0f, 15.0f},
+        {"w1aw_10wpm", "10 WPM (char ~13)", 0.006f, 0.050f, 11.0f, 16.0f},
+        {"w1aw_15wpm", "15 WPM",            0.0f,   0.0f,   13.0f, 16.0f},
+        {"w1aw_20wpm", "20 WPM",            0.0f,   0.0f,   17.0f, 21.0f},
+        {"w1aw_35wpm", "35 WPM",            0.011f, 0.060f, 31.0f, 36.0f},
+    };
 }
 
-// Convert mono audio (with CW tone at toneFreq) to IQ samples at targetRate.
-// The audio contains a CW beat note — we need to create IQ where the channel
-// DSP can extract the tone.
-static std::vector<dsp::complex_t> audioToIQ(
-    const WavData& audio, float toneFreq, float targetRate)
-{
-    // The audio already contains the demodulated CW tone.
-    // To feed it to the CW channel (which expects IQ), we modulate
-    // the audio onto a carrier at toneFreq to create synthetic IQ.
-    int outLen = (int)((double)audio.samples.size() / audio.sampleRate * targetRate);
-    std::vector<dsp::complex_t> iq(outLen);
+TEST_CASE("Recording: ARRL W1AW code practice", "[cw][.][recording]") {
+    // 750 Hz on every pinned session, measured by Goertzel sweep. Hardcoded
+    // rather than scanned so a tone-tracking regression shows up as a decode
+    // failure here instead of being silently absorbed.
+    constexpr float TONE = 750.0f;
 
-    double phaseInc = 2.0 * M_PI * toneFreq / targetRate;
-    double phase = 0;
-    double ratio = (double)audio.sampleRate / targetRate;
+    printf("\n=== ARRL W1AW code practice (real audio, published text) ===\n");
+    printf("%-22s %7s %7s %7s %7s %8s %8s\n",
+           "session", "audio", "chars", "CER", "WER", "wpm", "snr");
 
-    for (int i = 0; i < outLen; i++) {
-        // Resample audio
-        double srcIdx = i * ratio;
-        int idx = (int)srcIdx;
-        float frac = (float)(srcIdx - idx);
-        float audioSample = 0;
-        if (idx < (int)audio.samples.size() - 1) {
-            audioSample = audio.samples[idx] * (1.0f - frac) + audio.samples[idx + 1] * frac;
-        } else if (idx < (int)audio.samples.size()) {
-            audioSample = audio.samples[idx];
-        }
+    for (const auto& rc : RECORDINGS) {
+        RecordingResult r = decodeRecording(rc.stem, TONE);
 
-        // Modulate onto carrier at toneFreq
-        iq[i].re = audioSample * cosf((float)phase);
-        iq[i].im = audioSample * sinf((float)phase);
-        phase += phaseInc;
-        if (phase > 2.0 * M_PI) phase -= 2.0 * M_PI;
+        printf("%-22s %6.0fs %7d %7.4f %7.4f %8.1f %8.1f\n",
+               rc.label, r.durationSec, r.decodedChars,
+               r.score.cer, r.score.wer, r.wpm, r.snr);
+
+        INFO("session: " << rc.label << " CER=" << r.score.cer
+             << " WER=" << r.score.wer << " wpm=" << r.wpm);
+
+        // A zero gate means the session currently decodes exactly; <= keeps it
+        // satisfiable while still failing on the first error introduced.
+        CHECK(r.score.cer <= rc.maxCer);
+        CHECK(r.score.wer <= rc.maxWer);
+        CHECK(r.wpm > rc.wpmLow);
+        CHECK(r.wpm < rc.wpmHigh);
+        // A collapsed decode can still score well against a short reference if
+        // it emits almost nothing; require the output length to be plausible.
+        CHECK(r.decodedChars > r.score.refChars * 0.9f);
     }
-    return iq;
+    printf("\n");
 }
 
-TEST_CASE("Recording: decode real CW audio", "[cw][recording]") {
-    std::string path = "/Users/zetabit/.config/sdrpp/recordings/audio_7028020Hz_19-08-52_03-04-2026.wav";
-    auto audio = loadWav(path);
-    if (audio.samples.empty()) {
-        WARN("Recording not found: " << path);
-        return;
-    }
+TEST_CASE("Recording: punctuation appears in real decoded text", "[cw][.][recording]") {
+    // Period and comma were unmapped until 2026-07-20 and no synthetic message
+    // contains either, so this is the only test that would notice them being
+    // dropped again. ARRL sessions average ~20 of each.
+    const std::string dir = recordingsDir();
+    WavData audio = loadWav(dir + "/w1aw_20wpm.wav");
+    INFO("Run tests/fetch_recordings.sh to populate " << dir);
+    REQUIRE_FALSE(audio.samples.empty());
 
-    INFO("Loaded: " << audio.sampleRate << " Hz, " << audio.samples.size() << " samples, "
-         << (float)audio.samples.size() / audio.sampleRate << "s");
-
-    float toneFreq = 800.0f;  // CW beat note frequency (~789 Hz from analysis)
-    float iqRate = 8000.0f;   // CW decoder expects 8 kHz IQ
-
-    auto iq = audioToIQ(audio, toneFreq, iqRate);
-    INFO("IQ samples: " << iq.size() << " (" << iq.size() / iqRate << "s)");
-
+    auto iq = audioToIQ(audio);
     cw::Channel ch;
-    ch.init(0, toneFreq);
-    ch.debugLog = true;
-
-    // Track WPM over time
-    int blockSize = 512;
-    float lastReportTime = 0;
-    for (int off = 0; off < (int)iq.size(); off += blockSize) {
-        int n = std::min(blockSize, (int)iq.size() - off);
+    ch.init(0, 750.0f);
+    for (int off = 0; off < (int)iq.size(); off += 512) {
+        int n = std::min(512, (int)iq.size() - off);
         ch.process(n, &iq[off]);
-
-        float timeSec = (float)(off + n) / iqRate;
-        if (timeSec - lastReportTime >= 2.0f) {
-            WARN("t=" << timeSec << "s wpm=" << ch.wpm << " snr=" << ch.snr
-                 << " frozen=" << (ch.wpm > 0 && ch.snr < 3 ? "maybe" : "no"));
-            lastReportTime = timeSec;
-        }
     }
 
-    std::string decoded = ch.text.getText();
-    WARN("Decoded: '" << decoded << "'");
-    WARN("Final WPM: " << ch.wpm << " SNR: " << ch.snr);
+    const std::string decoded = ch.text.getText();
+    const int periods = (int)std::count(decoded.begin(), decoded.end(), '.');
+    const int commas  = (int)std::count(decoded.begin(), decoded.end(), ',');
+    INFO("decoded periods=" << periods << " commas=" << commas);
+    CHECK(periods >= 5);
+    CHECK(commas >= 5);
+}
 
-    // At minimum, we should decode something
-    REQUIRE(decoded.size() > 3);
+// Every registry core was judged on synthetic signals (§12-§13). This is the
+// first time any of them meets real keying, and the specific question is
+// whether legacy+mf reaches the 35 WPM dah-split of §18.6.2 — a defect whose
+// mechanism matches the matched-filter resize dropout that +mf repairs, and
+// which §12.3 refuted using profiles that contain no such case.
+TEST_CASE("Recording: core sweep on real audio", "[cw][.][recording-matrix]") {
+    constexpr float TONE = 750.0f;
+
+    std::vector<LoadedSession> sessions;
+    std::vector<std::string> labels;
+    for (const auto& rc : RECORDINGS) {
+        sessions.push_back(loadSession(rc.stem));
+        labels.push_back(rc.label);
+    }
+
+    printf("\n=== Registry cores vs ARRL real audio (CER) ===\n");
+    printf("%-20s", "core");
+    for (const auto& l : labels) { printf("%10s", l.c_str()); }
+    printf("%10s\n", "mean");
+
+    std::string bestName;
+    float bestMean = 1e9f;
+    float legacyMean = -1.0f;
+    float peakdual16Mean = -1.0f;
+    int cores = 0;
+
+    for (const auto& spec : cw::coreRegistry()) {
+        printf("%-20s", spec.name.c_str());
+        float sum = 0;
+        for (size_t i = 0; i < sessions.size(); i++) {
+            DecodeScore s = scoreWithCore(sessions[i], spec.name, TONE);
+            printf("%10.4f", s.cer);
+            sum += s.cer;
+        }
+        const float mean = sum / sessions.size();
+        printf("%10.4f\n", mean);
+
+        if (spec.name == "legacy") { legacyMean = mean; }
+        if (spec.name == "legacy+peakdual16") { peakdual16Mean = mean; }
+        if (mean < bestMean) { bestMean = mean; bestName = spec.name; }
+        cores++;
+    }
+
+    printf("\nbest: %s (mean CER %.4f), legacy %.4f\n\n",
+           bestName.c_str(), bestMean, legacyMean);
+
+    // `bestMean <= legacyMean` would be tautological — best is a minimum over a
+    // set containing legacy. Gate the properties that can actually break: every
+    // registry core ran (none silently fell back, which scoreWithCore also
+    // guards), legacy reproduces the [recording] gate's mean, and the variants
+    // measured as catastrophic on slow real audio stay that way rather than
+    // quietly becoming the default.
+    CHECK(cores == (int)cw::coreRegistry().size());
+    CHECK(legacyMean == Approx(0.0044f).margin(0.0005f));
+    CHECK(peakdual16Mean > legacyMean * 10.0f);
 }

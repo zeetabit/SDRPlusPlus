@@ -73,7 +73,9 @@ codebase has roughly even odds.**
 
 ### Next action
 
-**Status (2026-07-20): both open lines are closed; what remains is structural.**
+**Status (2026-07-20): the detector and timing lines are closed; real-recording
+ground truth now exists (§18) and has already found two defects the synthetic
+suite could not express.**
 
 Detector line, Phases 15–19 — closed with no promotion:
 
@@ -109,21 +111,50 @@ inflation (+38.9%)** rather than the gap fragmentation §16.4 assumed. It also
 reframed #29: under realistic noise the cold-start bug is only 8 of 35 Farnsworth
 errors, so a cold-start fix addresses under a quarter of the problem.
 
+**Phase 23 built the real-recording gate (§18)** — #30 is closed as a blocker.
+ARRL W1AW publishes paired audio and exact text; five sessions are pinned and
+gated, two of them at CER 0.0000. It found and fixed two defects (a broken
+audio→IQ conversion, unmapped period and comma) and produced the first evidence
+bearing on §15.
+
+**Phase 24 swept all 21 registry cores against the real recordings (§19).**
+`legacy+mf` does fix the 35 WPM errors (0.0089 → 0.0000), so §12.3's refutation
+was scope-limited — but `legacy+kmeans` and `legacy+median`, which are
+timing-only, fix them too, so those errors are **marginal rather than the
+signature of the matched-filter mechanism**. Nothing is promotable: every
+candidate regresses on at least one synthetic profile, and the best core on real
+audio (`legacy+edge+log`, mean 0.0013) more than doubles CER on heavy noise.
+
+**The binding constraint is now measurement coverage, not ideas.** All five real
+recordings are high-SNR (19-76 dB); every variant that wins there loses under
+noise; and that deciding regime is arbitrated entirely by synthetic profiles of
+unvalidated fidelity (§15).
+
 **Candidates now, in dependency order:**
 
-1. **Why is dit +38.9% at noise 3.0?** (§17.3.2) The largest unexplained number
+1. **Noisy real recordings** (§19.4) — promoted to first. Off-air W1AW carries
+   real propagation *and* published ground truth, with receiver distance as an
+   SNR ladder over identical text. Without it, no candidate from §19 can be
+   accepted or rejected on evidence.
+2. **Why is dit +38.9% at noise 3.0?** (§17.3.2) The largest unexplained number
    in these docs, and it sits upstream of the gap classifier — gap centres derive
    from `dit`, so nothing in gap classification can be fixed while its input is
    39% wrong. ⊘ Not yet traced to CER.
-2. **The min-element filter's bias on hand-keyed** (§17.3.4) — a measured,
+3. **The min-element filter's bias on hand-keyed** (§17.3.4) — a measured,
    isolated, unexplained defect: enabling the decoder's own filter moves dit
    +5.9% → +11.3%. Small, self-contained, and testable now.
-3. **#29 in log-duration space** — still the right formulation, but §17.3.7 means
-   it must be scored against `farns2.0-n1.5`, not the clean profile.
-4. **Real recordings (#30)** — the standing prerequisite for the LLR detector,
-   and the only way to test generator fidelity (§15), which conditions every
-   number in this document. It is a data-collection project rather than an
-   experiment.
+4. **#29 in log-duration space** — §17.3.7 means it must be scored against
+   `farns2.0-n1.5` rather than the clean profile. ⊘ If the §18.6.1 inference
+   holds, the ARRL 5 and 10 WPM sessions are also real Farnsworth material with
+   published text — but that inference is unverified.
+5. **Noisy real recordings.** W1AW transmits these same texts on HF (3.5815 /
+   7.0475 / 14.0475 / 21.0675 / 28.0675 MHz), so an off-air capture would carry
+   real propagation *and* published ground truth, with receiver distance acting
+   as an SNR ladder over identical text. 📎 `kiwirecorder.py`
+   (github.com/jks-prv/kiwiclient) records audio and IQ WAV from public
+   KiwiSDRs; not yet attempted here. A cheaper intermediate, also untried:
+   apply the existing synthetic impairments to the clean ARRL audio, which
+   would separate keying realism from channel realism and test §15 directly.
 
 **A note on where this leaves the work.** Phases 15–19 closed the detector line
 without promoting anything: every candidate defect in it is either measured and
@@ -1867,6 +1898,8 @@ tidy.
 > (`attack-sweep` 193, `window-sweep` 170, `dual-refine` 217, `peak-gate` 41,
 > `guard-probe` 76, `guard-sweep` 180). Assertion count is unchanged at 1617
 > because the correction replaced six bounds one-for-one rather than adding any.
+> (These counts are this section's record, not the current suite size: Phases 22
+> and 23 took it to **1622 assertions in 223 test cases**.)
 >
 > The `[dual-window]` table still prints **CER = 1.0141** for `snr-noise4.0` at
 > `thresh=0.15` — the cell that failed the bad `c <= 1.0f` bound. It is retained
@@ -2282,3 +2315,255 @@ Found while wiring `[gap-noise]` into the build, not by looking for it.
 document is conditional on the synthetic profiles resembling reality, and the
 means to check that has been on disk, unbuilt, for three months.
 
+
+<a id="s18"></a>
+## 18. Real recordings: the ARRL W1AW gate (Phase 23, 2026-07-20)
+
+**Outcome: the first ground truth in this project that the decoder's own
+generator did not produce.** Two defects found and fixed, one measurement that
+bears on §15, and a gate that decodes 6-7 minutes of real audio at CER 0.0000.
+
+### 18.1 The source
+
+ARRL publishes W1AW code-practice sessions as a **paired MP3 and exact text
+file**, biweekly, at nine speeds. Verified by download: mono, **8000 Hz** —
+the decoder's internal IQ rate, so the test resamples nothing. Tone measured by
+Goertzel sweep at **750 Hz on all five** cached sessions.
+
+📎 Two web searches found no public corpus of real off-air CW with
+transcripts; the literature reports researchers generating their own. ✗ The
+academic "Morse Code Datasets for Machine Learning" (arXiv 1807.04239) is
+**synthetic one-dimensional sequences, not audio**, and cannot be used here.
+
+`tests/fetch_recordings.sh` pins five sessions by date (5/10/15/20/35 WPM).
+Neither audio nor text is committed. The gate is opt-in (`[.]`) and **fails at
+a REQUIRE** when the cache is absent — see §18.5.
+
+### 18.2 The audio→IQ conversion in the orphaned file was broken
+
+§17.5 found `test_recording.cpp` was never in the build. Its conversion also
+could not have worked. It computed `audio(t)·e^{jΩt}`; real audio has spectrum
+at ±750 Hz, so the product sits at Ω±750, and the channel's translation by −Ω
+returns it to ±750 — outside the ±100 Hz complex low-pass for **any** Ω.
+
+Measured on the same file, same tone parameter:
+
+| conversion | SNR | decoded |
+|---|---|---|
+| `audio(t)·e^{jΩt}` | 3.0 | `T ET  T E ET E EE E I T E I T EAI ITET...` |
+| samples as `re`, `im = 0` | 71.6 | correct text |
+
+The working conversion needs no Hilbert transform: translation by −750 places
+the wanted component at DC and the image at −1500, which the complex low-pass
+rejects.
+
+### 18.3 Punctuation was unmapped — a defect class the suite cannot express
+
+`morse_tree.h` mapped `/`, `=` and two prosigns but **no period (`.-.-.-`) and
+no comma (`--..--`)**. Periods decoded as `*` (SK, the nearest mapped node);
+commas vanished.
+
+It survived 221 tests because **`MSG_CQ` and `MSG_FULL` are the only messages
+the suite sends and neither contains punctuation.** Inventory of the 15/20/35
+WPM reference texts: **23 periods, 21 commas**, 14 `=`, 3 angle-bracket
+prosign markers.
+
+Fix: `tree[84] = '.'`, `tree[114] = ','` — both inside the existing 127-node
+depth-7 tree, no structural change. Measured before/after with one scorer held
+fixed (whitespace-normalised Levenshtein, no reference cleaning):
+
+| session | before | after |
+|---|---|---|
+| 15 WPM | 0.0201 | 0.0073 |
+| 20 WPM | 0.0180 | 0.0045 |
+| 35 WPM | 0.0287 | 0.0116 |
+
+⚠ These are **not** the gate's numbers in §18.4, which use the repository's
+`score()` plus reference cleaning and are therefore lower. Compare within a
+column, never across.
+
+**A test caught a wrong assumption of the author's.** A gate asserting that
+comma's unmapped parent `--..-` returns `'\0'` failed, returning `'7'`.
+`characterBreak()` scans every surviving beam path and returns the best
+*mapped* one, and confidence is clamped to 0.95 so the alternate branch never
+dies: **the decoder never returns `'\0'` while any live path is mapped.** The
+assertion was wrong, not the tree. It was narrowed to the property actually
+intended — comma must not capture the shallower pattern — rather than deleted.
+
+### 18.4 The gate
+
+Repository `score()`; the reference strips `\r`, `\x1a` and the bare `<`/`>`
+prosign markers, whose ARRL meaning the files do not state — rather than guess
+a mapping to `+`/`*`, they are dropped, so a decoder that emits a prosign there
+scores an insertion.
+
+| session | audio | chars | CER | WER | reported wpm | snr |
+|---|---|---|---|---|---|---|
+| 5 WPM | 954s | 556 | 0.0087 | 0.0632 | 12.0 | 19.2 |
+| 10 WPM | 472s | 454 | 0.0044 | 0.0440 | 13.2 | 59.9 |
+| 15 WPM | 375s | 544 | **0.0000** | 0.0000 | 14.1 | 71.6 |
+| 20 WPM | 451s | 887 | **0.0000** | 0.0000 | 18.6 | 75.7 |
+| 35 WPM | 438s | 1458 | 0.0089 | 0.0520 | 32.9 | 19.2 |
+
+Thresholds are ratchets at these values; 15 and 20 WPM gate at exactly zero,
+which is satisfiable because decoding a fixed WAV is deterministic. Total
+runtime 0.83s for 45 minutes of audio.
+
+### 18.5 The gate fails rather than skips
+
+The orphaned file returned early on a missing recording, before its only
+`REQUIRE` — it would have passed silently had it ever been built. The
+replacement requires the cache and fails naming the directory and the fetch
+script. Verified by pointing `CW_RECORDINGS_DIR` at an empty directory.
+
+### 18.6 Findings
+
+1. **The 5 and 10 WPM sessions report 12.0 and 13.2 WPM.** Measured. Their
+   character speed is far above their label, and they carry the highest CER and
+   WER of the five. The 5 WPM error diff is two spurious spaces plus one `W`→`O`
+   — spurious spaces being char gaps read as word gaps, the §16.1 defect.
+   ⊘ **That ARRL keys these in Farnsworth is an inference from the reported
+   speed, not a measurement.** The gap ratios in these files have not been
+   measured and no ARRL statement to that effect was located. If it holds, these
+   are real Farnsworth material with published text, which #29 has never had.
+
+2. **35 WPM residual errors are uniform: every one adds exactly one element.**
+   Measured by diff against the reference:
+
+   | truth | decoded | count |
+   |---|---|---|
+   | `A` `.-` | `U` `..-` | 5 |
+   | `L` `.-..` | `5` `.....` | 3 |
+   | `L` | dropped | 3 |
+   | `R` `.-.` | `H` `....` | 1 |
+   | `F` `..-.` | `+` `.-.-.` | 1 |
+
+   ⊘ **The mechanism is not measured.** The pattern is consistent with one dah
+   being split in two, which would match the mid-element dropout of §12.2, and
+   `legacy+mf` exists as a candidate fix that §12.3 refuted **on synthetic
+   profiles only** — none at 35 WPM against real keying. Whether it addresses
+   these errors is untested.
+
+3. **Reported WPM is low by 6.0-7.0% on the three sessions whose label matches
+   their character speed** (15→14.1, 20→18.6, 35→32.9). §17.2 measured
+   synthetic clean `ditErr = +7.9%`, and `WPM = 1200/dit` makes a +7.9% dit a
+   −7.3% WPM. ⚠ **This is agreement between two different instruments on two
+   different signals, not a controlled comparison** — §17's figure comes from
+   the gap-noise probe on synthetic `MSG_FULL`, this one from the channel's own
+   estimator on ARRL text. It is the first evidence bearing on §15 generator
+   fidelity and it points toward the generator's keying being realistic, but it
+   does not establish it.
+
+### 18.7 Incidental
+
+- **`fetch_recordings.sh` had two bugs visible only on a cold cache**, both
+  from staging downloads through `.part` temporaries: ffmpeg could not infer the
+  format of either the input or the output. With a warm cache the script
+  reported success while being broken for any first-time user. Fixed with a
+  `.tmp.mp3` input name and explicit `-f wav`, then verified by deleting the
+  cache and re-fetching all five sessions.
+- The five reference texts were committed in `74d35dfa` and subsequently
+  untracked; `tests/.gitignore` now covers `recordings/`. The audio was never
+  committed — the repository's pre-existing `*.wav` rule excluded it, which was
+  luck rather than design.
+- ⊘ Only the 15/20/35 WPM texts were inventoried for punctuation. The 5 and 10
+  WPM texts were not.
+
+<a id="s19"></a>
+## 19. The registry against real audio (Phase 24, 2026-07-20)
+
+**Outcome: §12.3's refutation of `legacy+mf` was scope-limited — but the
+mechanism it was refuted for is still not established, and nothing is
+promotable.** Measurement only.
+
+### 19.1 Method
+
+`[recording-matrix]` runs all 21 registry cores against the five ARRL sessions
+(§18), scoring with the repository's `score()` against the cleaned reference.
+Each WAV is loaded once and reused across cores. `Channel::init` falls back to
+`DEFAULT_CORE` for an unknown name rather than failing, so the sweep asserts
+`coreName()` matches — without that an unmatched name would silently measure
+legacy.
+
+### 19.2 Results (CER; one realization per session, see §19.5)
+
+| core | 5 WPM | 10 WPM | 15 WPM | 20 WPM | 35 WPM | mean |
+|---|---|---|---|---|---|---|
+| legacy | 0.0087 | 0.0044 | 0.0000 | 0.0000 | 0.0089 | 0.0044 |
+| legacy+mf | 0.0087 | 0.0044 | 0.0000 | 0.0000 | **0.0000** | 0.0026 |
+| legacy+kmeans | 0.0087 | 0.0044 | 0.0000 | 0.0000 | **0.0000** | 0.0026 |
+| legacy+median | 0.0087 | 0.0022 | 0.0000 | 0.0000 | **0.0000** | 0.0022 |
+| legacy+edge | 0.0044 | 0.0044 | 0.0000 | 0.0000 | 0.0000 | 0.0018 |
+| legacy+edge+mf | 0.0044 | 0.0022 | 0.0000 | 0.0000 | 0.0000 | **0.0013** |
+| legacy+edge+log | 0.0044 | 0.0022 | 0.0000 | 0.0000 | 0.0000 | **0.0013** |
+| legacy+peak | 0.1354 | 0.0088 | 0.0000 | 0.0000 | 0.0000 | 0.0288 |
+| legacy+peakdual | 0.3603 | 0.0398 | 0.0018 | 0.0011 | 0.0000 | 0.0806 |
+| legacy+peakdual16 | 0.5087 | 0.2876 | 0.0147 | 0.0090 | 0.0034 | 0.1647 |
+| legacy+bpf20 | 0.0087 | 0.0022 | 0.0000 | 0.0000 | 0.0390 | 0.0100 |
+
+### 19.3 Findings
+
+1. **`legacy+mf` takes 35 WPM from 0.0089 to 0.0000.** The §18.6.2 prediction
+   held: §12.3 refuted `+mf` on synthetic profiles, none of which run at 35 WPM
+   against real keying, and the gate that could test it did not exist then.
+
+2. ⚠ **But `+mf` is not uniquely responsible, so the §12.2 attribution is NOT
+   confirmed.** `legacy+kmeans` and `legacy+median` also reach 0.0000 at 35 WPM,
+   and those are **timing-only** changes that touch no filter. Two unrelated
+   routes fixing the same errors means those errors sit near a decision boundary
+   — they are *marginal*, not the signature of one mechanism. ⊘ Whether the
+   matched-filter resize dropout actually produces them is still unmeasured;
+   §18.6.2's error pattern remains consistent with it and unproven.
+
+3. **No candidate is promotable.** Against the 24-seed synthetic matrix:
+
+   | core | better | worse | notable regression |
+   |---|---|---|---|
+   | legacy+mf | 5 | 3 | worstcase 0.6244 → 0.6450 |
+   | legacy+edge+mf | 7 | 3 | noise2.0 0.0827 → 0.1496 |
+   | legacy+edge+log | 8 | 2 | noise3.0 0.8181 → **1.8421** |
+
+   `legacy+edge+log` is the best core on real audio and **more than doubles CER
+   on heavy noise**; its mean across synthetic profiles is 0.3324 against
+   legacy's 0.2269. Worse on any profile is a regression, not a tradeoff.
+
+4. **This does not contradict §12–§13; it adds a regime.** Those phases found
+   edge correction "over-corrects at low SNR". Measured SNR on the five ARRL
+   sessions is **19.2 to 75.7 dB** — all high. The two bodies of evidence agree
+   and describe different conditions.
+
+5. **The `+peak` family is far worse on slow real audio than synthetic testing
+   suggested** — 5 WPM: `+peak` 0.1354, `+peakdual` 0.3603, `+peakdual16`
+   0.5087, against legacy's 0.0087. Consistent with §13's decision not to
+   promote them.
+
+6. **Narrowing the front end costs fast CW**: at 35 WPM, bpf40 0.0151, bpf30
+   0.0335, bpf20 0.0390 against legacy 0.0089, while all three are neutral or
+   better at slow speeds. Keying bandwidth scales with speed.
+
+### 19.4 The consequence for the project
+
+Every real recording available is high-SNR, and every candidate that wins there
+loses under noise. **The regime that decides promotion is currently arbitrated
+entirely by synthetic profiles whose fidelity is unvalidated (§15).** That makes
+noisy real recordings the highest-value missing measurement in this project — not
+a nice-to-have.
+
+📎 W1AW transmits these same texts on HF (3.5815 / 7.0475 / 14.0475 / 21.0675 /
+28.0675 MHz), so an off-air capture would carry real propagation *and* published
+ground truth, with receiver distance acting as an SNR ladder over identical
+text. `kiwirecorder.py` (github.com/jks-prv/kiwiclient) records audio and IQ WAV
+from public KiwiSDRs. Not attempted.
+
+### 19.5 Caveats
+
+- ⚠ **One realization per session.** Real audio cannot be re-drawn with another
+  seed, so these are single samples — the same weakness this document criticises
+  in the pre-2026-07 single-seed tables. Total reference length across the five
+  is ~3800 characters, so a CER difference of 0.0044 → 0.0013 is roughly **12
+  errors against 5**. Small absolute counts; treat the ordering among the
+  leaders as provisional.
+- The five sessions are one text each from two QST issues, all machine-keyed by
+  the same station at one tone frequency. Speed varies; nothing else does.
+- ⊘ Reported SNR comes from the decoder's own estimator, not an independent
+  measurement.

@@ -33,6 +33,7 @@ add_executable(cw_decoder_tests
     test_speed.cpp
     test_farnsworth.cpp
     test_gap_noise.cpp
+    test_recording.cpp
     test_corrector.cpp
     test_conversation.cpp
     test_view_state.cpp
@@ -45,6 +46,12 @@ target_include_directories(cw_decoder_tests PRIVATE
     ${MOD_SRC}
     ${CORE_SRC}
     ${CORE_SRC}/imgui
+)
+
+# Lets the [recording] gate locate its cache regardless of the working
+# directory the binary is launched from. CW_RECORDINGS_DIR overrides it.
+target_compile_definitions(cw_decoder_tests PRIVATE
+    CW_TESTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
 
 target_link_libraries(cw_decoder_tests PRIVATE catch2)
