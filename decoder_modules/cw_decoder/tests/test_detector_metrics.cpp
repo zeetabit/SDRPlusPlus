@@ -2,6 +2,7 @@
 #include "cw_detector_score.h"
 #include "cw_matrix.h"
 #include <cstdio>
+#include <cmath>
 
 // Which *kind* of detector error dominates on each profile.
 //
@@ -319,15 +320,24 @@ TEST_CASE("peak attack constant sweep", "[cw][.][attack-sweep]") {
     printf("   %8s\n", "+pctile");
     printf("%s\n", std::string(100, '-').c_str());
 
+    bool tauReachesCode = false;
     for (const auto& p : detectorProfiles()) {
-        printf("%-18s %8.4f", p.name,
-               runCell("legacy", p.name, p.message, p.params, SEEDS).cerMean);
+        const float base = runCell("legacy", p.name, p.message, p.params, SEEDS).cerMean;
+        printf("%-18s %8.4f", p.name, base);
         for (int t = 0; t < NT; t++) {
-            printf(" %7.4f", runCellWith(slowAttackCore(taus[t]), "slow",
-                                         p.name, p.message, p.params, SEEDS).cerMean);
+            const float c = runCellWith(slowAttackCore(taus[t]), "slow",
+                                        p.name, p.message, p.params, SEEDS).cerMean;
+            printf(" %7.4f", c);
+            INFO("profile " << p.name << " tau=" << taus[t]);
+            CHECK(c >= 0.0f);
+        CHECK(std::isfinite(c));
+            if (c != base) { tauReachesCode = true; }
         }
         printf("   %8.4f\n",
                runCell("legacy+peak", p.name, p.message, p.params, SEEDS).cerMean);
+        INFO("profile " << p.name);
+        CHECK(base >= 0.0f);
+        CHECK(std::isfinite(base));
     }
 
     // ON stretch on a noiseless signal: does the bias actually come out?
@@ -340,7 +350,9 @@ TEST_CASE("peak attack constant sweep", "[cw][.][attack-sweep]") {
                                     cw::PEAK_SLOW_ATTACK, t).mean.onStretchPct);
     }
     printf("\n\n");
-    CHECK(NT > 0);
+    // A sweep whose parameter never reaches the code would print a table of
+    // identical columns and still "pass". This is the check that catches that.
+    CHECK(tauReachesCode);
 }
 
 // Phase 16b: the percentile window length.
@@ -384,6 +396,9 @@ TEST_CASE("peak percentile window sweep", "[cw][.][window-sweep]") {
                                   p.name, p.message, p.params, SEEDS).cerMean;
             row.push_back(c);
             printf(" %7.4f", c);
+            INFO("profile " << p.name << " win=" << wins[w]);
+            CHECK(c >= 0.0f);
+        CHECK(std::isfinite(c));
         }
         printf("\n");
         grid.push_back(row);
@@ -398,7 +413,14 @@ TEST_CASE("peak percentile window sweep", "[cw][.][window-sweep]") {
            wins[bestIdx], bestSum, grid.size());
     printf("NOTE: sum is a search aid, not a promotion criterion — promotion is\n"
            "      no-worse-on-every-profile, judged from the table above.\n\n");
-    CHECK(bestIdx >= 0);
+    REQUIRE(bestIdx >= 0);
+    // The documented mechanism is that window length matters; if every column
+    // were identical the parameter would not be reaching the detector.
+    bool windowReachesCode = false;
+    for (auto& row : grid) {
+        for (int w = 1; w < NW; w++) { if (row[w] != row[0]) { windowReachesCode = true; } }
+    }
+    CHECK(windowReachesCode);
 }
 
 // Phase 16c: dual-window peak reference.
@@ -428,13 +450,22 @@ TEST_CASE("dual-window peak reference", "[cw][.][dual-window]") {
     printf("  %7s %7s\n", "250only", "2000only");
     printf("%s\n", std::string(88, '-').c_str());
 
+    bool threshReachesCode = false;
     for (const auto& p : detectorProfiles()) {
         printf("%-18s %8.4f", p.name,
                runCell("legacy", p.name, p.message, p.params, SEEDS).cerMean);
+        bool anyDiff = false;
+        float first = -1.0f;
         for (int t = 0; t < NT; t++) {
-            printf(" %7.4f", runCellWith(dualCore(thresholds[t]), "dual",
-                                         p.name, p.message, p.params, SEEDS).cerMean);
+            const float c = runCellWith(dualCore(thresholds[t]), "dual",
+                                        p.name, p.message, p.params, SEEDS).cerMean;
+            printf(" %7.4f", c);
+            INFO("profile " << p.name << " thresh=" << thresholds[t]);
+            CHECK(c >= 0.0f);
+        CHECK(std::isfinite(c));
+            if (first < 0.0f) { first = c; } else if (c != first) { anyDiff = true; }
         }
+        threshReachesCode = threshReachesCode || anyDiff;
         auto only = [&](float w) {
             return runCellWith(CoreFactory([w](const GeneratedSignal&) {
                        return std::unique_ptr<cw::IDecodeCore>(new cw::StagedCore(
@@ -445,10 +476,18 @@ TEST_CASE("dual-window peak reference", "[cw][.][dual-window]") {
                            std::make_unique<cw::BeamSymbolDecoder>()));
                    }), "only", p.name, p.message, p.params, SEEDS).cerMean;
         };
-        printf("  %7.4f %7.4f\n", only(250.0f), only(2000.0f));
+        const float o250 = only(250.0f), o2000 = only(2000.0f);
+        printf("  %7.4f %7.4f\n", o250, o2000);
+        INFO("profile " << p.name);
+        CHECK(o250 >= 0.0f);
+        CHECK(o2000 >= 0.0f);
+        // The single-window columns are the reference the dual switch is judged
+        // against; if the window length did not reach the detector they would
+        // be identical and the comparison would be empty.
+        if (o250 != o2000) { threshReachesCode = true; }
     }
     printf("\n");
-    CHECK(NT > 0);
+    CHECK(threshReachesCode);
 }
 
 // Phase 16d: short-window length x disagreement persistence.
@@ -494,7 +533,14 @@ TEST_CASE("dual-window: short length and persistence", "[cw][.][dual-refine]") {
                                   p.name, p.message, p.params, SEEDS).cerMean;
             row.push_back(v);
             printf(" %7.4f", v);
+            INFO("profile " << p.name << " cfg=" << cfgs[c].shortMs
+                            << "/" << cfgs[c].persist);
+            CHECK(v >= 0.0f);
+        CHECK(std::isfinite(v));
         }
+        INFO("profile " << p.name);
+        CHECK(lg >= 0.0f);
+        CHECK(std::isfinite(lg));
         printf("\n");
         grid.push_back(row);
     }
@@ -518,7 +564,13 @@ TEST_CASE("dual-window: short length and persistence", "[cw][.][dual-refine]") {
         printf(" %7d", better);
     }
     printf("\n\n");
-    CHECK(NC > 0);
+    // Both knobs must demonstrably reach the detector, or the grid is one
+    // value printed 8 times and every conclusion drawn from it is vacuous.
+    bool cfgReachesCode = false;
+    for (auto& row : grid) {
+        for (int c = 1; c < NC; c++) { if (row[c] != row[0]) { cfgReachesCode = true; } }
+    }
+    CHECK(cfgReachesCode);
 }
 
 // Phase 17: transition-gated peak.
@@ -790,7 +842,7 @@ TEST_CASE("dynamic-range guard: constant sweep", "[cw][.][guard-sweep]") {
                 CHECK(gs.blindPct == 0.0f);
             }
             CHECK(gs.blindPct >= 0.0f);
-            CHECK(gs.blindPct <= 100.0f);
+        CHECK(gs.blindPct <= 100.0f);
         }
         printf("\n");
     }

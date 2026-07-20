@@ -1799,6 +1799,54 @@ events, i.e. the guard trades insertions for deletions at a favourable rate.
 Untested: this sweep records CER only. The direct test is to re-run it printing
 `insRate`/`delRate` per cell, as `[mf-fix]` already does.
 
+<a id="s13-11"></a>
+### 13.11 Test-quality hardening (2026-07)
+
+Not a phase — a correction to the instrument, recorded because it invalidates
+nothing above but explains why the diagnostic tests changed shape.
+
+Every `[.]`-hidden sweep from Phases 16–19 had been written as a reporting
+harness with an assertion that could not fail: `CHECK(true)`, `CHECK(NG > 0)` on
+a compile-time constant, `CHECK(bestIdx >= 0)` immediately after the loop that
+guarantees it, `CHECK(better + worse >= 0)` on a sum of two counts. They printed
+their tables and reported "passed" whatever the numbers were. The published
+results are unaffected — the tables were read by eye — but nothing would have
+caught a silently dead parameter.
+
+All of them now assert three things:
+
+1. **Value validity** — `std::isfinite`, non-negative.
+2. **The swept parameter reaches the code** — some cell must differ from the
+   baseline column. A dead knob otherwise prints one value N times and every
+   conclusion drawn from the grid is vacuous.
+3. **The default is a no-op** where a sweep overrides a shipping constant —
+   `[guard-sweep]` asserts `g=1.8` reproduces registry `legacy` exactly on all
+   12 profiles, so the sweep cannot be measuring its own plumbing.
+
+`[guard-sweep]` additionally asserts what §13.10 previously only argued: that
+`g=1.0` rejects 0.00% of samples, i.e. that it really is the guard-disabled
+control.
+
+**One assertion was itself wrong, and it is the useful part of this entry.**
+`CHECK(cer <= 1.0f)` looks like a sanity bound and is false: CER is edits ÷
+reference length and insertions are unbounded, so a decoder emitting garbage
+scores above 1. It failed immediately on `snr-noise4.0` at 1.014 — and the
+§12.6 table already contained a 1.1338 that nobody had noticed contradicted the
+bound. Replaced with `std::isfinite`. Assert what is invariant, not what looks
+tidy.
+
+> ✓ **VERIFIED (2026-07-20).** Always-on suite green at **1617 assertions in 221
+> test cases**; `[dual-window]` green at **145 assertions in 1 test case**. The
+> hidden sweeps passed individually with the tightened assertions
+> (`attack-sweep` 193, `window-sweep` 170, `dual-refine` 217, `peak-gate` 41,
+> `guard-probe` 76, `guard-sweep` 180). Assertion count is unchanged at 1617
+> because the correction replaced six bounds one-for-one rather than adding any.
+>
+> The `[dual-window]` table still prints **CER = 1.0141** for `snr-noise4.0` at
+> `thresh=0.15` — the cell that failed the bad `c <= 1.0f` bound. It is retained
+> deliberately: it is the standing counter-example to treating CER as a fraction,
+> and any future assertion that would reject it is wrong for the same reason.
+
 ## 14. Next: the detector (planning)
 
 ### Status
@@ -1896,3 +1944,145 @@ number the change was designed to move.
   core and compare error *signatures* (ins/del/sub split, edge jitter
   distribution). If they disagree, the profiles need fixing before more
   conclusions are drawn from them — including the ones already in this document.
+
+<a id="s16"></a>
+## 16. Gap classification and the Farnsworth cold start (Phase 21, 2026-07-20)
+
+### 16.1 What was actually wrong
+
+The plan (#29) framed this as *implement* 2-means clustering on OFF durations to
+replace hardcoded 1:3:7 ratios. **That framing was stale — the clustering already
+existed**, in `AdaptiveTiming::estimateGapCenters`, and `classifyOff` already used
+its output. The open question was why an adaptive estimator still left
+`farnsworth-2.0` at CER 0.0141.
+
+A probe (`[farnsworth-probe]`) answered it by feeding the generator's *true* gap
+durations straight into `AdaptiveTiming`, bypassing the detector entirely.
+`profileFarnsworth` is noiseless, so every misclassification it reports belongs
+to the gap classifier and nothing upstream.
+
+| ratio | gaps | errors | confusion | centres est/true | source | firstErr |
+|---|---|---|---|---|---|---|
+| 1.0 | 170 | 0 | — | 240/240, 560/560 | cold=10 adapted=160 | — |
+| 1.5 | 170 | 0 | — | 360/360, 840/840 | cold=10 adapted=160 | — |
+| 2.0 | 170 | **1** | C→W ×1 | 480/480, 1120/1120 | cold=10 adapted=160 | **3** |
+| 3.0 | 170 | **1** | C→W ×1 | 720/720, 1680/1680 | cold=10 adapted=160 | **3** |
+
+Three findings, two of which killed the leading hypotheses:
+
+1. **The steady-state estimator is exact.** Converged centres equal the
+   generator's `ElementModel` to the digit at every ratio. The sanity clamps at
+   the end of `estimateGapCenters` **never fire** (`adapted=160`, zero `clamped`,
+   zero `nosplit`). ✗ REFUTED: that the largest-gap split degenerates.
+2. **`boundary = dit * 2.0f` is fine.** Farnsworth stretches char and word gaps
+   only — element gaps stay at `1*dit` (generator, `TRUTH_ELEMENT_GAP`), so a
+   2*dit element/long boundary separates them at every ratio. ✗ REFUTED: that
+   the boundary is not Farnsworth-aware.
+3. **The entire deficit is one gap.** Exactly one error, at gap index 3 — the
+   first char gap in `CQ` — inside the 10-gap cold window, classified as WORD.
+   One inserted space in a 71-character message is 1/71 = **0.0141**, the
+   documented figure to four decimals.
+
+**Mechanism.** `estimateGapCenters` returns early while fewer than 10 gaps have
+been seen, so the cold window classifies against `dit*3` and `dit*7`. Those
+defaults are not a neutral prior — **they are a hardcoded Farnsworth-ratio-1.0
+assumption**. At ratio 2.0 a true char gap is 6*dit, which sits nearer the
+default *word* centre (7*dit) than the default *char* centre (3*dit):
+
+| | centre | sigma | z | likelihood |
+|---|---|---|---|---|
+| char | 240 ms | 40 ms | 6.0 | ∝ e^-18 ≈ 1.5e-8 |
+| word | 560 ms | 80 ms | −1.0 | ∝ 0.61 |
+
+The 4× char prior (`pElem*=5, pChar*=2, pWord*=0.5`) is fighting a
+seven-order-of-magnitude likelihood mismatch and loses. **The prior cannot fix
+this; only the centres can.**
+
+> The adaptive estimator was built precisely to remove the ratio-1.0 assumption,
+> but it engages only after 10 gaps — so the assumption survives intact in the
+> one window where the decoder has no data to contradict it. An adaptive
+> system's behaviour is often set by whatever it does *before* adaptation starts.
+
+### 16.2 The fix, and what it cost
+
+`classifyOff` pushes the current gap into `gapDurations` *before* estimating
+centres, so even the first long gap can be measured against itself. Char gaps
+outnumber word gaps ~2.5:1 and are the shorter class, so the smallest long gap
+seen is the best single-sample estimate of the char centre.
+
+Three variants were measured, each a paired 24-seed run on identical seeds
+against a baseline arm with the bootstrap disabled. The baseline arm reproduced
+every documented figure exactly (`farnsworth-2.0` 0.0141, `worstcase` 0.6244,
+`snr-noise4.0` 0.9032), so the comparison is sound.
+
+| variant | farnsworth-2.0 | better | worse | unchanged |
+|---|---|---|---|---|
+| ungated bootstrap | 0.0000 | 5 | **5** | 9 |
+| gated `minLong >= 4.5*dit` | 0.0000 | 3 | **4** | 12 |
+| **gated `minLong >= 5.5*dit`** (promoted) | **0.0000** | 1 | **3** | **15** |
+| `+ isLocked()` gate | 0.0141 ✗ | 0 | 3 | 15 |
+
+**Why the ungated version regressed.** Under noise the detector emits spurious
+gaps, so the smallest long gap early in a message can be a noise artifact rather
+than a real char gap — and bootstrapping from it corrupts the centres for the
+whole cold window. The gate fixes this by overriding the default *only when the
+observation contradicts it*: below the ~5*dit midpoint of the default 3:7
+centres the default already classifies correctly, so overriding can only add
+error. 5.5 rather than 5.0 keeps standard-timing signals untouched.
+
+**✗ REFUTED — gating on `isLocked()`.** Predicted to remove the residual noise
+perturbation, since the threshold is scaled by an unreliable `dit`. It is
+**strictly worse than either alternative**: `farnsworth-2.0` returns to 0.0141
+*and* all three regressions remain. The first char gap arrives after four
+elements, before the Kalman filter locks — **the cold-start error happens
+precisely because we are in the unlocked regime**, so requiring lock disables the
+fix exactly where it is needed, while lock arrives partway through the cold
+window so the bootstrap still fires on later gaps and still perturbs the noisy
+profiles. Prediction 20, wrong 11.
+
+### 16.3 Promoted with a documented regression
+
+The promoted variant is **not** a clean win and does not satisfy the standing
+"worse on any profile is a regression, not a tradeoff" rule:
+
+| profile | baseline | promoted | Δ | profile stderr |
+|---|---|---|---|---|
+| **farnsworth-2.0** | 0.0141 | **0.0000** | **−0.0141** | 0.0000 |
+| handkeyed-25wpm | 0.1309 | 0.1315 | +0.0006 | 0.0338 |
+| snr-noise2.0 | 0.0827 | 0.0833 | +0.0006 | 0.0166 |
+| snr-noise4.0 | 0.9032 | 0.9055 | +0.0023 | 0.0096 |
+| *15 others* | — | — | unchanged | — |
+
+In edits rather than ratios, over the 24-seed run of a 71-character message: the
+win removes **~24 edits** (one spurious space per seed, every seed, worst case
+included); the losses total **~4 edits**, concentrated on `snr-noise4.0`, a
+profile at CER 0.90 where the decoder already emits garbage.
+
+The asymmetry that justified promotion is not the size but the **kind**: the win
+has stderr 0.0000 and is structural (one misclassified gap, deterministically
+removed), while all three losses sit *below the seed-to-seed spread of their own
+profiles* and could flip sign on a different seed set.
+
+> ⚠ **This was a judgement call that relaxed a standing rule, not a measurement
+> that satisfied it.** It is revertible in one line: `setGapBootstrap(false)`
+> restores baseline behaviour exactly, and the losing arm stays reproducible.
+
+> 📎 **Threshold hunting was stopped deliberately.** The residual deltas (0.0006)
+> are an order of magnitude below the stderr of the profiles carrying them
+> (0.0166–0.0338). Further tuning of the 5.5 constant against this table would be
+> fitting 24 seeds of noise, not improving the decoder — the same failure the
+> Phase 19 guard sweep was designed to catch.
+
+### 16.4 Open
+
+- ⊘ **EVIDENCE NEEDED: why `retroDecode` does not already cover this.** The
+  decoder replays key events saved during timing convergence. A character
+  emitted at gap index 3 and re-decoded once centres adapt would fix the
+  Farnsworth error with *no* cold-start change and therefore no perturbation of
+  the noisy profiles — strictly better than the promoted fix. Whether the replay
+  path re-runs gap classification, or only element classification, is unread.
+  **This is the principled fix if it works.**
+- The probe samples `gapCenters()` *before* `classifyOff`, so its `source`
+  histogram lags the actual classification by one gap. Harmless for the error
+  counts, but the histogram must not be read as the state a given gap was
+  classified under.

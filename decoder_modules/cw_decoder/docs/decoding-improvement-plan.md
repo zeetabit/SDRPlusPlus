@@ -45,14 +45,20 @@
 > | Transition-gated peak (Phase 17) | `+peakgate` — 1 better / 8 worse; refuted its own premise |
 > | Guard probe (Phase 18) | confirmed Phase 17's mechanism; key-up instant attack is load-bearing |
 > | Guard sweep (Phase 19) | guard is honest, 1.8 Pareto-optimal; detector line closed |
+> | Test hardening | every Phase 16–19 sweep had a non-failing assertion; all replaced (§13.11) |
+> | Farnsworth gap centres (Phase 21) | **first promotion in seven phases** — `farnsworth-2.0` 0.0141 → 0.0000; cause was one cold-start gap, not the clustering (§16) |
 >
-> **Next:** real recordings (#30), or Farnsworth gap centres (#29) to
-> promote something. The detector line is closed — see Phase 19. Oracle
-> ablation confirms 100% of the AWGN/QSB/QRN error is at the detector, and
-> Phase 15 measured that the detector *also* holds 67% of the hand-keyed
-> headroom — an earlier reading of hand-keyed as a pure timing fault was too
-> strong. Farnsworth remains a *gap-classification* fault, unrelated to the
-> detector; `worstcase` needs the detector and the duration model fixed together.
+> **Next:** real recordings (#30) — now the only untried line. Phase 21 closed
+> Farnsworth (#29) with the first promotion in seven phases, though not a clean
+> one: it relaxed the no-regression rule for ~4 edits on already-failing
+> profiles (§16.3). One cheaper follow-up remains open — ⊘ whether `retroDecode`
+> already replays gap classification, which would fix Farnsworth with no
+> cold-start change and therefore no perturbation at all (§16.4). The detector
+> line is closed — see Phase 19. Oracle ablation confirms 100% of the
+> AWGN/QSB/QRN error is at the detector, and Phase 15 measured that the detector
+> *also* holds 67% of the hand-keyed headroom — an earlier reading of hand-keyed
+> as a pure timing fault was too strong. `worstcase` needs the detector and the
+> duration model fixed together.
 
 ## Current State (after Phase 1-10 implementation)
 
@@ -603,3 +609,20 @@ generative assumptions. Real recordings and model-mismatch profiles are required
 before committing to the rewrite, not after.
 
 Planning: `decoder-investigation-2026-07.md` §13.7 and §14.
+
+### Phase 21: Farnsworth gap centres (#29) — PROMOTED (with a documented regression)
+The plan framing was stale: 2-means gap clustering already existed and converges
+to the generator's centres exactly at every ratio, clamps never firing. The
+entire `farnsworth-2.0` deficit was **one gap** — the first char gap, classified
+inside the 10-gap cold window against `dit*3`/`dit*7`, which are a hardcoded
+Farnsworth-ratio-1.0 assumption. At ratio 2.0 a 6·dit char gap is nearer the
+default word centre than the default char centre by seven orders of magnitude in
+likelihood, so no prior can rescue it. Bootstrapping the char centre from the
+smallest observed long gap, gated to fire only above 5.5·dit, gives
+`farnsworth-2.0` 0.0141 → **0.0000** on all 24 seeds.
+
+Not a clean win: three already-degraded profiles move up by 0.0006–0.0023, all
+below their own seed-to-seed spread. Promoted on the asymmetry of *kind* — the
+win is structural and stderr 0.0000, the losses are perturbation-level and could
+flip sign on other seeds. Revert with `setGapBootstrap(false)`. Gating on
+`isLocked()` was tried and is strictly worse (§16.2). Details: §16.

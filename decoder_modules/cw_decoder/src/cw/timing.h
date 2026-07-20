@@ -710,6 +710,32 @@ namespace cw {
         TimingStrategy getStrategy() const { return _strategy; }
         void setStrategy(TimingStrategy s) { _strategy = s; reset(); }
 
+        // Cold-start gap bootstrap (docs §16). Settable so the A/B against the
+        // hardcoded 1:3:7 cold start is a paired measurement on identical seeds
+        // rather than a rebuild, and so the losing arm stays reproducible.
+        void setGapBootstrap(bool on) { gapBootstrap = on; }
+
+        // Gap-centre instrumentation (docs §16). estimateGapCenters silently
+        // substitutes hardcoded ratios both when it has too little data and when
+        // its own output fails the sanity clamps, so a degenerate estimator is
+        // indistinguishable from an adapting one at the classifyOff boundary.
+        // This reports the centres actually in force plus which fallback fired.
+        enum GapCenterSource {
+            GAPC_COLD,      // < 10 gaps observed, none long yet; hardcoded 1:3:7
+            GAPC_BOOTSTRAP, // < 10 gaps, char centre taken from smallest long gap
+            GAPC_NOSPLIT,   // too few long gaps to separate char from word
+            GAPC_CLAMPED,   // split ran, sanity clamp overwrote a centre
+            GAPC_ADAPTED,   // observed centres used as-is
+        };
+        GapCenterSource gapCenters(float& elemMean, float& charMean, float& wordMean) const {
+            float dit = getDitDuration();
+            if (dit < 1.0f) dit = 80.0f;
+            elemMean = dit;
+            charMean = dit * 3.0f;
+            wordMean = dit * 7.0f;
+            return estimateGapCenters(dit, elemMean, charMean, wordMean);
+        }
+
     private:
         static float gaussPdf(float x, float mean, float sigma) {
             if (sigma < 1.0f) sigma = 1.0f;
@@ -752,9 +778,7 @@ namespace cw {
         // Splits gaps into element (<2×dit) and non-element (>=2×dit), then
         // splits non-element into char and word by finding the largest gap
         // in the sorted non-element durations.
-        void estimateGapCenters(float dit, float& elemMean, float& charMean, float& wordMean) const {
-            if ((int)gapDurations.size() < 10) return;  // not enough data
-
+        GapCenterSource estimateGapCenters(float dit, float& elemMean, float& charMean, float& wordMean) const {
             float sumElem = 0; int nElem = 0;
             std::vector<float> longGaps;
 
@@ -767,8 +791,38 @@ namespace cw {
                 }
             }
 
+            // Cold start. The 1:3:7 defaults are not a neutral prior — they are
+            // a Farnsworth-ratio-1.0 assumption, and at ratio >= 2 a true char
+            // gap (6*dit) sits nearer the default word centre (7*dit) than the
+            // default char centre (3*dit), so the first char gap is read as a
+            // word gap and inserts a space. One observed long gap already
+            // contradicts the ratio-1.0 assumption. Char gaps outnumber word
+            // gaps roughly 2.5:1 and are the shorter class, so the smallest long
+            // gap seen is the best single-sample estimate of the char centre.
+            if ((int)gapDurations.size() < 10) {
+                if (longGaps.empty() || !gapBootstrap) return GAPC_COLD;
+                float minLong = *std::min_element(longGaps.begin(), longGaps.end());
+                // Only override the default when the observation contradicts it.
+                // The default model flips char->word just above the 5*dit midpoint
+                // of its own 3:7 centres, so a shortest long gap below that is
+                // already classified correctly and overriding can only add error —
+                // which is what an ungated bootstrap did on every noisy profile,
+                // where an early spurious gap became the char centre for the rest
+                // of the cold window. 5.5 rather than 5.0 keeps standard-timing
+                // signals untouched; ratio 1.5 (4.5*dit) already decodes clean.
+                // Gating this on isLocked() was tried and is strictly worse
+                // (docs §16): the first char gap arrives after four elements,
+                // before the filter locks, so requiring lock disables the fix
+                // exactly where it is needed while still firing later in the
+                // cold window — losing the win and keeping the perturbation.
+                if (minLong < dit * 5.5f) return GAPC_COLD;
+                charMean = minLong;
+                wordMean = charMean * (7.0f / 3.0f);
+                return GAPC_BOOTSTRAP;
+            }
+
             if (nElem >= 3) elemMean = sumElem / nElem;
-            if (longGaps.size() < 2) return;  // can't split char/word
+            if (longGaps.size() < 2) return GAPC_NOSPLIT;  // can't split char/word
 
             // Split long gaps into char and word by finding the largest gap
             std::sort(longGaps.begin(), longGaps.end());
@@ -788,8 +842,10 @@ namespace cw {
             if (nWord >= 1) wordMean = sumWord / nWord;
 
             // Sanity: char < word, elem < char
-            if (charMean <= elemMean * 1.5f) charMean = dit * 3.0f;
-            if (wordMean <= charMean * 1.5f) wordMean = charMean * 2.5f;
+            bool clamped = false;
+            if (charMean <= elemMean * 1.5f) { charMean = dit * 3.0f; clamped = true; }
+            if (wordMean <= charMean * 1.5f) { wordMean = charMean * 2.5f; clamped = true; }
+            return clamped ? GAPC_CLAMPED : GAPC_ADAPTED;
         }
 
         float _sampleRate = 1000;
@@ -802,6 +858,7 @@ namespace cw {
 
         std::vector<float> elementDurations;  // recent ON-durations for sigma estimation
         std::vector<float> gapDurations;      // recent OFF-durations for gap center estimation
+        bool gapBootstrap = true;             // config, not state: survives reset()
     };
 
 }

@@ -708,6 +708,7 @@ cd decoder_modules/cw_decoder/tests/build && cmake .. && make -j8
 ./cw_decoder_tests "[peak-gate]"     -s   # transition-gated peak (refuted, kept for history)
 ./cw_decoder_tests "[guard-probe]"   -s   # dynamic-range guard: rejection during key-down
 ./cw_decoder_tests "[guard-sweep]"   -s   # guard constant sweep (~2 min)
+./cw_decoder_tests "[farnsworth-probe]" -s # gap-classifier confusion matrix, detector bypassed
 ```
 
 The matrix and oracle sweeps are tagged `[.]` so Catch2 hides them from the
@@ -757,10 +758,22 @@ Learned the hard way; each one has an incident behind it.
 | A profile that decoded better before and worse after is a **regression, not a trade** | The one exception that proves it: `worstcase` was called a "physical limit" for exactly this reason, then improved 8×. |
 | Keep losing variants in the registry | They are the comparison baseline for future cores, and re-deriving them costs more than the entry. |
 | `legacy` must stay **byte-identical**; verify with the characterization table before/after | A "pure refactor" that changes behaviour is the hardest bug class to find later. |
-| Mark unmeasured claims (⊘ / ⚠ / ✗ / 📎) | Of 17 predictions made from code reading, 8 were wrong. Unmarked plausible claims have roughly even odds. |
+| Mark unmeasured claims (⊘ / ⚠ / ✗ / 📎) | Of 20 predictions made from code reading, 11 were wrong. Unmarked plausible claims have roughly even odds. |
 | Close the loop back to **CER** before treating a stage metric as a target | Cutting detector false events 17× moved CER by nothing; the ON-stretch metric misled twice. |
 | Before "fixing" an apparent bug, check what currently **absorbs its error** | Four separate mechanisms in this codebase are load-bearing defects. |
 | Subagents must **never** run `git checkout` / `stash` / `restore` | The working tree carries uncommitted work; one such call destroyed an unrelated edit. Back up with `cp`, restore with `cp`. |
+| **No assertion that cannot fail.** A diagnostic test still needs a real check | Three sweeps shipped with `CHECK(true)`, `CHECK(NG > 0)` and `CHECK(better + worse >= 0)`. They printed tables and reported "passed" regardless of the numbers. |
+| Every parameter sweep asserts that its **parameter reaches the code** | Otherwise a dead knob prints one value N times and every conclusion drawn from the table is vacuous. Pattern: some cell must differ from the baseline column. |
+| A sweep that overrides a constant asserts the **default column is a no-op** | `guard-sweep` checks `g=1.8` reproduces registry `legacy` exactly on all 12 profiles; without it the sweep could be measuring the plumbing, not the constant. |
+| Run only the tests the change can affect | The hidden sweeps are minutes each; re-running the whole battery to re-check one edit is the single biggest time sink in this work. |
+
+**CER is not bounded by 1.0.** It is edits ÷ reference length and insertions are
+unbounded, so a decoder emitting garbage scores above 1 — `snr-noise4.0` reaches
+1.014 in `[dual-window]` and 1.1338 in the §12.6 table. An assertion of
+`cer <= 1.0` looks like a sanity check and is simply false; assert
+`std::isfinite(cer)` and `cer >= 0` instead. This was itself an incident: the
+bound was added as part of hardening the tests above and failed on the first
+run.
 
 **Measurement discipline.** Every degradation profile is scored over 24
 independent seeds and asserted on the **mean**. Single-seed CER is quantized to
@@ -832,7 +845,7 @@ look like bugs and are load-bearing — do not "fix" them without re-measuring.
 | `timing.h` KalmanTiming | Seed dead branch: ambiguous seed assumed all-dits | Deferring the seed also defers timing lock and retroDecode, breaking clean decoding (WPM sweep 0.01 → 0.364). Correct fix needs gap durations, which `classifyOn()` cannot see. |
 | `timing.h` LogTiming | No outlier gate on learning | Three variants tried (3σ relative, ln2 absolute, Huber). All fail: learning from outliers inflates R, which widens acceptance and keeps the filter tolerant. Rejecting them makes it brittle (qrm 0.002 → 0.393). |
 | `morse_tree.h` | Unmapped tree nodes emit `'\0'`, silently dropping the character | Real defect, not yet addressed — deletions cost the same as substitutions in CER but give the operator no cue. ⊘ magnitude never measured. |
-| `timing.h` adaptive gap centres | Farnsworth char/word split fails at ratio 2.0 | Measured, not yet fixed: oracle ablation puts the entire `farnsworth-2.0` error here (0.0141 → 0.0000 with ideal gap boundaries, detector irrelevant). Isolated and cheap. |
+| `timing.h` adaptive gap centres | Farnsworth char/word split failed at ratio 2.0 | **Fixed (§16), with a documented regression.** The clustering was never the fault — it converges to the generator's centres exactly at every ratio and its sanity clamps never fire. The whole 0.0141 was **one gap**: the cold window classifies against `dit*3`/`dit*7`, which *are* a hardcoded ratio-1.0 assumption, so the first char gap (6·dit) is read as a word gap and inserts a space. Bootstrapping the char centre from the smallest long gap, gated to fire only above 5.5·dit, takes `farnsworth-2.0` to 0.0000 on all 24 seeds. Costs ~4 edits across the run on three already-degraded profiles, all sub-stderr. Revert with `setGapBootstrap(false)`. |
 | `staged_core.h` matched filter | Ring buffer zeroed on window resize — dropout mid-element, 14 spurious transitions on a *noiseless* 25 WPM signal | Fixing it (`legacy+mf`) cuts spurious events 17× and CER does not follow: `qsb`, `worstcase` and `noise2.0` all regress. The artifacts fall below `minElementMs()` and are already discarded. |
 | `tone_detector.h` | Every ON is stretched by ~9.8% of a dit, distorting the observed dah:dit ratio to 2.82 | Confirmed on a noiseless signal. **Cause is unknown.** Two attributions have been refuted: the threshold ratio gap (by `legacy+sym`, 11%) and instant-attack peak tracking (by `legacy+peakgate`, §13.8 — removing key-up attack entirely reproduces the stretch to 4 s.f.). `PEAK_PERCENTILE` does cut it 57%, but the mechanism for that is now ⊘ unexplained. Correcting it is worth 0.095 CER on hand-keyed; no variant yet avoids regressing `qsb`. |
 | `tone_detector.h` | `dynamicRange < 1.8` skips the sample, so while it holds detection is **off**, not merely biased | **Not a defect — swept and confirmed (§13.10).** Disabling it takes blindness to 0% and makes noise4.0 CER *worse* (0.9032 → 0.9173): it reports the SNR limit rather than causing it, and 1.8 is Pareto-optimal. Separately load-bearing (§13.9): legacy's key-up instant attack keeps `peakRef` above it, so 100% of legacy's rejections on noise2.0 land in key-up where they cost nothing. Remove that prop and detection goes blind for 40–65% of key-down time. |
