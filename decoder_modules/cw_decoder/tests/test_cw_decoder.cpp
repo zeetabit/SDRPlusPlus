@@ -121,7 +121,7 @@ TEST_CASE("MorseDecoder decodes prosigns", "[cw][morse][prosign]") {
 TEST_CASE("MorseDecoder decodes punctuation", "[cw][morse][punctuation]") {
     // Added 2026-07-20. Both were unmapped, which made every period decode as
     // '*' (SK, the nearest mapped node) and every comma vanish. The defect
-    // survived 221 tests because MSG_CQ and MSG_FULL carry no punctuation —
+    // survived the whole suite because MSG_CQ and MSG_FULL carry no punctuation —
     // it was only visible against real ARRL code-practice text.
     cw::MorseDecoder decoder;
     decoder.init();

@@ -1,5 +1,6 @@
 #pragma once
 #include "cw_test_signals.h"
+#include "cw_parallel.h"
 #include <vector>
 #include <algorithm>
 #include <cmath>
@@ -67,6 +68,58 @@ namespace cw_test {
         return s;
     }
 
+    // ── Paired comparison ───────────────────────────────────────
+    //
+    // Two cores run over the same seed list decode the same noise
+    // realizations, so seed difficulty is a shared term that cancels in the
+    // per-seed difference. Comparing the two means separately does not cancel
+    // it: on worstcase the between-seed spread is an order of magnitude larger
+    // than the effect being measured.
+    //
+    // Counting "better/worse" off mean differences with a 1e-6 float epsilon
+    // treats a one-character shift across the whole seed set as a regression.
+
+    struct PairedDelta {
+        float meanDelta = 0;      // candidate - baseline; negative is an improvement
+        float stderrDelta = 0;
+        float t = 0;              // meanDelta / stderrDelta
+        int nSeeds = 0;
+        int nDiffer = 0;          // seeds where the two cores disagreed at all
+
+        // |t| >= 2 is roughly the 95% two-sided threshold for these seed counts.
+        bool significant() const { return nSeeds > 1 && std::fabs(t) >= 2.0f; }
+
+        const char* verdict() const {
+            if (!significant()) { return "ns"; }
+            return meanDelta < 0 ? "BETTER" : "WORSE";
+        }
+    };
+
+    inline PairedDelta comparePaired(const std::vector<float>& baseline,
+                                     const std::vector<float>& candidate) {
+        PairedDelta d;
+        if (baseline.size() != candidate.size() || baseline.size() < 2) { return d; }
+        d.nSeeds = (int)baseline.size();
+
+        double sum = 0;
+        for (int i = 0; i < d.nSeeds; i++) {
+            const double diff = (double)candidate[i] - baseline[i];
+            sum += diff;
+            if (std::fabs(diff) > 1e-6) { d.nDiffer++; }
+        }
+        d.meanDelta = (float)(sum / d.nSeeds);
+
+        double var = 0;
+        for (int i = 0; i < d.nSeeds; i++) {
+            const double e = (candidate[i] - baseline[i]) - d.meanDelta;
+            var += e * e;
+        }
+        const float sd = (float)std::sqrt(var / (d.nSeeds - 1));
+        d.stderrDelta = sd / std::sqrt((float)d.nSeeds);
+        d.t = (d.stderrDelta > 1e-9f) ? d.meanDelta / d.stderrDelta : 0.0f;
+        return d;
+    }
+
     // ── Error-type breakdown ────────────────────────────────────
     //
     // Aggregate CER cannot distinguish a decoder that stays silent from one
@@ -113,15 +166,17 @@ namespace cw_test {
                                         SignalParams params,
                                         int nSeeds = 24,
                                         unsigned seedBase = 1000) {
-        std::vector<float> cers;
-        cers.reserve(nSeeds);
+        std::vector<float> cers(nSeeds), wers(nSeeds);
+        parallelFor(nSeeds, [&](int i) {
+            SignalParams p = params;                       // per-worker copy
+            p.seed = seedBase + (unsigned)i * 7919u;       // spread seeds apart
+            auto s = decodeAndScore(message, p);
+            cers[i] = s.cer;
+            wers[i] = s.wer;
+        });
+
         float werSum = 0;
-        for (int i = 0; i < nSeeds; i++) {
-            params.seed = seedBase + (unsigned)i * 7919u;   // spread seeds apart
-            auto s = decodeAndScore(message, params);
-            cers.push_back(s.cer);
-            werSum += s.wer;
-        }
+        for (float w : wers) { werSum += w; }
         return summarize(std::move(cers), werSum);
     }
 }

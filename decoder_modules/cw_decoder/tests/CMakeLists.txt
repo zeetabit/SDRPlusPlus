@@ -64,5 +64,9 @@ target_include_directories(cw_decoder_tests PRIVATE ${VOLK_INCLUDE_DIRS} ${FFTW3
 target_link_directories(cw_decoder_tests PRIVATE ${VOLK_LIBRARY_DIRS} ${FFTW3F_LIBRARY_DIRS})
 target_link_libraries(cw_decoder_tests PRIVATE ${VOLK_LIBRARIES} ${FFTW3F_LIBRARIES})
 
+# Benchmark harnesses run seeds concurrently (cw_parallel.h).
+find_package(Threads REQUIRED)
+target_link_libraries(cw_decoder_tests PRIVATE Threads::Threads)
+
 enable_testing()
 add_test(NAME cw_decoder_tests COMMAND cw_decoder_tests)

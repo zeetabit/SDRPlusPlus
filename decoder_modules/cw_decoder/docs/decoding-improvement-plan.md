@@ -49,19 +49,35 @@
 > | Farnsworth gap centres (Phase 21) | cause found (one cold-start gap, not the clustering); fix **not shipped** — fragile by 0.5 ms and breaks a gate. Retro gap seeding promoted instead: `qrm` 0.0100 → 0.0035 (§16) |
 > | Gap classification under noise (Phase 22) | ⊘ item closed, measurement only. Error multiplication **confirmed**: 12.2% of structurally intact gaps misclassified at noise 3.0 vs 0.0% clean — but the driver is a **+38.9% dit overestimate**, not gap fragmentation. Two new measured defects; #29 reframed (§17) |
 > | Real recordings — ARRL W1AW (Phase 23) | **#30 closed as a blocker.** Paired audio + published text, five sessions pinned and gated; 15 and 20 WPM decode at **CER 0.0000**. Found and fixed two defects the synthetic suite cannot express: a broken audio→IQ conversion and unmapped period/comma (§18) |
-> | Registry vs real audio (Phase 24) | `legacy+mf` fixes the 35 WPM errors (0.0089 → 0.0000), so §12.3's refutation was scope-limited — but timing-only cores fix them too, so they are **marginal**, not proof of the matched-filter mechanism. **Nothing promotable**: every candidate regresses on ≥1 synthetic profile; the real-audio winner doubles CER on heavy noise (§19) |
+> | Measurement repair (Phase 25) | The comparison method, not the decoder. Paired per-seed testing added (`comparePaired`); n=24 shown to give wrong verdicts in both directions; the four-variable confound between the `noise*` and `handkeyed*` families identified and separated by a speed×noise factorial; hand-keyed coverage found to stop at 25 WPM. **Every better/worse tally in Phases 12–24 is unreliable as recorded.** No decoder change |
+| Registry vs real audio (Phase 24) | `legacy+mf` fixes the 35 WPM errors (0.0089 → 0.0000), so §12.3's refutation was scope-limited — but timing-only cores fix them too, so they are **marginal**, not proof of the matched-filter mechanism. **Nothing promotable**: every candidate regresses on ≥1 synthetic profile; the real-audio winner doubles CER on heavy noise (§19) |
 >
-> **Next:** **noisy real recordings** (§19.4). Phase 24 resolved the 35 WPM
-> question and, in doing so, made coverage the binding constraint rather than
-> ideas: all five real recordings are high-SNR (19-76 dB), every variant that
-> wins there loses under noise, and that deciding regime is arbitrated entirely
-> by synthetic profiles of unvalidated fidelity (§15). Off-air W1AW would carry
-> real propagation *and* published text. Then the **+38.9% dit overestimate at
-> noise 3.0** (§17.3.2), the largest unexplained number in the docs and upstream
-> of all gap classification; then the min-element filter's hand-keyed bias
-> (§17.3.4); then #29 in log-duration space, scored against the *noisy*
-> Farnsworth profile since §17.3.7 showed the cold-start bug is only 8 of 35
-> errors there. #30 is closed as a blocker (§18).
+> **Next: repair the instrument before ranking anything else with it.** Phase 25
+> found that the comparisons every ranking in these documents rests on were not
+> capable of supporting them. Four defects, all measured:
+>
+> 1. **n=24 is too few.** Verdicts flipped at n=96 in both directions — a
+>    `noise3.0` regression missed (t 1.91 → 5.43), two hand-keyed improvements
+>    missed (t −0.47 → −3.29, −1.09 → −3.63). Baselines moved too: `legacy` on
+>    `noise2.0` reads 0.0827 at n=24 and 0.1227 at n=96.
+> 2. **Better/worse was counted on means with a 1e-6 float epsilon.** Under a
+>    paired per-seed test `legacy+edge` goes from "7 better / 3 worse" to
+>    3 better / **0 worse** / 9 not-significant; `legacy+mf` goes from
+>    "5 better / 3 worse" to **nothing significant on any profile**. The `qrn`
+>    regression that blocked `+edge` was 3 differing seeds in 96.
+> 3. **The profile families confound four variables at once.** `noise*` is
+>    15 WPM / no jitter / no weight bias; `handkeyed*` is `noiseAmp` 0.3 with
+>    jitter 0.15 and bias 0.1. No claim about "noise" can be drawn by comparing
+>    them. A speed×noise factorial separates them: jitter is *not* the driver,
+>    noise is — but the failure magnitude is concentrated at slow speed.
+> 4. **Speed coverage stopped at 25 WPM**, and 40 WPM is where candidates
+>    diverge most (0.17 CER between `+log` and `+mf`).
+>
+> The real-recording matrix has the same defect in a worse form: it is **n=1**
+> per cell with no variance estimate, and it ranks the top three cores by
+> differences of about one character in total.
+>
+> Reprioritized leftovers follow the Approaches Matrix.
 >
 > **Standing context.** Phase 21 found the Farnsworth cause exactly but shipped a
 > different fix: the cold-start correction is fragile by 0.5 ms and breaks a
@@ -169,7 +185,7 @@
 | Worst case (all combined) | 0.57 | Improved from 0.61 by corrector (+Q→CQ) — ⚠ see note |
 | Worst case long message | 0.45 | More data → better timing |
 
-**Test suite (2026-07-20): 223 test cases, 1622 assertions always-on, plus opt-in `[.]` sweeps.**
+**Test suite: an always-on battery plus opt-in `[.]` sweeps.**
 
 ### Key Insights
 
@@ -369,7 +385,7 @@ Key finding: **filter bandwidth is the dominant factor** — 35 Hz vs 68 Hz = 20
 | 21 | Log-duration timing (Mills) | Very High | Medium | Medium | **Done — variant `+log`** |
 | 22 | Narrow pre-detection BPF | Low (−) | Very High | Low | **Measured — variants `+bpf*`** |
 | 23 | Huberised robust timing update | Low | None | Low | **Refuted (2026-07)** |
-| 24 | Likelihood-ratio detector | Medium | High | High | **Blocked on #30** |
+| 24 | Likelihood-ratio detector | Medium | High | High | **Still blocked.** #30 closed as data collection, but the ARRL sessions are 19–76 dB and this is a noise technique — it would still be validated only against a generator whose envelope is exactly the Rician model it assumes |
 | 25 | Gap ambiguity inside the beam | High | Medium | Medium | Candidate |
 | 26 | Callsign database (SCP/Master.dta) | N/A | N/A | Low | Candidate |
 | 27 | Bell 1977 trellis core | High | Very High | Very High | Future |
@@ -386,9 +402,35 @@ Key finding: **filter bandwidth is the dominant factor** — 35 Hz vs 68 Hz = 20
 | 28k | Probe the `dynamicRange < 1.8` guard rejection rate | N/A | N/A | Low | **Done (2026-07) — confirmed §13.8** |
 | 28l | Sweep the 1.8 guard constant | N/A | N/A | Low | **Done (2026-07) — guard is honest, 1.8 optimal** |
 | 29 | Adaptive gap centres rewrite (Farnsworth) | N/A | Low | Low | **Candidate — measured 0.0141 → 0** |
-| 30 | Real-recording benchmark + model-mismatch profiles | N/A | N/A | Medium | **Prerequisite for #24** |
+| 30 | Real-recording benchmark + model-mismatch profiles | N/A | N/A | Medium | **Done (Phase 23)** — closed as data collection, open as validation for #24 |
+| 31 | WPM-locked adaptive BPF (runtime tap update) | N/A | High | Medium | **Candidate — evidence-backed.** From Phase 10 "future work", never in this matrix. `+bpf20` helps slow CW and costs 35 WPM (0.0390): a filter matched to locked WPM dissolves a tradeoff already measured, rather than one assumed |
+| 32 | Paired per-seed comparison + factorial profiles | N/A | N/A | Low | **Done (Phase 25)** — `comparePaired` in `cw_bench_stats.h` |
+
+### Reprioritized leftovers (2026-07-20, after Phase 25)
+
+Ordered by strength of the evidence that the work is needed, not by expected
+gain. Phase 25 is the reason the order changed: nothing that ranks variants can
+be trusted until the instrument that ranks them is repaired.
+
+| rank | item | why here |
+|---|---|---|
+| 1 | **Finish Phase 25** — paired test in promotion decisions, `handkeyed-30/35/40` in the standard set, decouple the `noise*`/`handkeyed*` families, variance for the real-audio matrix | Upstream of every other decision. Cheap. Currently three known wrong verdicts and a four-variable confound |
+| 2 | **Runaway insertion at slow speed × heavy noise** | `legacy+edge+log` reaches CER 1.77 at 15 WPM / `noise 3.0` (t 12.48) and 1.31 at 25 WPM — emitting more than the reference contains. Reproducible, large, speed-dependent, and a distinct failure mode from ordinary degradation. Plausibly the same defect as the **+38.9% dit overestimate** (§17.3.2), the largest unexplained number in these documents |
+| 3 | **#31 WPM-locked adaptive BPF** | The only unbuilt idea that today's data actively supports rather than merely permits |
+| 4 | **#25 gap ambiguity inside the beam** | §17 measured 12.2% of structurally intact gaps misclassified at `noise 3.0` with errors flowing toward CHAR. Propagating gap ambiguity into the beam addresses a measured defect; #14/#15 address assumed ones |
+| 5 | **#26 callsign database** | Low complexity, low risk, post-decode only — cannot regress the detector |
+| 6 | **#24 likelihood-ratio detector** | Oracle ablation puts 100% of AWGN/QSB/QRN error at the detector, so the headroom is real and large. Still unvalidatable: see the row above |
+| 7 | **#14 ATC, #15 coherent PLL** | No data and no oracle headroom estimate. The §10 scorecard puts pre-implementation predictions near 50% |
+| 8 | **#16 LSTM, #27 Bell trellis** | Future |
+| — | **Noisy real recordings** (was rank 1) | **Demoted.** It would validate §15's synthetic fidelity; it would not resolve a tradeoff, because the candidates disagree with each other in the regime the recordings would add, not in the one they would confirm |
 
 ### Results of 2026-07 work (24 seeds, MSG_FULL, mean CER)
+
+> ⚠ **CONTESTED by Phase 25 — this table is n=24.** Kept because Phases 12–19
+> were decided against these numbers, so it is the historical record. At n=96,
+> `legacy` on `noise 2.0` is 0.1227 (not 0.0827) and on hand-keyed 25 WPM is
+> 0.1536 (not 0.1309). Do not use any row here to rank a variant; re-measure
+> with `comparePaired`.
 
 `legacy` is unchanged and remains the default; nothing below was promoted.
 Full tables and method: `decoder-investigation-2026-07.md` §8–10.
@@ -617,7 +659,14 @@ registry `legacy` exactly, are both asserted in the test rather than assumed.
 
 Full tables: `decoder-investigation-2026-07.md` §13.10.
 
-### Phase 20: Real Recordings (NEXT)
+### Phase 20: Real Recordings (SUPERSEDED — delivered by Phase 23)
+Kept for the reasoning that motivated it. The prerequisite argument below is
+still sound but is **only half satisfied**: Phase 23 delivered paired audio and
+published text, but all five sessions are 19–76 dB SNR. A likelihood-ratio
+detector is a noise technique, so the recordings do not exercise the regime
+#24 targets. #30 is closed as a data-collection blocker and open as a
+validation one.
+
 Phases 15–19 closed the detector line without promoting anything: every
 candidate defect in it is now either measured and load-bearing, or measured and
 absent. The remaining hand-keyed headroom is known not to be reachable by any of
@@ -655,4 +704,42 @@ log-duration reformulation, where Farnsworth becomes an additive shift (§5.3b).
 
 **Shipped instead:** retro gap seeding — `makeFresh()` restored the element model
 but dropped the gap model, so every replay re-entered a cold gap window. 5
-profiles better, 1 worse, 221/221 gates pass, `qrm` 0.0100 → **0.0035**. Details: §16.
+profiles better, 1 worse, all gates pass, `qrm` 0.0100 → **0.0035**. Details: §16.
+
+### Phase 25: Measurement repair (2026-07-20 — method, no decoder change)
+
+**Paired testing.** Every core runs the identical seed list, so seed difficulty
+is a shared term that cancels in the per-seed difference. `comparePaired` in
+`cw_bench_stats.h` reports mean delta, its standard error, `t`, and `nDiffer`.
+Under it, `legacy+edge` is 3 better / 0 worse / 9 ns (was "7 better / 3 worse"),
+and `legacy+mf` is significant on nothing at all. `nDiffer` is the tell: the
+`qrn` regression that blocked `+edge` was 3 differing seeds in 96.
+
+**n=24 is too few** to adjudicate the effect sizes in question. Three verdicts
+flipped at n=96, in both directions, and the baselines themselves moved.
+
+**The profile families confound four variables.** `noise*` is 15 WPM, jitter 0,
+bias 0; `handkeyed*` is `noiseAmp` 0.3, jitter 0.15, bias 0.1. A speed×noise
+factorial at each jitter level separates them — `legacy+edge+log` vs `legacy`,
+n=48, `t`:
+
+| | noise 0.3 | 1.0 | 2.0 | 3.0 |
+|---|---|---|---|---|
+| 15 WPM | −1.00 | −1.00 | **−3.66** | **+12.48** |
+| 25 WPM | 0.00 | +1.66 | **+8.69** | **+14.75** |
+| 35 WPM | **−11.32** | **−7.06** | **−2.33** | **+3.42** |
+| 40 WPM | **−7.45** | **−7.02** | −1.87 | **+2.82** |
+
+Jitter is not the driver — the pattern holds at both levels. Noise is, but the
+magnitude is concentrated at slow speed: at `noise 3.0` the delta is +0.9352 at
+15 WPM and +0.0335 at 40 WPM. The `25 WPM × noise 2.0` cell is anomalous
+(worse, while 15/35/40 at the same noise are better or ns) and unexplained.
+
+✗ **Refuted in passing:** "fixed `noiseAmp` is harsher at high speed because
+per-element energy falls." Reported SNR at `noise 3.0` *rises* with speed —
+1.3 at 15 WPM to 3.1 at 40 WPM. Asserted as physics, contradicted by
+measurement.
+
+⊘ **Open:** the real-audio matrix is n=1 per cell and ranks its top three cores
+by roughly one character in total; the runaway-insertion mode (CER > 1.0) has a
+signature but no diagnosis; the `25 WPM × noise 2.0` pocket is unexplained.

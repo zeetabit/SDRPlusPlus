@@ -17,7 +17,13 @@ namespace cw_test {
         std::string profile;
 
         float cerMean = 0, cerP95 = 0, werMean = 0;
+        float cerStddev = 0, cerStderr = 0;
+        std::vector<float> cerSamples;   // per seed, in seed order — for comparePaired
         float insRate = 0, delRate = 0, subRate = 0;   // per reference character
+        // Wall-clock throughput under whatever thread count ran. Seeds decode
+        // concurrently, so this measures contended throughput, not single-stream
+        // speed, and is not comparable across CW_TEST_THREADS settings. Every
+        // other field is thread-count invariant.
         float realtimeX = 0;                            // audio secs / decode secs
         float ttfoMs = 0;                               // time to first output
         float wpmRmsErr = 0;                            // vs true WPM, after lock
@@ -107,27 +113,35 @@ namespace cw_test {
         float ttfoSum = 0; int ttfoN = 0;
         double wpmSq = 0; int wpmN = 0;
 
-        for (int i = 0; i < nSeeds; i++) {
-            params.seed = seedBase + (unsigned)i * 7919u;
-            auto r = runInstrumentedCore(message, params, makeCore, coreLabel);
+        struct SeedOut { DecodeScore s; ErrorMix e; RunResult r; };
+        std::vector<SeedOut> outs(nSeeds);
+        parallelFor(nSeeds, [&](int i) {
+            SignalParams p = params;                    // per-worker copy
+            p.seed = seedBase + (unsigned)i * 7919u;
+            outs[i].r = runInstrumentedCore(message, p, makeCore, coreLabel);
+            outs[i].s = score(message, outs[i].r.text);
+            outs[i].e = alignErrors(message, outs[i].r.text);
+        });
 
-            auto s = score(message, r.text);
-            cers.push_back(s.cer);
-            werSum += s.wer;
+        cers.reserve(nSeeds);
+        for (const auto& o : outs) {
+            cers.push_back(o.s.cer);
+            werSum += o.s.wer;
+            insSum += o.e.ins; delSum += o.e.del; subSum += o.e.sub; refSum += o.e.refLen;
 
-            auto e = alignErrors(message, r.text);
-            insSum += e.ins; delSum += e.del; subSum += e.sub; refSum += e.refLen;
-
-            audioSum  += r.audioSecs;
-            decodeSum += r.decodeSecs;
-            if (r.ttfoMs >= 0) { ttfoSum += r.ttfoMs; ttfoN++; }
-            if (r.wpmRmsErr >= 0) { wpmSq += (double)r.wpmRmsErr * r.wpmRmsErr; wpmN++; }
+            audioSum  += o.r.audioSecs;
+            decodeSum += o.r.decodeSecs;
+            if (o.r.ttfoMs >= 0) { ttfoSum += o.r.ttfoMs; ttfoN++; }
+            if (o.r.wpmRmsErr >= 0) { wpmSq += (double)o.r.wpmRmsErr * o.r.wpmRmsErr; wpmN++; }
         }
 
         auto st = summarize(cers, werSum);
-        c.cerMean = st.mean;
-        c.cerP95  = st.p95;
-        c.werMean = st.meanWER;
+        c.cerMean   = st.mean;
+        c.cerP95    = st.p95;
+        c.werMean   = st.meanWER;
+        c.cerStddev = st.stddev;
+        c.cerStderr = st.stderrMean;
+        c.cerSamples = cers;   // summarize() sorts its own copy; this stays in seed order
 
         if (refSum > 0) {
             c.insRate = (float)insSum / refSum;
