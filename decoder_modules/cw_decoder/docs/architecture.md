@@ -127,16 +127,26 @@ stable. Unknown names fall back to `legacy` rather than failing.
 | `legacy+edge` | release edge corrected for modelled stretch | better on 6, over-corrects at low SNR |
 | `legacy+edge+log` | edge correction + log timing | comparison baseline |
 | `legacy+edge+mf` | edge correction + preserved matched filter | comparison baseline |
-| `legacy+peak` | threshold referenced to windowed 90th percentile | **best hand-keyed result measured** (0.1579 → 0.0628); `qsb` regresses 43× |
+| `legacy+peak` | threshold referenced to windowed 90th percentile | **best handkeyed-15 measured** (0.1579 → 0.0628); handkeyed-25 0.0898; `qsb` regresses 43× |
 | `legacy+peak+edge` | percentile reference + edge correction | combination baseline |
 | `legacy+peakdual` | dual-window peak reference, 500 ms short | **best spread measured** — 7 profiles better, `qsb` and `qrn` worse |
-| `legacy+peakdual16` | dual-window, 250 ms short + persistence | best hand-keyed (0.0640); `qsb`/noise3/4 worse |
+| `legacy+peakdual16` | dual-window, 250 ms short + persistence | handkeyed-15 0.0640 (2nd best; `+peak` is 0.0628); `qsb`/noise3/4 worse |
+| `legacy+peakgate` | instant attack, gated on confirmed key-down | 1 better / 8 worse. Refuted its own premise: ON stretch identical to `legacy`, misses 45× on noise2.0 (§13.8) |
 | `legacy+bpf40` | 40/50 BPF, 64 Hz ENBW | breaks clean-25 WPM |
 | `legacy+bpf30` | 30/40 BPF, 48 Hz ENBW | best on noise3.0; worse on hand-keyed |
 | `legacy+bpf20` | 20/30 BPF, 31 Hz ENBW | |
 
 **Promotion rule:** a variant becomes the default only when it is no worse on
-*every* profile. "Better on average" is not sufficient — a profile that decoded
+*every* profile.
+
+> ⚠ **The rule is known-broken in three ways, all unresolved.** It has no notion
+> of *operating regime* (`+kalman2` is blocked by `noise4.0` 0.9032 vs 0.9888 —
+> both total failure), no notion of *significance* (`+peakdual` is blocked partly
+> by a difference of ~1 character across 24 seeds), and it is CER-based while CER
+> weights insertions and deletions equally — by the skimmer criterion, where a
+> false spot costs more than a missed one, `legacy+mf` is an improvement.
+> Details: investigation §7, §13.6, §12.4. This is why 20 variants have produced
+> zero promotions. "Better on average" is not sufficient — a profile that decoded
 better before and worse after is a regression. Variants that lose are kept, not
 deleted: they are the comparison baseline for future cores.
 
@@ -200,9 +210,10 @@ Channel.process(count, complex_t* iq)
 │           │ float[envCount] @ 1000 Hz (smooth envelope)                      │
 │           ▼                                                                  │
 │  Output: envBuf[envCount], where envCount = count / 8                        │
-│  Group delay: 18.5 ms (BPF) + smoothing + matched filter ≈ 37 ms+            │
-│  ⚠ EXCEEDS one dit at 30 WPM (40 ms). Previously documented as "~44ms        │
-│    total (< 40ms dit at 30 WPM)", which is self-contradictory.               │
+│  Group delay: MEASURED end-to-end 57–85 ms (investigation §12), not the      │
+│    ~37 ms the component figures suggest. EXCEEDS one dit at 25 WPM (48 ms).  │
+│    Previously documented as "~44ms total (< 40ms dit at 30 WPM)" — both      │
+│    self-contradictory and about half the true value.                         │
 └──────────────────────────────────────────────────────────────────────────────┘
     │
     │ float[envCount] @ 1000 Hz
@@ -241,6 +252,10 @@ Channel.process(count, complex_t* iq)
 │  ┌─ Peak Tracker ───────────────────────────────────────────────────────┐    │
 │  │  Instant attack (v > peak → peak = v)                                │    │
 │  │  Exponential decay: peak -= alpha * (peak - v), tau = 0.5s           │    │
+│  │  Drives impulse blanker + getSNR. The THRESHOLD reference is          │    │
+│  │  selectable (PeakTracker): instant / percentile / slow-attack /      │    │
+│  │  dual-window. Instant attack chases the rising edge — measured        │    │
+│  │  +9.8% ON stretch. See known defects and investigation §13.          │    │
 │  └──────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─ Dynamic Range Gate ─────────────────────────────────────────────────┐    │
@@ -248,6 +263,7 @@ Channel.process(count, complex_t* iq)
 │  │  If < 1.8 → skip detection (signal ≈ noise, no CW present)          │    │
 │  └──────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
+│  (EdgeBias selects raw / symmetric-thresholds / event-time correction)        │
 │  ┌─ SNR-Adaptive Schmitt Trigger ───────────────────────────────────────┐    │
 │  │  range = signalPeak - noiseFloor                                     │    │
 │  │  High SNR (>10 dB):   onThresh = noise + 0.55 * range               │    │
@@ -312,7 +328,7 @@ Channel.process(count, complex_t* iq)
 │  │                                                                      │    │
 │  │  1. Get lockedDit from main timing (e.g. 80ms for 15 WPM)           │    │
 │  │                                                                      │    │
-│  │  2. Create retroTiming, seed with 5 × (dit, 3*dit) pairs            │    │
+│  │  2. Create retroTiming, seed with 8 × (dit, 3*dit) pairs            │    │
 │  │                                                                      │    │
 │  │  3. Replay preLockEvents[] through retroTiming + retroMorse:         │    │
 │  │     ┌────────────────────────────────────────────────────────┐       │    │
@@ -666,12 +682,13 @@ decoder_modules/cw_decoder/
     ├── test_matrix.cpp               core comparison sweep (on demand, tagged [.])
     ├── test_oracle.cpp               per-stage headroom ablation + instrument self-checks
     ├── test_detector_metrics.cpp     detector characterisation, diagnostics, mf-fix
-    └── test_*.cpp                    221 tests, 1614 assertions, ~17s
+    └── test_*.cpp                    221 tests, 1616 assertions, ~17s
 ```
 
 ## Running the benchmarks
 
 ```bash
+mkdir -p decoder_modules/cw_decoder/tests/build
 cd decoder_modules/cw_decoder/tests/build && cmake .. && make -j8
 
 ./cw_decoder_tests                       # full suite incl. 24-seed gates (~17s)
@@ -684,6 +701,13 @@ cd decoder_modules/cw_decoder/tests/build && cmake .. && make -j8
 ./cw_decoder_tests "[mf-fix]"        -s   # legacy vs legacy+mf
 ./cw_decoder_tests "[detector-diag]" -s   # spurious-event locations, resize test
 ./cw_decoder_tests "[edge-fix]"      -s   # edge-bias and peak-reference variants
+./cw_decoder_tests "[attack-sweep]"  -s   # peak attack constant (refuted, kept for history)
+./cw_decoder_tests "[window-sweep]"  -s   # percentile window length
+./cw_decoder_tests "[dual-window]"   -s   # dual-window switch threshold
+./cw_decoder_tests "[dual-refine]"   -s   # short-window length x persistence
+./cw_decoder_tests "[peak-gate]"     -s   # transition-gated peak (refuted, kept for history)
+./cw_decoder_tests "[guard-probe]"   -s   # dynamic-range guard: rejection during key-down
+./cw_decoder_tests "[guard-sweep]"   -s   # guard constant sweep (~2 min)
 ```
 
 The matrix and oracle sweeps are tagged `[.]` so Catch2 hides them from the
@@ -698,6 +722,46 @@ replaces a stage with a perfect one and reads off that stage's headroom. Both
 are needed: the matrix gates changes, the oracle decides where to spend effort.
 Results in `decoder-investigation-2026-07.md` §11.
 
+## Benchmark profiles
+
+Referenced constantly across all three docs and defined in
+`tests/cw_test_signals.h`. Speed is `1200 / ditMs`, so 80 / 60 / 48 ms = 15 / 20
+/ 25 WPM. All use `MSG_FULL()` (71 chars) unless noted.
+
+| profile | composition |
+|---|---|
+| `clean-N` | no degradation |
+| `mild-noise` / `moderate-noise` | noiseAmp 0.5 / 1.5 |
+| `handkeyed-N` | jitter 15%, weightBias +0.1, noiseAmp 0.3 |
+| `qsb` | fade 0.3 Hz (3.3 s period), depth 0.7, noiseAmp 0.5 |
+| `qrm` | interferer at 900 Hz, amp 0.6, noiseAmp 0.3 |
+| `qrn` | impulses rate 0.001, amp 3.0, noiseAmp 0.3 |
+| `contest-20wpm` | jitter 10%, noiseAmp 0.8, QRM 850 Hz amp 0.3, `MSG_CONTEST()` |
+| `farnsworth-R` | gaps stretched by R, elements at normal speed |
+| `worstcase` | noiseAmp 1.5 + jitter 20% + weightBias 0.15 + QSB 0.5 Hz/0.5 + QRM 850 Hz/0.4 + QRN 0.0005/2.0 |
+| `snr-noiseN` | clean 15 WPM plus noiseAmp N — the axis filter bandwidth acts on |
+
+Two timescales worth holding in mind, because several defects turn on them: a
+keying edge is ~32 ms (set by the matched filter at `0.4 × dit`), and the `qsb`
+fade cycle is ~3300 ms.
+
+## Working practices
+
+Learned the hard way; each one has an incident behind it.
+
+| practice | why |
+|---|---|
+| Test after **each** change, never batch | Attribution is impossible once two changes are in flight. |
+| Run each suite **once** per iteration, save the output, post-process the file | Re-running to extract a different field doubles the wait for no information. |
+| **Thresholds are ratchets** — lower when earned, never raise to admit a change | Raising one converts a regression into a "pass". |
+| A profile that decoded better before and worse after is a **regression, not a trade** | The one exception that proves it: `worstcase` was called a "physical limit" for exactly this reason, then improved 8×. |
+| Keep losing variants in the registry | They are the comparison baseline for future cores, and re-deriving them costs more than the entry. |
+| `legacy` must stay **byte-identical**; verify with the characterization table before/after | A "pure refactor" that changes behaviour is the hardest bug class to find later. |
+| Mark unmeasured claims (⊘ / ⚠ / ✗ / 📎) | Of 17 predictions made from code reading, 8 were wrong. Unmarked plausible claims have roughly even odds. |
+| Close the loop back to **CER** before treating a stage metric as a target | Cutting detector false events 17× moved CER by nothing; the ON-stretch metric misled twice. |
+| Before "fixing" an apparent bug, check what currently **absorbs its error** | Four separate mechanisms in this codebase are load-bearing defects. |
+| Subagents must **never** run `git checkout` / `stash` / `restore` | The working tree carries uncommitted work; one such call destroyed an unrelated edit. Back up with `cp`, restore with `cp`. |
+
 **Measurement discipline.** Every degradation profile is scored over 24
 independent seeds and asserted on the **mean**. Single-seed CER is quantized to
 1/refChars and carries no variance estimate, so it cannot distinguish a real
@@ -709,9 +773,10 @@ ratchets: lower them when a change earns it, never raise them to admit one.
 
 > ⊘ **EVIDENCE NEEDED — the Rationale column is design intent, not
 > measurement.** Only the filter geometry (measured in
-> `decoder-investigation-2026-07.md` §4.1), the benchmark seed count, and the
-> learn/Huber thresholds (§8–9) have been measured. Every other threshold here
-> was chosen by reasoning and has never been swept. Several are known to be
+> `decoder-investigation-2026-07.md` §4.1), the benchmark seed count, the
+> learn/Huber thresholds (§8–9), and the dynamic-range guard (§13.10) have been
+> measured. Every other threshold here was chosen by reasoning and has never
+> been swept. Several are known to be
 > load-bearing in ways their rationale does not describe — see the defects
 > table below.
 
@@ -727,6 +792,7 @@ ratchets: lower them when a change earns it, never raise them to admit one.
 | Smoothing cutoff | 80 Hz / 100 Hz | `dsp.h` | narrowing measured to *hurt* — do not tune |
 | Noise subsample | every 8th | `tone_detector.h` | 250-element buffer, ~2s window |
 | Convergence | ≥ 10 subsamples | `tone_detector.h` | ~80 samples at 1 kHz |
+| Dynamic-range guard | 1.8 | `tone_detector.h` | Below this the sample is skipped and detection is off. **Swept and confirmed optimal** (§13.10): no value in 1.0–3.0 dominates it, and disabling it makes high-noise CER worse. |
 | Soft squelch | 3-10 dB ramp | `channel.h` | Linear confidence scaling |
 | Debounce | 5-25ms | `tone_detector.h` | 8% of dit estimate |
 | Kalman seed | 3 elements | `timing.h` | Bootstrap initial estimate |
@@ -748,6 +814,12 @@ ratchets: lower them when a change earns it, never raise them to admit one.
 | Learn threshold | conf ≥ 0.60 | `timing.h` | kalman2/log: skip state update below this |
 | Huber k | 2.0 σ | `timing.h` | logrobust only: downweight outlier state updates |
 | Benchmark seeds | 24 | `cw_bench_stats.h` | Mean CER stderr ≈ 0.01–0.05 |
+| Peak percentile | 90th | `tone_detector.h` | non-default reference; window spans many key cycles |
+| Peak window (long) | 2000 ms | `tone_detector.h` | 250 entries at 1 kHz / 8× subsample |
+| Peak window (short) | 250–500 ms | `tone_detector.h` | dual-window only; 500 ms halves estimator SE vs 250 |
+| Dual switch threshold | 0.05 relative | `tone_detector.h` | disagreement above this = level is moving |
+| Dual persistence | 1–16 subsamples | `tone_detector.h` | consecutive disagreements required; filters estimator noise |
+| Edge width factor | 0.4 × dit | `tone_detector.h` | `EDGE_COMPENSATE` only; must track `computeFilterWindow()` |
 
 ### Known defects deliberately left in place
 
@@ -762,8 +834,9 @@ look like bugs and are load-bearing — do not "fix" them without re-measuring.
 | `morse_tree.h` | Unmapped tree nodes emit `'\0'`, silently dropping the character | Real defect, not yet addressed — deletions cost the same as substitutions in CER but give the operator no cue. ⊘ magnitude never measured. |
 | `timing.h` adaptive gap centres | Farnsworth char/word split fails at ratio 2.0 | Measured, not yet fixed: oracle ablation puts the entire `farnsworth-2.0` error here (0.0141 → 0.0000 with ideal gap boundaries, detector irrelevant). Isolated and cheap. |
 | `staged_core.h` matched filter | Ring buffer zeroed on window resize — dropout mid-element, 14 spurious transitions on a *noiseless* 25 WPM signal | Fixing it (`legacy+mf`) cuts spurious events 17× and CER does not follow: `qsb`, `worstcase` and `noise2.0` all regress. The artifacts fall below `minElementMs()` and are already discarded. |
-| `tone_detector.h` | Every ON is stretched by ~9.8% of a dit, distorting the observed dah:dit ratio to 2.82 | Confirmed on a noiseless signal. **Cause is instant-attack peak tracking (57%), not the threshold ratio gap (11%)** — an earlier attribution to the ratio gap was refuted by `legacy+sym`. Correcting it is worth 0.095 CER on hand-keyed; no variant yet avoids regressing `qsb`. |
-| `tone_detector.h` | `signalPeak` instant attack: the threshold reference chases the rising edge but holds on the falling one | The asymmetry above. `PEAK_PERCENTILE` removes it and reaches the oracle-detector bound on hand-keyed, but a ~2 s window cannot follow QSB. Fix is an attack constant between the two extremes. |
+| `tone_detector.h` | Every ON is stretched by ~9.8% of a dit, distorting the observed dah:dit ratio to 2.82 | Confirmed on a noiseless signal. **Cause is unknown.** Two attributions have been refuted: the threshold ratio gap (by `legacy+sym`, 11%) and instant-attack peak tracking (by `legacy+peakgate`, §13.8 — removing key-up attack entirely reproduces the stretch to 4 s.f.). `PEAK_PERCENTILE` does cut it 57%, but the mechanism for that is now ⊘ unexplained. Correcting it is worth 0.095 CER on hand-keyed; no variant yet avoids regressing `qsb`. |
+| `tone_detector.h` | `dynamicRange < 1.8` skips the sample, so while it holds detection is **off**, not merely biased | **Not a defect — swept and confirmed (§13.10).** Disabling it takes blindness to 0% and makes noise4.0 CER *worse* (0.9032 → 0.9173): it reports the SNR limit rather than causing it, and 1.8 is Pareto-optimal. Separately load-bearing (§13.9): legacy's key-up instant attack keeps `peakRef` above it, so 100% of legacy's rejections on noise2.0 land in key-up where they cost nothing. Remove that prop and detection goes blind for 40–65% of key-down time. |
+| `tone_detector.h` | `signalPeak` instant attack: the threshold reference chases the rising edge but holds on the falling one | The asymmetry above. `PEAK_PERCENTILE` removes it and reaches the oracle-detector bound on hand-keyed, but a ~2 s window cannot follow QSB. **Four replacement estimators measured (§13); none promotable** — within-element stability and fade tracking are in direct opposition for windowed estimators. Instant attack's fade tracking (`qsb` 0.0117) is still the best measured. A fifth, gating the update on key state rather than replacing the estimator, was also refuted: it reproduced legacy's ON stretch exactly, so the asymmetry above is **not** the cause of the stretch and its mechanism is now unexplained (§13.8). |
 
 ## Build
 

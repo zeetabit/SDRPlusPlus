@@ -60,6 +60,7 @@ namespace cw {
             det.setPeakWindowMs(_windowMs);
             det.setPeakDualThreshold(_dualThresh);
             det.setPeakDualPersist(_dualPersist);
+            det.setGuardThreshold(_guard);
         }
         void reset() override { det.reset(); }
         std::vector<KeyEvent> process(const float* env, int count) override {
@@ -78,6 +79,17 @@ namespace cw {
             return "schmitt";
         }
 
+        // Guard instrumentation, forwarded for the §13.9 probe. Held here rather
+        // than on IDetector: no other detector has a dynamic-range guard, so
+        // widening the interface would describe this implementation, not the role.
+        void setGuardTrace(bool on) { det.setGuardTrace(on); }
+        // Stored rather than forwarded: init() runs after construction and would
+        // otherwise overwrite it with the default.
+        void setGuardThreshold(float t) { _guard = t; det.setGuardThreshold(t); }
+        long long guardEvaluated() const { return det.getGuardEvaluated(); }
+        long long guardRejected() const { return det.getGuardRejected(); }
+        const std::vector<std::pair<long long, int>>& guardRuns() const { return det.getGuardRuns(); }
+
     private:
         ToneDetector det;
         EdgeBias _bias;
@@ -86,6 +98,7 @@ namespace cw {
         float _windowMs;
         float _dualThresh;
         int _dualPersist;
+        float _guard = 1.8f;
     };
 
     // ── Stage 3: timing ─────────────────────────────────────────

@@ -3,6 +3,7 @@
 #include <gui/interfaces/iwaterfall_state.h>
 #include <gui/interfaces/iconfig_store.h>
 #include <gui/view_state.h>
+#include <gui/gui_math.h>
 
 namespace {
 

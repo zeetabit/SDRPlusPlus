@@ -19,8 +19,8 @@ at 24 seeds and reproducible with the commands in §11.
 | ✗ REFUTED | measured and found wrong; text kept for history |
 | 📎 SECOND-HAND | sourced from another project or paper, not verified first-hand |
 
-The scorecard in §10 is the reason this matters: of eight predictions made from
-code reading alone, four were wrong. **An unmarked plausible claim in this
+The scorecard in §10 is the reason this matters: of **17** predictions made from
+code reading alone, **8** were wrong. **An unmarked plausible claim in this
 codebase has roughly even odds.**
 
 ---
@@ -45,9 +45,11 @@ codebase has roughly even odds.**
 - **"Noise+QSB is a physical limit" is refuted.** `worstcase` 0.6244 → 0.0792
   under oracle ablation; three independent lines agree (§11).
 - **The detector stretches every ON by 9.8% of a dit**, so timing is fed a
-  dah:dit ratio of 2.82 instead of 3.0. The cause is instant-attack peak
-  tracking (57%), **not** the Schmitt threshold gap (11%) — an earlier
-  attribution to the threshold gap was measured and refuted (§12.1, §12.6).
+  dah:dit ratio of 2.82 instead of 3.0. **The cause is unknown.** Two
+  candidate mechanisms have been measured and refuted: the Schmitt threshold
+  gap (§12.1, accounts for 11%) and instant-attack peak tracking (§13.8 —
+  removing key-up attack entirely reproduces the stretch to 4 s.f.).
+  `PEAK_PERCENTILE` does cut it 57%, but why is now ⊘ unexplained (§12.6).
 - **Best single change measured:** `legacy+peak` takes handkeyed-15 from 0.1579
   to 0.0628 — equal to the oracle detector's own score on that profile.
 
@@ -62,9 +64,61 @@ codebase has roughly even odds.**
   it (§15). It has no multipath, and its AWGN makes the envelope exactly Rician
   — the model a likelihood-ratio detector assumes, so that work would be tested
   against its own premise.
-- **18 registry variants, zero promotions.** Every candidate so far trades. The
-  promotion rule has no notion of operating regime: `+kalman2` is blocked by
-  `noise4.0` 0.9032 vs 0.9888, both total failure.
+- **20 registry variants, zero promotions.** Every candidate so far trades, and
+  the promotion rule has two known gaps, both unresolved:
+  - *no notion of operating regime* — `+kalman2` is blocked by `noise4.0`
+    0.9032 vs 0.9888, both total failure (§7);
+  - *no notion of significance* — `+peakdual` is blocked partly by `qrn`
+    0.0029 → 0.0035, about one character across 24 seeds (§13.6).
+
+### Next action
+
+**Phase 17 is done and refuted (§13.8).** The transition-gated peak reproduced
+legacy's ON stretch exactly, proving the edge chase it was designed to remove
+does not occur in steady-state keying, and cost 8 profiles to misses. Two
+consequences for what comes next:
+
+1. **The peak-tracking line is closed pending a mechanism.** Five estimators
+   have now been tried (percentile, slow-attack, dual-window ×2, gated) and none
+   promoted. §12.6's measurement stands — `+peak` does cut the stretch 57% — but
+   its mechanism is refuted, so there is no model left to design against.
+   Anything further here is guessing. ⊘ EVIDENCE NEEDED: why the percentile
+   reference moves the stretch.
+
+2. **Phase 18 confirmed the mechanism and found a question about `legacy`
+   itself (§13.9).** The gate's misses are the `dynamicRange < 1.8` guard
+   switching detection off inside elements — blindness tracks the miss rates
+   profile by profile, negatives included. Instant attack during key-up is
+   load-bearing: it holds `peakRef` above the guard.
+
+3. **Phase 19 closed that question: the guard is honest (§13.10).** Disabling it
+   outright (g=1.0) takes blindness to 0.00% everywhere and does *not* recover
+   CER — snr-noise4.0 worsens 0.9032 → 0.9173 with 55.4 pp of blindness removed.
+   Legacy's high-noise failure is upstream of the guard, and 1.8 is
+   Pareto-optimal: no swept value dominates it. **The detector line has no
+   open defect left in it.**
+
+**Candidates, in the order the evidence supports:**
+
+- **(a) Farnsworth gap centres** — still the only measured win with no identified
+  cost (0.0141 → 0.0000), still untouched. Isolated, and the promotion rule's
+  known gaps are unlikely to block it. The right choice if the goal is to finally
+  promote something; the win is small (0.0141) against the 0.095 the detector
+  line holds on hand-keyed.
+- **(b) Real recordings** — the standing prerequisite for the LLR detector, and
+  the only way to test generator fidelity (§15), which conditions every number in
+  this document.
+
+(a) before (b) only because (b) is a data-collection project rather than an
+experiment. This ordering is a judgement about cost, not a measurement.
+
+**A note on where this leaves the work.** Phases 15–19 closed the detector line
+without promoting anything: every candidate defect in it is now either measured
+and load-bearing, or measured and absent. That is a real result — the remaining
+hand-keyed headroom is known not to be reachable by any of the five peak
+estimators or by the guard — but it means the next genuine step is (b), which
+is data collection rather than another experiment against a generator whose
+fidelity is itself unvalidated.
 
 ---
 
@@ -591,6 +645,12 @@ diagnosis in §3.1 is wrong. Low risk, high diagnostic value; do it first
 precisely because it is falsifiable.
 
 ### Stage 2 — Narrow the pre-detection BPF to 30/40 (§4)
+⚠ **SUPERSEDED — do not act on this as written.** The "no regression" below came
+from a single-axis AWGN sweep. The core × profile matrix later showed `+bpf40`
+breaks clean 25 WPM decoding (0.0000 → 0.1549) and `+bpf30` is worse on
+hand-keyed (§10). Narrowing the BPF is still worth real gain, but not at these
+settings and not without retuning `sqFactor` (§4.5).
+
 **Measured +2.8 dB** threshold gain, no regression on hand-keyed/jitter/QRM,
 group delay 47 ms (0.59 dit at 15 WPM). Leave the smoothing LPF at 80/100 — §4.4
 shows narrowing it *hurts*. Requires retuning `sqFactor` in `channel.h`, which is
@@ -681,7 +741,7 @@ combination is one entry.
 
 **The table of variants and their measured status lives in `architecture.md`.**
 It is not duplicated here — this copy had already drifted to 10 rows against 18
-actual entries.
+actual entries at the time it was removed; there are now 20.
 
 **Promotion rule.** A variant becomes the default only when it is no worse on
 *every* profile. "Better on average" is not sufficient: a profile that decoded
@@ -904,7 +964,8 @@ Recorded because the pattern was consistent and is likely to repeat.
 | The detector holds the heavy-noise error (§9, by elimination) | ✅ confirmed by oracle ablation, and understated |
 | Detector and timing contribute about equally on hand-keyed | ❌ hand-keyed is almost entirely timing |
 | Schmitt asymmetry biases the dit/dah ratio (§2.3h) | ✅ the bias is real: +9.8% of a dit |
-| …and the threshold ratio gap is what causes it | ❌ accounts for 11%; instant-attack peak tracking accounts for 57% |
+| …and the threshold ratio gap is what causes it | ❌ accounts for 11% |
+| …then instant-attack peak tracking causes it (57% correlated) | ❌ refuted by `+peakgate` (§13.8); cause still unknown |
 | `clean-25` false detections are an alignment artifact | ❌ real, deterministic, and a distinct defect |
 | Removing spurious detector events improves CER | ❌ 17× fewer, CER unchanged, 3 profiles regressed |
 | Correcting the edge bias helps hand-keyed | ✅ 0.1579 → 0.0628, 67% of the headroom |
@@ -1106,7 +1167,7 @@ explains why the timing interventions failed only on the noise profiles.
   the practical optimum is not purely geometric. Switching arithmetic → geometric
   moved `qsb` `+tim` 0.0006 → 0.0082, within noise at 24 seeds; recorded, not
   acted on.
-* **Everything here is measured on the synthetic generator.** §13 lists the
+* **Everything here is measured on the synthetic generator.** §15 lists the
   fidelity gaps. An oracle result on `worstcase` says nothing about real
   multipath, because the generator has none.
 
@@ -1185,10 +1246,14 @@ existence of the bias is confirmed and is not in doubt.
 > and left ~1.75% of a dit. **Measured: 9.80% → 8.69%, i.e. 11% of the
 > predicted effect.** The agreement was a coincidence of magnitude.
 >
-> The dominant cause is instant-attack peak tracking (§12.6): removing that
-> alone takes the stretch to +4.24%, **57%** of the bias. Kept here because the
-> arithmetic is a good example of how convincing a wrong mechanism can look
-> when it lands on the right number.
+> The replacement attribution — instant-attack peak tracking, §12.6 — was
+> *also* refuted later (§13.8). Both are kept here because the arithmetic is a
+> good example of how convincing a wrong mechanism can look when it lands on
+> the right number, and because it happened twice in the same line of work.
+
+**The +9.8% figure is the clean-signal case.** It varies by profile — +6.96 on
+handkeyed-15, +2.19 on qsb, and it goes *negative* under heavy noise (−15.78 at
+noise4.0), where misses dominate instead. See the §12 results table.
 
 **The bias is a constant time offset, not a proportional one** — so a dit becomes
 `dit + 7.8 ms` (×1.098) while a dah becomes `dah + 7.8 ms` (×1.033): the
@@ -1339,7 +1404,7 @@ threshold reference changes — `signalPeak` still drives the impulse blanker an
 |---|---|---|
 | nothing (`legacy`) | +9.80 | — |
 | threshold ratio gap (`+sym`) | +8.69 | **11%** |
-| instant attack (`+peak`) | +4.24 | **57%** |
+| instant attack (`+peak`) | +4.24 | **57%** — correlation only; the mechanism was refuted by `+peakgate` (§13.8) |
 
 The remaining ~32% is unattributed — keying ramp, debounce and matched-filter
 shaping are the candidates. ⊘ Not separated.
@@ -1375,11 +1440,13 @@ headroom** by changing the detector alone.
 `profileQSB` fades at 0.3 Hz (3.3 s period), so the reference remembers the loud
 half of the cycle and the threshold sits far too high through the null.
 
-**That defines the fix.** The reference must be slow relative to a keying edge
-(~32 ms) and fast relative to fading (~3300 ms). Those are two orders of
-magnitude apart. Instant attack and a 2 s percentile are the two extremes;
-an asymmetric tracker with an attack time constant of ~200–500 ms, keeping the
-0.5 s decay, sits in the gap and has not been tried.
+**This suggested a fix — which §13.1 then refuted.** The reasoning was that the
+reference should be slow relative to a keying edge (~32 ms) and fast relative to
+fading (~3300 ms), so an asymmetric tracker with an attack constant of
+~200–500 ms should sit in the gap. ✗ **Do not try this.** An EMA with a slow
+attack is not a peak tracker with an adjustable response time — it converges to
+the *mean* envelope, and the ON stretch rises monotonically with the constant.
+The property that matters is element-independence, not timescale. See §13.1.
 
 ### Instrument self-checks
 
@@ -1546,6 +1613,192 @@ key state is unstable (during debounce/transition) and let it track instantly
 otherwise — keeping zero-lag fade following while removing edge-chasing, instead
 of trading one for the other.
 
+**✗ REFUTED — see §13.8.** Built as `legacy+peakgate`, and it refuted the
+premise of its own paragraph.
+
+### 13.8 Phase 17: transition-gated peak — refuted twice over
+
+`PEAK_GATED` enables the instant-attack update only while the key is confirmed
+down; decay runs unconditionally. Before the first confirmed key-down it
+degenerates to instant attack, the same bootstrap the impulse blanker uses.
+Run with `./cw_decoder_tests "[peak-gate]" -s` (24 seeds).
+
+| profile | ON stretch legacy / +peak / +gate | CER legacy / +peak / +gate | false/miss legacy → +gate |
+|---|---|---|---|
+| clean-15wpm | 9.80 / 4.24 / **9.80** | 0.0000 / 0.0000 / 0.0000 | 0.000/0.000 → 0.000/0.000 |
+| clean-25wpm | 7.94 / 3.94 / **7.94** | 0.0000 / 0.0000 / 0.0000 | 0.088/0.006 → 0.088/0.006 |
+| handkeyed-15wpm | 6.96 / 1.21 / **6.96** | 0.1579 / 0.0628 / 0.1631 | 0.027/0.006 → 0.027/0.011 |
+| handkeyed-25wpm | 4.27 / 0.73 / 4.25 | 0.1309 / 0.0898 / 0.1268 | 0.149/0.008 → 0.146/0.015 |
+| qsb | 2.19 / −0.45 / 2.16 | 0.0117 / 0.5065 / 0.0252 | 0.016/0.010 → 0.017/0.025 |
+| qrm | 7.56 / 1.89 / 7.53 | 0.0100 / 0.0070 / 0.0223 | 0.012/0.004 → 0.012/0.016 |
+| qrn | 7.50 / 1.85 / 7.50 | 0.0029 / 0.0029 / 0.0029 | 0.009/0.004 → 0.009/0.004 |
+| worstcase | −2.42 / −7.65 / −5.73 | 0.6244 / 0.6749 / **0.8991** | 0.101/0.116 → 0.086/**1.023** |
+| snr-noise1.0 | 3.97 / −1.31 / 3.95 | 0.0000 / 0.0000 / 0.0047 | 0.008/0.004 → 0.008/0.008 |
+| snr-noise2.0 | −2.00 / −7.07 / −3.75 | 0.0827 / 0.0276 / **0.8967** | 0.037/0.019 → 0.050/**0.856** |
+| snr-noise3.0 | −8.79 / −9.27 / −12.04 | 0.8163 / 0.7682 / 0.9642 | 0.411/0.323 → 0.334/**1.401** |
+| snr-noise4.0 | −15.78 / −8.96 / −15.44 | 0.9032 / 0.9278 / 0.9742 | 0.429/1.384 → 0.359/1.681 |
+
+**1 better, 8 worse.** No promotion. Kept in the registry as `legacy+peakgate`.
+
+**Refutation 1 — the edge chase does not exist in steady-state keying.**
+`+gate` reproduces legacy's ON stretch *exactly* on the three cleanest profiles
+(9.80, 7.94, 6.96) and to within 0.03 pp on the rest. An intervention that
+removes attack during key-up entirely moves the stretch by nothing, so key-up
+attack is not what produces it. The arithmetic agrees: `decayAlpha` is
+0.002/sample, so across an 80 ms element gap at 1 kHz internal rate the peak
+retains 0.998^80 ≈ 85% of the previous element's amplitude, and the ON threshold
+at ≈0.47·A is crossed long before `v` exceeds that held level. Instant attack
+and a held reference are the same estimator once keying is underway; the chase
+only exists on the very first element.
+
+This does not overturn §12.6's *measurement* (`+peak` does cut the stretch 57%)
+— it overturns the mechanism §12.6 assigned to it. Why the percentile reference
+moves the stretch is now **unexplained**. ⊘ EVIDENCE NEEDED.
+
+**Refutation 2 — the damage is misses, and the predicted sign was wrong.**
+Before measuring, the write-up predicted the gate would *raise* false events
+under noise by removing a threshold-raising effect. False events went **down**
+on every degraded profile (noise3.0 0.411 → 0.334, noise4.0 0.429 → 0.359,
+worstcase 0.101 → 0.086) while CER collapsed. The whole effect is misses:
+snr-noise2.0 0.019 → 0.856, a 45× increase.
+
+⊘ **EVIDENCE NEEDED — mechanism.** Consistent with the miss signature and with
+`tone_detector.h`'s `dynamicRange < 1.8` guard, which skips the sample and
+disables detection outright: under noise, legacy's key-up instant attack is
+ratcheted upward by noise spikes, holding `peakRef` above that cutoff and
+keeping the detector armed. Gating removes the ratchet, `gatedPeak` decays
+toward the noise floor during key-up, and elements stop being detected. Not
+measured — the direct test is to log the fraction of samples rejected by the
+1.8 guard per variant.
+
+If that holds it is a **fifth load-bearing mechanism** (§10), and the one with
+the largest blast radius: legacy's noise robustness would partly depend on noise
+spikes inflating its own signal-peak estimate. That is worth knowing about
+`legacy` independently of anything to do with peak tracking.
+
+**Scorecard.** Predictions from code reading: 19 made, 10 wrong. Both of this
+phase's were wrong, and the second was wrong in sign after the first had already
+failed.
+
+### 13.9 Phase 18: the dynamic-range guard probe — §13.8 confirmed
+
+`tone_detector.h` counts every evaluation of `dynamicRange < 1.8` and, under an
+opt-in trace, records rejection runs. The probe intersects those runs with the
+true key-down intervals, shifted by the measured group delay so chain latency is
+not counted as blindness. Run with `./cw_decoder_tests "[guard-probe]" -s`
+(8 seeds).
+
+| profile | guard reject (% samples) legacy / +gate | blind during key-ON (%) legacy / +gate |
+|---|---|---|
+| clean-15wpm | 0.00 / 0.00 | 0.00 / 0.00 |
+| clean-25wpm | 0.00 / 0.00 | 0.00 / 0.00 |
+| handkeyed-15wpm | 0.03 / 0.03 | 0.00 / 0.00 |
+| handkeyed-25wpm | 0.05 / 0.05 | 0.00 / 0.00 |
+| qsb | 0.04 / 0.93 | 0.00 / 0.86 |
+| qrm | 0.05 / 0.05 | 0.00 / 0.00 |
+| qrn | 0.03 / 0.03 | 0.00 / 0.00 |
+| worstcase | 5.46 / 46.01 | 0.84 / **45.26** |
+| snr-noise1.0 | 0.03 / 0.03 | 0.00 / 0.00 |
+| snr-noise2.0 | 1.64 / 40.17 | 0.00 / **40.65** |
+| snr-noise3.0 | 22.29 / 66.44 | 7.56 / **64.76** |
+| snr-noise4.0 | 68.45 / 80.77 | 55.36 / 77.79 |
+
+**✓ CONFIRMED — §13.8's mechanism.** Blindness tracks §13.8's miss rates
+profile by profile, including the negatives: the four profiles where the gate
+cost nothing (clean ×2, qrm, qrn) are exactly the four where blindness stays at
+0.00%. snr-noise2.0 moves 0.00% → 40.65% blind, 0.019 → 0.856 misses,
+0.0827 → 0.8967 CER.
+
+The discriminating detail is that *rejecting* and *rejecting where it matters*
+separate. On snr-noise2.0 legacy rejects 1.64% of samples yet is blind during
+key-ON 0.00% of the time — every legacy rejection falls in key-up, where the
+guard costs nothing. Gating attack to key-down moves those rejections inside
+elements. Instant attack during key-up is therefore **load-bearing** (§10, fifth
+instance): it holds `peakRef` above the guard so the detector stays armed.
+
+**⊘ EVIDENCE NEEDED — a separate finding about `legacy`.** Legacy is itself
+blind for **55.36%** of key-down time on snr-noise4.0 and **7.56%** on
+snr-noise3.0, the two profiles where it fails outright (CER 0.9032, 0.8163).
+Whether the guard *causes* that failure or merely reports it is untested, and
+the two are genuinely hard to tell apart: at 4.0 noise amplitude the dynamic
+range may honestly be below 1.8, in which case the guard is doing its job and
+the failure is upstream.
+
+The direct test is a one-parameter sweep of the 1.8 constant. If CER at
+noise3.0/4.0 improves as the constant falls, the guard is over-triggering and
+this is a defect in the shipping default; if CER is flat or worsens while
+blindness drops, the guard is honest and the failure is a real SNR limit. Either
+outcome is worth having — it is the first candidate in this investigation that
+concerns `legacy` rather than a variant. Recorded as Phase 19.
+
+### 13.10 Phase 19: the guard constant swept — the guard is honest
+
+`setGuardThreshold()` makes the constant settable; `legacy` keeps 1.8.
+Run with `./cw_decoder_tests "[guard-sweep]" -s` (CER 24 seeds, blindness 8).
+
+Two properties the sweep depends on are **asserted, not assumed** (180 checks):
+
+- **g=1.0 disables the guard.** Measured: 0.00% of samples rejected on all 12
+  profiles. The reasoning was `peakRef >= noiseFloor` by construction, but that
+  is an inference about the code, and inferences of that kind have a 10-of-19
+  failure rate in this investigation, so the test asserts it.
+- **g=1.8 is a no-op.** The default column reproduces the registry `legacy` CER
+  exactly on all 12 profiles. Without this the sweep could be measuring the
+  `setGuardThreshold` plumbing rather than the constant.
+
+| profile | g=1.0 | g=1.3 | g=1.6 | **g=1.8** | g=2.2 | g=3.0 |
+|---|---|---|---|---|---|---|
+| clean-15wpm | 0.0000 | 0.0000 | 0.0000 | **0.0000** | 0.0000 | 0.0000 |
+| clean-25wpm | 0.0000 | 0.0000 | 0.0000 | **0.0000** | 0.0000 | 0.0000 |
+| handkeyed-15wpm | 0.1573 | 0.1573 | 0.1573 | **0.1579** | 0.1579 | 0.1714 |
+| handkeyed-25wpm | 0.1315 | 0.1315 | 0.1320 | **0.1309** | 0.1238 | 0.1221 |
+| qsb | 0.0117 | 0.0117 | 0.0117 | **0.0117** | 0.0217 | 0.2388 |
+| qrm | 0.0094 | 0.0094 | 0.0100 | **0.0100** | 0.0106 | 0.0012 |
+| qrn | 0.0029 | 0.0029 | 0.0029 | **0.0029** | 0.0000 | 0.0000 |
+| worstcase | 0.6526 | 0.6526 | 0.6391 | **0.6244** | 0.6455 | 0.7653 |
+| snr-noise1.0 | 0.0000 | 0.0000 | 0.0000 | **0.0000** | 0.0000 | 0.0000 |
+| snr-noise2.0 | 0.1966 | 0.1966 | 0.1954 | **0.0827** | 0.0604 | 0.8568 |
+| snr-noise3.0 | 0.7887 | 0.7893 | 0.7870 | **0.8163** | 0.9061 | 0.9818 |
+| snr-noise4.0 | 0.9173 | 0.9167 | 0.9067 | **0.9032** | 0.9249 | 0.9953 |
+| **vs g=1.8 (better/worse)** | 3/4 | 3/4 | 2/4 | — | 3/5 | 3/6 |
+
+Blind during key-ON (%), same sweep:
+
+| profile | g=1.0 | g=1.3 | g=1.6 | **g=1.8** | g=2.2 | g=3.0 |
+|---|---|---|---|---|---|---|
+| worstcase | 0.00 | 0.00 | 0.09 | **0.84** | 9.24 | 57.56 |
+| snr-noise2.0 | 0.00 | 0.00 | 0.00 | **0.00** | 0.35 | 69.79 |
+| snr-noise3.0 | 0.00 | 0.00 | 1.19 | **7.56** | 60.93 | 97.10 |
+| snr-noise4.0 | 0.00 | 0.16 | 19.19 | **55.36** | 86.41 | 99.63 |
+
+(All other profiles are 0.00 at every value except `qsb`/`handkeyed-15` at
+g=3.0.)
+
+**✓ The guard is honest — §13.9's open question is closed.** The discriminator
+was: does CER improve as blindness falls? It does not. At g=1.0 blindness is
+**0.00% everywhere** and snr-noise4.0 gets *worse* — 0.9032 → 0.9173 with 55.4
+percentage points of blindness removed — while snr-noise2.0 more than doubles,
+0.0827 → 0.1966. Legacy's high-noise failure is therefore **upstream** of the
+guard. The guard reports the SNR limit; it does not create it, and it is not a
+defect in the shipping default.
+
+**The 1.8 default is Pareto-optimal in this sweep.** No value dominates it:
+every alternative buys 2–3 profiles and loses 4–6. It is the first constant in
+this codebase to be swept and found already correct — worth stating explicitly,
+because the Constants table's standing caveat is that almost none of them have
+been.
+
+**Third instance of stage metric ≠ objective (§10), and the strongest.** 55 pp
+of a stage metric eliminated; the objective moved 0.014 the wrong way. The two
+earlier instances were `+mf` (17× fewer spurious events, CER unchanged) and ON
+stretch (moved the right way twice without CER following).
+
+⊘ **EVIDENCE NEEDED — why suppression helps.** The plausible reading is that in
+a regime where detection yields garbage, emitting nothing beats emitting wrong
+events, i.e. the guard trades insertions for deletions at a favourable rate.
+Untested: this sweep records CER only. The direct test is to re-run it printing
+`insRate`/`delRate` per cell, as `[mf-fix]` already does.
+
 ## 14. Next: the detector (planning)
 
 ### Status
@@ -1560,8 +1813,8 @@ of trading one for the other.
 | Edge bias — threshold-reference route | measured, `legacy+peak`, best result so far, breaks `qsb` (§12.6) |
 | Threshold reference — attack constant | refuted (§13.1) |
 | Threshold reference — window length | mechanism confirmed, no promotion (§13.2–13.4) |
-| **Freeze peak update during transitions** | **next, untried (§13.7)** |
-| Likelihood-ratio detector | blocked on §14 (generator fidelity) |
+| **Freeze peak update during transitions** | **refuted — 1 better / 8 worse (§13.8)** |
+| Likelihood-ratio detector | blocked on §15 (generator fidelity) |
 
 ### Threshold reference — done, no promotion (§13)
 
@@ -1612,7 +1865,7 @@ survives.
 | Hard binary decision destroys soft information before timing | open — the LLR case |
 | Thresholds are fixed fractions of `signalPeak − noiseFloor`; the optimal point in Rayleigh/Rice noise is not | open — the LLR case |
 | On/off ratio asymmetry stretches ON | measured: real but only 11% of the bias (§12.5) |
-| `signalPeak` instant attack | measured: **57% of the bias** (§12.6); also raises thresholds for ~0.5 s after an impulse ⊘ |
+| `signalPeak` instant attack | `+peak` removes **57% of the bias** (§12.6), but instant attack is not the cause — `+peakgate` refuted that (§13.8). Separately **load-bearing**: it holds `peakRef` above the 1.8 guard (§13.9). |
 | Matched-filter resize dropout | measured; fixing it does not reach CER (§12.3) |
 | Mills 1977: amplitude likelihoods "worthless and even a source of error" under multipath | 📎 second-hand, and **untestable here** — the generator has no multipath (§15) |
 
@@ -1622,7 +1875,6 @@ number the change was designed to move.
 
 ## 15. Open items
 
-- Whether fixing the Kalman defects changes the QSB verdict.
 - Whether `worstCase` 0.581 → 0.364 under a narrower BPF survives 24-seed
   measurement (that figure is 16-seed).
 - `ag1le/morse-wip` builds and runs — worth benchmarking against this decoder on

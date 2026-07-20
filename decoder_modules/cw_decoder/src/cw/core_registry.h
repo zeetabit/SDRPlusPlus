@@ -119,6 +119,14 @@ namespace cw {
             {"legacy+peakdual16", "Dual-window peak reference, 250 ms short + 16-sample persistence",
              []{ return detail::makeDualPeak(250.0f, 0.05f, 16); }},
 
+            // ── Transition-gated peak (docs §13.7). Instant attack's fade
+            //    tracking is the best figure in the Phase 16 sweep; its only
+            //    defect is that the rising edge sets the reference it is then
+            //    compared against. Gating attack on confirmed key-down removes
+            //    the chase without replacing the estimator. ──
+            {"legacy+peakgate", "Instant-attack peak, attack gated on confirmed key-down",
+             []{ return detail::makeStaged(TIMING_KALMAN, 100.0f, 100.0f, MF_RESET, EDGE_RAW, PEAK_GATED); }},
+
             // ── Front-end bandwidth variants. ENBW figures measured in
             //    docs/decoder-investigation-2026-07.md §4.1. ──
             {"legacy+bpf40",  "Legacy pipeline, 40/50 BPF (64 Hz ENBW)",

@@ -46,6 +46,7 @@ namespace cw {
         PEAK_PERCENTILE,       // 90th percentile of the same subsampled window
         PEAK_SLOW_ATTACK,      // asymmetric EMA, attack constant settable
         PEAK_DUAL_WINDOW,      // short + long percentile; disagreement = fade detector
+        PEAK_GATED,            // instant attack, gated on confirmed key-down
     };
 
     // Adaptive CW tone detector.
@@ -169,6 +170,19 @@ namespace cw {
                 if (v > slowPeak) { slowPeak += attackAlpha * (v - slowPeak); }
                 else              { slowPeak -= decayAlpha * (slowPeak - v); }
 
+                // Gated instant attack. Attack is enabled only once the key is
+                // confirmed down, so a rising edge is measured against the level
+                // the previous element left behind rather than against itself.
+                // Decay runs unconditionally, which is what preserves the fade
+                // tracking that every Phase 16 estimator gave up.
+                //
+                // Before the first confirmed key-down there is no previous
+                // element to reference, so the gate opens and this degenerates
+                // to instant attack — the same bootstrap the impulse blanker
+                // uses (estimatedDitSamples > 0).
+                if ((currentState || !gatedPeakArmed) && v > gatedPeak) { gatedPeak = v; }
+                else if (gatedPeak > v) { gatedPeak -= decayAlpha * (gatedPeak - v); }
+
                 // Wait for noise floor to converge before detecting.
                 // Subsampled percentile needs noiseWinCount >= 10 to be valid.
                 if (noiseWinCount < 10) { continue; }
@@ -187,10 +201,23 @@ namespace cw {
                     // it is moving, so the lagging estimate is the wrong one.
                     peakRef = (peakDualRun >= peakDualPersist && peakPercentile > noiseFloor)
                             ? peakPercentile : peakPercentileLong;
+                } else if (peakTracker == PEAK_GATED && gatedPeak > noiseFloor) {
+                    peakRef = gatedPeak;
                 }
 
                 float dynamicRange = peakRef / noiseFloor;
-                if (dynamicRange < 1.8f) {
+                guardEvaluated++;
+                if (dynamicRange < guardThreshold) {
+                    guardRejected++;
+                    if (guardTrace) {
+                        long long at = totalProcessed + i;
+                        if (!guardRuns.empty() &&
+                            guardRuns.back().first + guardRuns.back().second == at) {
+                            guardRuns.back().second++;
+                        } else {
+                            guardRuns.push_back({at, 1});
+                        }
+                    }
                     stableSamples = 0;
                     continue;
                 }
@@ -235,6 +262,7 @@ namespace cw {
                         }
                         events.push_back({rawState, off});
                         currentState = rawState;
+                        if (rawState) { gatedPeakArmed = true; }
                         stableSamples = 0;
                         if (rawState) {
                             if (lastTransition > 0) updateDitEstimate((float)(totalProcessed + i - lastTransition), false);
@@ -260,6 +288,17 @@ namespace cw {
 
         float getNoiseFloor() const { return noiseFloor; }
         float getSignalPeak() const { return signalPeak; }
+
+        // Guard instrumentation (docs §13.9). The dynamicRange < 1.8 test skips
+        // the sample entirely, so while it holds the detector is not merely
+        // biased — it is off. Counting is unconditional and cheap; the
+        // run-length trace is opt-in because its cost scales with rejections.
+        void setGuardTrace(bool on) { guardTrace = on; }
+        // peakRef >= noiseFloor by construction, so 1.0 disables the guard.
+        void setGuardThreshold(float t) { guardThreshold = t; }
+        long long getGuardEvaluated() const { return guardEvaluated; }
+        long long getGuardRejected() const { return guardRejected; }
+        const std::vector<std::pair<long long, int>>& getGuardRuns() const { return guardRuns; }
         bool isKeyDown() const { return currentState; }
 
         void setEdgeBias(EdgeBias b) { edgeBias = b; }
@@ -308,6 +347,7 @@ namespace cw {
             noiseFloor = std::max(level, 1e-12f);
             signalPeak = level;
             slowPeak = level;
+            gatedPeak = level;
             for (int i = 0; i < noiseWinSize; i++) noiseWin[i] = level;
             noiseWinCount = noiseWinSize;
         }
@@ -338,6 +378,11 @@ namespace cw {
             peakLongWinCount = 0;
             peakPercentileLong = 0.0f;
             peakDualRun = 0;
+            gatedPeak = 0.001f;
+            gatedPeakArmed = false;
+            guardEvaluated = 0;
+            guardRejected = 0;
+            guardRuns.clear();
         }
 
     private:
@@ -390,12 +435,21 @@ namespace cw {
         int peakDualPersist = 1;
         int peakDualRun = 0;
         float slowPeak = 0.001f;
+        float gatedPeak = 0.001f;
+        bool gatedPeakArmed = false;
         float peakAttackMs = 300.0f;
         float attackAlpha = 1.0f;
         // Effective edge width as a fraction of the dit. Must track
         // StagedCore::computeFilterWindow(), whose matched filter dominates the
         // ramp the thresholds are crossing.
         static constexpr float edgeWidthFactor = 0.4f;
+
+        // Dynamic-range guard instrumentation
+        long long guardEvaluated = 0;
+        long long guardRejected = 0;
+        float guardThreshold = 1.8f;
+        bool guardTrace = false;
+        std::vector<std::pair<long long, int>> guardRuns;
 
         // Impulse blanker state
         static constexpr float impulseThreshold = 2.5f;  // relative to signalPeak

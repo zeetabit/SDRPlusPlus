@@ -42,8 +42,12 @@
 > | Edge-bias correction | `legacy+edge` — better on 6 profiles, over-corrects at low SNR |
 > | Peak-reference fix | `legacy+peak` — hand-keyed 0.1579 → 0.0628, but `qsb` regresses 43× |
 > | Threshold reference (Phase 16) | 4 experiments; `+peakdual` 7 better / 2 worse; no promotion |
+> | Transition-gated peak (Phase 17) | `+peakgate` — 1 better / 8 worse; refuted its own premise |
+> | Guard probe (Phase 18) | confirmed Phase 17's mechanism; key-up instant attack is load-bearing |
+> | Guard sweep (Phase 19) | guard is honest, 1.8 Pareto-optimal; detector line closed |
 >
-> **Next:** a transition-gated peak tracker (Phase 17). Oracle
+> **Next:** real recordings (#30), or Farnsworth gap centres (#29) to
+> promote something. The detector line is closed — see Phase 19. Oracle
 > ablation confirms 100% of the AWGN/QSB/QRN error is at the detector, and
 > Phase 15 measured that the detector *also* holds 67% of the hand-keyed
 > headroom — an earlier reading of hand-keyed as a pure timing fault was too
@@ -55,7 +59,7 @@
 ### Implemented
 
 **Signal Processing:**
-- **Kalman filter timing** — state = dit duration + uncertainty. Gaussian likelihood ratio for dit/dah classification. Measurement noise adapts from residuals. R floor widened for faster WPM (ditEst * 0.05). Clamped to 34-150ms (8-35 WPM).
+- **Kalman filter timing** — state = dit duration + uncertainty. Gaussian likelihood ratio for dit/dah classification. Measurement noise adapts from residuals. R floor stated as "widened for faster WPM (ditEst * 0.05)" — ✗ **it does not do that**: it evaluates to 4 ms² at both 15 and 30 WPM (investigation §2.1d), and correcting it measured as an exact no-op (§8). Clamped to 34-150ms (8-35 WPM).
 - **Bayesian gap classification** — three Gaussians (element, char, word) with adaptive centers from observed gap durations. Jitter sigma estimated from element duration variance (floor 15% of dit). Priors: 5x element, 2x char, 0.5x word.
 - **Adaptive gap centers** — 2-means clustering on OFF durations replaces hardcoded 1:3:7 ratios. Supports Farnsworth spacing where char/word gaps are stretched.
 - **Multi-path beam search decoder** — 8 paths (12 under low confidence) through 127-node binary tree (depth 7). Confidence-weighted branching, English letter frequency prior.
@@ -95,6 +99,15 @@
 > | Hand-keyed 20 WPM | 0.043 | **0.156** |
 > | Hand-keyed 25 WPM | 0.043 | **0.150** |
 >
+> ⚠ **These do not match `decoder-investigation-2026-07.md` §3.1 (0.158 / 0.200 /
+> 0.131), and that is not a contradiction.** This ablation deliberately holds
+> the message fixed at `MSG_CQ()` so that *seed count alone* varies; §3.1 uses
+> `MSG_FULL()` throughout. On hand-keyed 15 WPM the two effects separate as
+> 0.0000 (1 seed) → 0.1341 (24 seeds, same message) → 0.1579 (24 seeds,
+> MSG_FULL) — i.e. seed count contributes 0.134 and message length a further
+> 0.024. Quote §3.1 for baselines; quote this table only for the seed-count
+> ablation.
+>
 > **Status: the jitter rows are superseded** — see
 > `decoder-investigation-2026-07.md` §3.1 for the 24-seed baseline. The clean,
 > mild-noise, moderate-noise and Farnsworth-1.5 rows were re-measured at 24
@@ -120,7 +133,7 @@
 | Contest (20 WPM, mixed) | **0.0** | B/6 confusion fixed |
 | Farnsworth ratio 1.5 | 0.0 | Perfect |
 | Farnsworth ratio 2.0 | 0.043 | Adaptive gap centers |
-| Worst case (all combined) | 0.57 | Improved from 0.61 by corrector (+Q→CQ) |
+| Worst case (all combined) | 0.57 | Improved from 0.61 by corrector (+Q→CQ) — ⚠ see note |
 | Worst case long message | 0.45 | More data → better timing |
 
 **Test suite: 197 tests, 527 assertions, <0.5s runtime.**
@@ -186,7 +199,17 @@ Diagnostic breakdown of worst-case profile (noiseAmp=1.5, jitter=20%, QSB 0.5Hz/
 | QRN alone | 0.0 | Perfect |
 | **Noise + QSB** | **0.61** | **The killer combination** |
 | Noise + jitter | 0.04 | Noise helps timing stability |
-| Full worst case | 0.65 | Dominated by noise+QSB |
+| Full worst case | 0.65 | Dominated by noise+QSB — ⚠ see note |
+
+> ⚠ **`worstCase` appears in this document as 0.57, 0.61 and 0.65.** All three
+> are single-seed (`seed = 42`) figures captured at different points in Phases
+> 1–10, against a decoder that changed between them; they were never one
+> measurement. They are left as recorded rather than harmonised, because
+> retro-fitting a single number would invent a consistency that never existed.
+>
+> The current figure is **0.6244** (24 seeds, MSG_FULL,
+> `decoder-investigation-2026-07.md` §3.1), with an oracle bound of **0.0792**
+> (§11) and a best measured variant of **0.4630** (§13.2).
 
 During QSB dips with noise=1.5: signal ≈ 0.5, noise ≈ 1.5 → **-9.5 dB SNR**. AG1LE's research (2013) shows fldigi achieves CER=0.01 at -10 dB with 35 Hz matched filter — but that's static SNR, not oscillating QSB. The oscillation adds re-acquisition overhead every 2 seconds.
 
@@ -313,7 +336,7 @@ Key finding: **filter bandwidth is the dominant factor** — 35 Hz vs 68 Hz = 20
 | 21 | Log-duration timing (Mills) | Very High | Medium | Medium | **Done — variant `+log`** |
 | 22 | Narrow pre-detection BPF | Low (−) | Very High | Low | **Measured — variants `+bpf*`** |
 | 23 | Huberised robust timing update | Low | None | Low | **Refuted (2026-07)** |
-| 24 | Likelihood-ratio detector | Medium | High | High | **Next** |
+| 24 | Likelihood-ratio detector | Medium | High | High | **Blocked on #30** |
 | 25 | Gap ambiguity inside the beam | High | Medium | Medium | Candidate |
 | 26 | Callsign database (SCP/Master.dta) | N/A | N/A | Low | Candidate |
 | 27 | Bell 1977 trellis core | High | Very High | Very High | Future |
@@ -326,7 +349,9 @@ Key finding: **filter bandwidth is the dominant factor** — 35 Hz vs 68 Hz = 20
 | 28g | Attack-constant sweep for the peak reference | N/A | N/A | Low | **Refuted (2026-07)** |
 | 28h | Percentile window length sweep | High | Medium | Low | **Measured (2026-07)** |
 | 28i | Dual-window peak reference | High | Medium | Low | **Measured — `+peakdual`, not promoted** |
-| 28j | Transition-gated instant-attack peak | High | Medium | Low | **Next** |
+| 28j | Transition-gated instant-attack peak | N/A | N/A | Low | **Refuted (2026-07)** |
+| 28k | Probe the `dynamicRange < 1.8` guard rejection rate | N/A | N/A | Low | **Done (2026-07) — confirmed §13.8** |
+| 28l | Sweep the 1.8 guard constant | N/A | N/A | Low | **Done (2026-07) — guard is honest, 1.8 optimal** |
 | 29 | Adaptive gap centres rewrite (Farnsworth) | N/A | Low | Low | **Candidate — measured 0.0141 → 0** |
 | 30 | Real-recording benchmark + model-mismatch profiles | N/A | N/A | Medium | **Prerequisite for #24** |
 
@@ -466,7 +491,7 @@ jitter, group delay. Full results `decoder-investigation-2026-07.md` §12.
 - **False-event rate is a poor CER proxy.** Deletions carry the cost — at
   `noise4.0` the miss rate is 1.384 per element and `del = 0.840`.
 
-### Phase 15: Detector Correction (IN PROGRESS, 2026-07)
+### Phase 15: Detector Correction (DONE, 2026-07 — no promotion)
 Full results `decoder-investigation-2026-07.md` §12.5–12.6.
 
 - **The ON-stretch mechanism was misattributed and is now measured.** The
@@ -497,22 +522,79 @@ Four experiments. Full results `decoder-investigation-2026-07.md` §13.
   monotonically as the window shortens, 0.5070 → 0.0194.
 - **But window length trades tracking against variance.** Short windows follow
   fading, long windows estimate precisely (~1/N). No single length serves both.
-- **Dual windows make it adaptive** and fix QSB (0.0088, better than legacy),
-  7 profiles better — but cannot cleanly separate a fade from estimator noise.
+- **Dual windows make it adaptive**, but no single configuration gets both:
+  - `250/1` reaches **qsb 0.0088** (better than legacy) — 6 better / 4 worse
+  - `500/1` reaches **7 better / 2 worse**, the best spread — but its qsb is
+    **0.1215**, 10× worse than legacy
+  The switch cannot cleanly separate a fade from estimator noise.
 - **No promotion.** Two trade points kept: `legacy+peakdual`, `legacy+peakdual16`.
 
-### Phase 17: Transition-Gated Peak (NEXT)
-Instant attack's only defect is chasing the rising edge; its fade tracking is the
-best measured. Freeze the peak update while the key state is unstable and let it
-track instantly otherwise — keeping zero-lag fade following while removing
-edge-chasing, instead of trading one for the other.
+### Phase 17: Transition-Gated Peak (REFUTED)
+Premise: instant attack's only defect is chasing the rising edge, so enable the
+attack update only while the key is confirmed down — keeping the fade tracking
+every Phase 16 estimator gave up. Built as `legacy+peakgate`.
+
+- **1 better / 8 worse.** No promotion.
+- **The premise was false.** `+gate` reproduces legacy's ON stretch *exactly*
+  (9.80 / 7.94 / 6.96 on the clean and hand-keyed profiles). Removing key-up
+  attack entirely moves the stretch by nothing, so key-up attack never caused
+  it: with a 0.5 s decay the reference still holds ~85% of the previous
+  element's amplitude across an 80 ms gap, well above the ≈0.47·A trigger.
+- **Damage is misses, not false events.** snr-noise2.0 misses 0.019 → 0.856
+  (45×) while false events *fell* on every degraded profile.
+- ⊘ Suspected but unmeasured: legacy's key-up instant attack is load-bearing,
+  holding `peakRef` above the `dynamicRange < 1.8` guard that otherwise disables
+  detection outright. That would be a defect in `legacy`, not in the variant.
+
+Full tables: `decoder-investigation-2026-07.md` §13.8.
+
+### Phase 18: Probe the 1.8 Dynamic-Range Guard (CONFIRMED)
+Counted guard rejections and intersected them with true key-down time, shifted
+by the measured group delay.
+
+- **Phase 17's mechanism confirmed.** Blindness during key-ON tracks the miss
+  rates profile by profile, negatives included: snr-noise2.0 0.00% → 40.65%,
+  worstcase 0.84% → 45.26%, and 0.00% on all four profiles where the gate cost
+  nothing.
+- **Rejecting ≠ rejecting where it matters.** On snr-noise2.0 legacy rejects
+  1.64% of samples but is blind during key-ON 0.00% of the time — every legacy
+  rejection lands in key-up. Instant attack during key-up is load-bearing: it
+  holds `peakRef` above the guard so the detector stays armed.
+- ⊘ **New, about `legacy`:** it is blind for 55.36% of key-down time on
+  snr-noise4.0 and 7.56% on snr-noise3.0 — the two profiles where it fails
+  outright. Cause or symptom is untested.
+
+Full tables: `decoder-investigation-2026-07.md` §13.9.
+
+### Phase 19: Sweep the 1.8 Guard Constant (GUARD IS HONEST)
+Swept 1.0–3.0. That g=1.0 disables the guard, and that g=1.8 reproduces
+registry `legacy` exactly, are both asserted in the test rather than assumed.
+
+- **Not a defect.** At g=1.0 blindness is 0.00% on every profile and CER does
+  not recover: snr-noise4.0 *worsens* 0.9032 → 0.9173 with 55.4 pp of blindness
+  removed; snr-noise2.0 more than doubles, 0.0827 → 0.1966. Legacy's high-noise
+  failure is upstream of the guard.
+- **1.8 is Pareto-optimal.** No swept value dominates it — each buys 2–3
+  profiles and loses 4–6 (1.0 → 3/4, 2.2 → 3/5, 3.0 → 3/6). First constant in
+  this codebase swept and found already correct.
+- **Third instance of stage metric ≠ objective**, and the strongest: 55 pp of a
+  stage metric eliminated, objective moved 0.014 the wrong way.
+- ⊘ Why suppression helps (silence beating garbage) is plausible but untested —
+  this sweep records CER only.
+
+Full tables: `decoder-investigation-2026-07.md` §13.10.
+
+### Phase 20: Real Recordings (NEXT)
+Phases 15–19 closed the detector line without promoting anything: every
+candidate defect in it is now either measured and load-bearing, or measured and
+absent. The remaining hand-keyed headroom is known not to be reachable by any of
+the five peak estimators or by the guard. What is left is #30 — real recordings
+and model-mismatch profiles — which is data collection rather than another
+experiment against a generator whose fidelity is itself unvalidated. Farnsworth
+gap centres (#29) remains the alternative if the goal is to promote something.
 Scoped by Phase 13 to the AWGN/QSB/QRN family. `tone_detector.h` applies a
 fixed-fraction Schmitt threshold to a magnitude envelope and emits a hard binary
 decision, discarding the soft information before timing ever sees it.
-
-Immediate step is **detector ground-truth metrics** — attribution is settled, so
-the open question is which kind of detector error dominates (false key-downs vs
-edge bias vs jitter).
 
 **Prerequisite (#30):** the generator adds complex Gaussian noise, so its
 envelope is exactly Rician — the model a likelihood-ratio detector assumes.
@@ -520,4 +602,4 @@ Benchmarked on this suite alone such a detector is being tested against its own
 generative assumptions. Real recordings and model-mismatch profiles are required
 before committing to the rewrite, not after.
 
-Planning: `decoder-investigation-2026-07.md` §12.
+Planning: `decoder-investigation-2026-07.md` §13.7 and §14.

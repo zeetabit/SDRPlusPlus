@@ -521,6 +521,282 @@ TEST_CASE("dual-window: short length and persistence", "[cw][.][dual-refine]") {
     CHECK(NC > 0);
 }
 
+// Phase 17: transition-gated peak.
+//
+// Phase 16 replaced the instant-attack estimator four different ways and every
+// one of them gave up its fade tracking (qsb 0.0117, the best figure measured)
+// to buy back the edge chase. The gate keeps the estimator and removes only the
+// chase: attack fires solely while the key is confirmed down, so a rising edge
+// is referenced to the level the previous element left rather than to itself.
+//
+// Reported against both, because §12.3 is the standing record of ON stretch
+// moving the right way while CER did not follow. +peak is the Phase 16 column
+// to beat: it reached handkeyed-15 0.0628 and regressed qsb 43x.
+TEST_CASE("transition-gated peak: stretch and CER", "[cw][.][peak-gate]") {
+    constexpr int SEEDS = 24;
+
+    printf("\n%-18s %25s %25s %17s\n",
+           "", "ON stretch (%% of dit)", "CER mean", "false / miss per elem");
+    printf("%-18s %8s %8s %8s %8s %8s %8s %13s %13s\n",
+           "profile", "legacy", "+peak", "+gate", "legacy", "+peak", "+gate",
+           "legacy", "+gate");
+    printf("%s\n", std::string(102, '-').c_str());
+
+    int worse = 0, better = 0;
+    for (const auto& p : detectorProfiles()) {
+        auto sLegacy = measureDetectorMulti(p.message, p.params, SEEDS, 1000,
+                                            cw::MF_RESET, cw::EDGE_RAW,
+                                            cw::PEAK_INSTANT_ATTACK).mean;
+        auto sPeak   = measureDetectorMulti(p.message, p.params, SEEDS, 1000,
+                                            cw::MF_RESET, cw::EDGE_RAW,
+                                            cw::PEAK_PERCENTILE).mean;
+        auto sGate   = measureDetectorMulti(p.message, p.params, SEEDS, 1000,
+                                            cw::MF_RESET, cw::EDGE_RAW,
+                                            cw::PEAK_GATED).mean;
+
+        auto cLegacy = runCell("legacy",          p.name, p.message, p.params, SEEDS);
+        auto cPeak   = runCell("legacy+peak",     p.name, p.message, p.params, SEEDS);
+        auto cGate   = runCell("legacy+peakgate", p.name, p.message, p.params, SEEDS);
+
+        if (cGate.cerMean > cLegacy.cerMean + 1e-6f) { worse++; }
+        if (cGate.cerMean < cLegacy.cerMean - 1e-6f) { better++; }
+
+        printf("%-18s %8.2f %8.2f %8.2f %8.4f %8.4f %8.4f  %5.3f/%-5.3f  %5.3f/%-5.3f\n",
+               p.name, sLegacy.onStretchPct, sPeak.onStretchPct, sGate.onStretchPct,
+               cLegacy.cerMean, cPeak.cerMean, cGate.cerMean,
+               sLegacy.falseRate, sLegacy.missRate,
+               sGate.falseRate, sGate.missRate);
+
+        INFO("profile " << p.name);
+        CHECK(cLegacy.cerMean >= 0.0f);
+        CHECK(cGate.cerMean >= 0.0f);
+        CHECK(sGate.trueTransitions > 0);
+        // Noiseless profiles must still decode perfectly under every variant;
+        // a variant that breaks clean decoding is not a trade to be weighed.
+        if (p.params.noiseAmp == 0.0f && p.params.jitterPct == 0.0f) {
+            CHECK(cLegacy.cerMean == Approx(0.0f).margin(1e-6));
+            CHECK(cGate.cerMean == Approx(0.0f).margin(1e-6));
+        }
+    }
+
+    printf("\n+gate vs legacy: %d better, %d worse (promotion needs 0 worse)\n\n",
+           better, worse);
+    CHECK(better + worse <= (int)detectorProfiles().size());
+}
+
+namespace {
+    struct GuardStats { float rejectPct = 0; float blindPct = 0; };
+
+    // Fraction of samples the guard rejects, and the fraction of true key-down
+    // time spent inside a rejection run. Truth is shifted by the measured group
+    // delay so the chain's latency is not counted as blindness.
+    GuardStats measureGuard(const char* message, SignalParams params, int seeds,
+                            cw::PeakTracker peak, float guardThresh, float toneFreq) {
+        constexpr float RATE = 1000.0f;
+        GuardStats out;
+
+        for (int s = 0; s < seeds; s++) {
+            params.seed = 1000 + (unsigned)s * 7919u;
+            auto sig = generateMessage(message, params);
+
+            auto schmitt = std::make_unique<cw::SchmittDetector>(cw::EDGE_RAW, peak);
+            auto* det = schmitt.get();
+            det->setGuardTrace(true);
+            det->setGuardThreshold(guardThresh);
+
+            auto rec = std::make_unique<RecordingDetector>(std::move(schmitt));
+            auto* probe = rec.get();
+
+            cw::Channel ch;
+            ch.initWithCore(0, toneFreq, std::make_unique<cw::StagedCore>(
+                std::make_unique<cw::EnvelopeFrontEnd>(), std::move(rec),
+                std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),
+                std::make_unique<cw::BeamSymbolDecoder>()), "guard-probe");
+
+            for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+                int n = std::min(512, (int)sig.samples.size() - off);
+                ch.process(n, &sig.samples[off]);
+            }
+
+            auto truth = truthTransitions(sig, params.sampleRate, RATE);
+            auto score = scoreDetector(truth, probe->events(), probe->processed(),
+                                       RATE, sig.model.ditMs);
+            const long long lag = (long long)(score.groupDelayMs * RATE / 1000.0f);
+
+            const auto& runs = det->guardRuns();
+            long long onSamples = 0, blindSamples = 0;
+            size_t r = 0;
+            for (size_t t = 0; t + 1 < truth.size(); t++) {
+                if (!truth[t].keyDown) { continue; }
+                const long long a = truth[t].sample + lag;
+                const long long b = truth[t + 1].sample + lag;
+                onSamples += b - a;
+                while (r < runs.size() && runs[r].first + runs[r].second <= a) { r++; }
+                for (size_t k = r; k < runs.size() && runs[k].first < b; k++) {
+                    blindSamples += std::min(b, runs[k].first + runs[k].second)
+                                  - std::max(a, runs[k].first);
+                }
+            }
+
+            const long long eval = det->guardEvaluated();
+            if (eval > 0) { out.rejectPct += 100.0f * det->guardRejected() / eval; }
+            if (onSamples > 0) { out.blindPct += 100.0f * blindSamples / onSamples; }
+        }
+        out.rejectPct /= seeds;
+        out.blindPct /= seeds;
+        return out;
+    }
+
+    // Legacy pipeline with the guard constant overridden.
+    CoreFactory guardCore(float thresh) {
+        return CoreFactory([thresh](const GeneratedSignal&) {
+            auto schmitt = std::make_unique<cw::SchmittDetector>();
+            schmitt->setGuardThreshold(thresh);
+            return std::unique_ptr<cw::IDecodeCore>(new cw::StagedCore(
+                std::make_unique<cw::EnvelopeFrontEnd>(), std::move(schmitt),
+                std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),
+                std::make_unique<cw::BeamSymbolDecoder>()));
+        });
+    }
+}
+
+// Phase 18: the dynamic-range guard probe.
+//
+// §13.8 left a hypothesis, not a finding: that `dynamicRange < 1.8` disables
+// detection outright, and that legacy's key-up instant attack keeps peakRef
+// above it by absorbing noise spikes. Gating attack to key-down would then let
+// the reference sag into the guard and elements would stop being detected.
+//
+// A bare rejection count cannot decide this — the claim is that detection is
+// off *while an element is present*. So the statistic is the fraction of true
+// key-down time spent inside a rejection run, with truth shifted by the
+// measured group delay so the chain's latency is not mistaken for blindness.
+TEST_CASE("dynamic-range guard: rejection during key-down", "[cw][.][guard-probe]") {
+    constexpr int SEEDS = 8;
+
+    printf("\n%-18s %21s %21s\n", "", "guard reject (%% samples)", "blind during key-ON (%%)");
+    printf("%-18s %10s %10s %10s %10s\n",
+           "profile", "legacy", "+gate", "legacy", "+gate");
+    printf("%s\n", std::string(74, '-').c_str());
+
+    for (const auto& p : detectorProfiles()) {
+        auto lg = measureGuard(p.message, p.params, SEEDS,
+                               cw::PEAK_INSTANT_ATTACK, 1.8f, p.params.toneFreq);
+        auto gt = measureGuard(p.message, p.params, SEEDS,
+                               cw::PEAK_GATED, 1.8f, p.params.toneFreq);
+        printf("%-18s %10.2f %10.2f %10.2f %10.2f\n",
+               p.name, lg.rejectPct, gt.rejectPct, lg.blindPct, gt.blindPct);
+
+        // Instrument invariants. Blindness is an intersection of rejection runs
+        // with key-down time, so it cannot exceed the rejection rate's support
+        // and both are fractions.
+        INFO("profile " << p.name);
+        CHECK(lg.rejectPct >= 0.0f);
+        CHECK(lg.rejectPct <= 100.0f);
+        CHECK(lg.blindPct >= 0.0f);
+        CHECK(lg.blindPct <= 100.0f);
+        CHECK(gt.blindPct >= 0.0f);
+        CHECK(gt.blindPct <= 100.0f);
+
+        // A rejection run that never overlaps key-down cannot produce blindness,
+        // and blindness cannot appear without rejections.
+        if (lg.rejectPct == 0.0f) { CHECK(lg.blindPct == 0.0f); }
+        if (gt.rejectPct == 0.0f) { CHECK(gt.blindPct == 0.0f); }
+    }
+    printf("\n");
+}
+
+// Phase 19: sweep the dynamic-range guard constant.
+//
+// §13.9 left one question open. Legacy is blind for 55% of key-down time on
+// snr-noise4.0 and 7.6% on snr-noise3.0 — the two profiles where it fails
+// outright — and cause cannot be told from symptom by observation alone: at
+// that noise level the dynamic range may honestly be below 1.8, in which case
+// the guard is reporting a real SNR limit rather than creating one.
+//
+// The sweep discriminates. If CER improves as the constant falls, the guard
+// over-triggers and this is a defect in the shipping default. If blindness
+// drops while CER stays flat or worsens, the guard is honest and the failure
+// is upstream of it. Both tables are printed because either one alone is
+// ambiguous — §12.5 is the standing record of a stage metric moving without CER.
+TEST_CASE("dynamic-range guard: constant sweep", "[cw][.][guard-sweep]") {
+    constexpr int CER_SEEDS = 24;
+    constexpr int BLIND_SEEDS = 8;
+    const float guards[] = {1.0f, 1.3f, 1.6f, 1.8f, 2.2f, 3.0f};
+    constexpr int NG = sizeof(guards) / sizeof(guards[0]);
+
+    printf("\n== CER mean (%d seeds); 1.8 is the shipping default, 1.0 disables the guard ==\n",
+           CER_SEEDS);
+    printf("%-18s", "profile");
+    for (float g : guards) { printf("  g=%.1f", g); }
+    printf("\n%s\n", std::string(66, '-').c_str());
+
+    const int defaultIdxCheck = 3;   // guards[3] == 1.8f, the shipping default
+    std::vector<std::vector<float>> cer;
+    for (const auto& p : detectorProfiles()) {
+        printf("%-18s", p.name);
+        std::vector<float> row;
+        for (int g = 0; g < NG; g++) {
+            float v = runCellWith(guardCore(guards[g]), "guard",
+                                  p.name, p.message, p.params, CER_SEEDS).cerMean;
+            row.push_back(v);
+            printf(" %7.4f", v);
+        }
+        printf("\n");
+        cer.push_back(row);
+
+        // The whole sweep is meaningless if overriding the constant to its own
+        // default is not a no-op: it would mean setGuardThreshold changed the
+        // pipeline rather than only the guard.
+        INFO("profile " << p.name);
+        CHECK(cer.back()[defaultIdxCheck] ==
+              Approx(runCell("legacy", p.name, p.message, p.params, CER_SEEDS).cerMean));
+    }
+
+    // Reported against the default column, not against the best cell: the
+    // promotion rule is no-worse-on-every-profile.
+    const int defaultIdx = 3;
+    printf("\n%-18s", "vs g=1.8:");
+    for (int g = 0; g < NG; g++) {
+        int better = 0, worse = 0;
+        for (size_t r = 0; r < cer.size(); r++) {
+            if (cer[r][g] < cer[r][defaultIdx] - 1e-6f) { better++; }
+            if (cer[r][g] > cer[r][defaultIdx] + 1e-6f) { worse++; }
+        }
+        printf(" %3d/%-3d", better, worse);
+    }
+    printf("   (better/worse)\n");
+
+    printf("\n== blind during key-ON (%%), %d seeds ==\n", BLIND_SEEDS);
+    printf("%-18s", "profile");
+    for (float g : guards) { printf("  g=%.1f", g); }
+    printf("\n%s\n", std::string(66, '-').c_str());
+
+    for (const auto& p : detectorProfiles()) {
+        printf("%-18s", p.name);
+        for (int g = 0; g < NG; g++) {
+            auto gs = measureGuard(p.message, p.params, BLIND_SEEDS,
+                                   cw::PEAK_INSTANT_ATTACK, guards[g],
+                                   p.params.toneFreq);
+            printf(" %7.2f", gs.blindPct);
+
+            INFO("profile " << p.name << " g=" << guards[g]);
+            // g=1.0 is reported everywhere as "the guard disabled". That rests
+            // on peakRef >= noiseFloor holding for the instant-attack tracker,
+            // which is an inference about the code, not a measured fact — so
+            // assert it rather than repeat it.
+            if (guards[g] == 1.0f) {
+                CHECK(gs.rejectPct == 0.0f);
+                CHECK(gs.blindPct == 0.0f);
+            }
+            CHECK(gs.blindPct >= 0.0f);
+            CHECK(gs.blindPct <= 100.0f);
+        }
+        printf("\n");
+    }
+    printf("\n");
+}
+
 // Instrument self-checks. If these break, every number above is measuring the
 // harness rather than the detector.
 TEST_CASE("detector scoring recovers a clean signal exactly", "[cw][detector-self]") {
