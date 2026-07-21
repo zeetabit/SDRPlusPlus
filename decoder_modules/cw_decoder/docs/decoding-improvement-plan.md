@@ -26,7 +26,14 @@
 > is a **single noise realization on `seed = 42`**. See the Benchmark Results
 > section.
 >
-> ### Work completed since (all in the registry; one promoted — §21)
+> ### Work completed since (all in the registry; the one promotion was reverted — §25)
+>
+> **Current default: `legacy` (Schmitt + Kalman).** `legacy+lr+log` was promoted
+> on 2026-07-21 (§21) and **reverted the same day (§25)** when the gate's noise
+> axis was widened past 15 WPM: it regresses badly at fast CW under noise. §26–28
+> then mapped that boundary from every angle and found it not closable by any
+> bound rule. The campaign still has **zero standing promotions**; `legacy` is
+> unchanged. See the LR rows below and the Approaches Matrix #24.
 >
 > | stage | outcome |
 > |---|---|
@@ -49,9 +56,10 @@
 > | Farnsworth gap centres (Phase 21) | cause found (one cold-start gap, not the clustering); fix **not shipped** — fragile by 0.5 ms and breaks a gate. Retro gap seeding promoted instead: `qrm` 0.0100 → 0.0035 (§16) |
 > | Gap classification under noise (Phase 22) | ⊘ item closed, measurement only. Error multiplication **confirmed**: 12.2% of structurally intact gaps misclassified at noise 3.0 vs 0.0% clean — but the driver is a **+38.9% dit overestimate**, not gap fragmentation. Two new measured defects; #29 reframed (§17) |
 > | Real recordings — ARRL W1AW (Phase 23) | **#30 closed as a blocker.** Paired audio + published text, five sessions pinned and gated; 15 and 20 WPM decode at **CER 0.0000**. Found and fixed two defects the synthetic suite cannot express: a broken audio→IQ conversion and unmapped period/comma (§18) |
-> | **LR detector — PROMOTED (Phase 26)** | The §20.8 fix, shipped. `legacy+lr+log`: a sequential CUSUM detector that rejects spikes by evidence duration, not magnitude. Solves the runaway (noise3.0 +0.97 t=18 → −0.11 win), 9 significant wins including worstcase 0.61→0.42, 0 significant regressions, clean/Farnsworth identical. Now `DEFAULT_CORE`; gates re-ratcheted (§21) |
-| Measurement repair (Phase 25) | The comparison method, not the decoder. Paired per-seed testing added (`comparePaired`); n=24 shown to give wrong verdicts in both directions; the four-variable confound between the `noise*` and `handkeyed*` families identified and separated by a speed×noise factorial; hand-keyed coverage found to stop at 25 WPM. **Every better/worse tally in Phases 12–24 is unreliable as recorded.** No decoder change |
-| Registry vs real audio (Phase 24) | `legacy+mf` fixes the 35 WPM errors (0.0089 → 0.0000), so §12.3's refutation was scope-limited — but timing-only cores fix them too, so they are **marginal**, not proof of the matched-filter mechanism. **Nothing promotable**: every candidate regresses on ≥1 synthetic profile; the real-audio winner doubles CER on heavy noise (§19) |
+> | LR detector — promoted then reverted (§21, §25) | `legacy+lr+log`: a sequential CUSUM detector that rejects spikes by evidence duration, not magnitude. Solved the §20.8 log-timing runaway (noise3.0 +0.97 t=18 → −0.11) and won on hand-keyed/worstcase — **promoted 2026-07-21, reverted the same day** when the gate's noise axis was widened past 15 WPM and exposed a large fast-CW × noise regression (25 WPM/noise2.0 +0.20 t=18, 30 WPM +0.33 t=33). Kept as a variant; `legacy` restored as default |
+| LR fast-CW fix attempts — all failed (§26, §27, §28) | Three routes to close the fast+noise regression, each a measured dead end. **§26 speed-adaptive bound** (scale by self-measured element duration): helps fast, breaks slow+heavy noise — the estimate is corrupt where the safe bound matters. **§27 external ground-truth speed**: removes §26's breakage by construction but recovers only ~70% of the regression; a residual fast+heavy gap to legacy survives even with a perfect speed signal. **§28 SNR (noise-side) scaling**: refuted by the CER-vs-bound curve — fast+heavy wants a *small* bound, slow+heavy a *large* one, and SNR (low for both) cannot separate them. Bound-scaling is exhausted on every axis; the residual is intrinsic to the LR CUSUM |
+| Measurement repair (Phase 25 = §20) | The comparison method, not the decoder. Paired per-seed testing added (`comparePaired`); n=24 shown to give wrong verdicts in both directions; the four-variable confound between the `noise*` and `handkeyed*` families identified and separated by a speed×noise factorial; hand-keyed coverage found to stop at 25 WPM. **Every better/worse tally in Phases 12–24 is unreliable as recorded.** No decoder change |
+| Registry vs real audio (Phase 24 = §19) | `legacy+mf` fixes the 35 WPM errors (0.0089 → 0.0000), so §12.3's refutation was scope-limited — but timing-only cores fix them too, so they are **marginal**, not proof of the matched-filter mechanism. **Nothing promotable**: every candidate regresses on ≥1 synthetic profile; the real-audio winner doubles CER on heavy noise (§19) |
 >
 > **Next: repair the instrument before ranking anything else with it.** Phase 25
 > found that the comparisons every ranking in these documents rests on were not
@@ -353,9 +361,9 @@ Key finding: **filter bandwidth is the dominant factor** — 35 Hz vs 68 Hz = 20
 
 > ⊘ **EVIDENCE NEEDED for every row not marked Done.** The Jitter / Noise /
 > Complexity columns on candidate and future rows are *estimates made before
-> implementation*, not measurements. Rows #14–16 and #24–27 in particular carry
-> no data. Rows marked **Done** have measured CER in the results table above or
-> in `decoder-investigation-2026-07.md`.
+> implementation*, not measurements. Rows #14–16, #25 and #27 in particular carry
+> no data (#24 is now heavily measured — §21–28). Rows marked **Done** have
+> measured CER in the results table above or in `decoder-investigation-2026-07.md`.
 >
 > The scorecard in that document (§10) puts pre-implementation predictions at
 > roughly 50% accuracy, so these ratings should not be used to order work
@@ -386,7 +394,7 @@ Key finding: **filter bandwidth is the dominant factor** — 35 Hz vs 68 Hz = 20
 | 21 | Log-duration timing (Mills) | Very High | Medium | Medium | **Done — variant `+log`** |
 | 22 | Narrow pre-detection BPF | Low (−) | Very High | Low | **Measured — variants `+bpf*`** |
 | 23 | Huberised robust timing update | Low | None | Low | **Refuted (2026-07)** |
-| 24 | Likelihood-ratio detector | Medium | High | High | **DONE — PROMOTED (§21).** Sequential CUSUM detector (`legacy+lr+log`) rejects spikes by evidence duration, solving the §20.8 runaway: noise3.0 +0.97 (t=18) → −0.11 (win), 9 significant improvements, 0 significant regressions. Now `DEFAULT_CORE`. ⚠ heavy-noise wins validated partly against Gaussian noise |
+| 24 | Likelihood-ratio detector | Medium | High | High | **DONE — promoted then REVERTED (§21→§25); boundary fully mapped (§26–28).** Sequential CUSUM (`legacy+lr+log`) rejects spikes by evidence duration, solving the §20.8 runaway (noise3.0 +0.97 t=18 → −0.11) and winning on hand-keyed/worstcase. Reverted when fast CW × noise was found to regress hard (25 WPM/noise2.0 +0.20 t=18, 30 WPM +0.33 t=33) — the CUSUM's fixed ~12 ms lag is too large a fraction of a short fast element. §26 (speed-adaptive) / §27 (external speed) / §28 (SNR) all failed to close it: bound-scaling is exhausted, the residual is intrinsic, Schmitt handles fast+heavy better at any bound. **Kept as a variant; `legacy` is the default.** ⚠ heavy-noise wins only ever validated against Gaussian noise |
 | 25 | Gap ambiguity inside the beam | High | Medium | Medium | Candidate |
 | 26 | Callsign database (SCP/Master.dta) | N/A | N/A | Low | Candidate |
 | 27 | Bell 1977 trellis core | High | Very High | Very High | Future |
@@ -407,21 +415,31 @@ Key finding: **filter bandwidth is the dominant factor** — 35 Hz vs 68 Hz = 20
 | 31 | WPM-locked adaptive BPF (runtime tap update) | N/A | High | Medium | **Candidate — evidence-backed.** From Phase 10 "future work", never in this matrix. `+bpf20` helps slow CW and costs 35 WPM (0.0390): a filter matched to locked WPM dissolves a tradeoff already measured, rather than one assumed |
 | 32 | Paired per-seed comparison + factorial profiles | N/A | N/A | Low | **Done (Phase 25)** — `comparePaired` in `cw_bench_stats.h` |
 | 33 | Guarded log timing (x-freeze for spikes) | Low | High | Low | **Measured, not promoted (§20.8)** — `+logguard`. Halves the noise3.0 runaway, useless at noise4.0; R-saturation is inseparable from qrm/qrn tolerance |
+| 34 | Speed-adaptive LR bound (self-estimate) | Medium | High | Medium | **Refuted (§26)** — `+lr+log+adapt`. Scales the CUSUM bound by self-measured element duration to cut the fixed lag on fast CW. Helps fast, breaks slow+heavy noise: the estimate is built from key-down durations the spurious short elements dominate, so it reads "fast" when slow and revives the runaway |
+| 35 | External ground-truth speed to the LR bound | Medium | High | Low | **Hypothesis check, necessary but not sufficient (§27)** — `setExternalDitMs`, `[lr-wpm]`. Feeds the detector the true dit instead of the self-estimate. Removes §26's slow-noise breakage by construction (15 WPM scale ≡ 1.0) and recovers ~70% of the fast regression, but a residual fast+heavy gap to legacy survives even with a perfect speed signal. No shipping path (no decoder knows true WPM); does not unblock promotion |
+| 36 | SNR (noise-side) LR bound scaling | Medium | High | Low | **Refuted by the bound curve (§28)** — `[lr-snr]`. Fast+heavy noise wants a *small* bound (lag dominates), slow+heavy a *large* one (rejection dominates); SNR is low for both and cannot separate them, so a noise-side rule hurts the target. Even the floor bound leaves fast+heavy above legacy: the residual is intrinsic, not a tuning miss |
 
-### Reprioritized leftovers (2026-07-20, after Phase 25)
+### Reprioritized leftovers (2026-07-21, after §28)
 
 Ordered by strength of the evidence that the work is needed, not by expected
-gain. Phase 25 is the reason the order changed: nothing that ranks variants can
-be trusted until the instrument that ranks them is repaired.
+gain. The list changed twice: Phase 25 (§20) repaired the ranking instrument, and
+§21–28 exhausted the detector line — the LR detector was promoted, reverted, and
+its fast+heavy-noise boundary mapped from every bound-scaling angle. Two former
+top items are now closed, which promotes the post-decode and front-end ideas.
 
 | rank | item | why here |
 |---|---|---|
-| 1 | **Finish Phase 25** — paired test in promotion decisions, `handkeyed-30/35/40` in the standard set, decouple the `noise*`/`handkeyed*` families, variance for the real-audio matrix | Upstream of every other decision. Cheap. Currently three known wrong verdicts and a four-variable confound |
-| 2 | **Runaway insertion at slow speed × heavy noise** | `legacy+edge+log` reaches CER 1.77 at 15 WPM / `noise 3.0` (t 12.48) and 1.31 at 25 WPM — emitting more than the reference contains. Reproducible, large, speed-dependent, and a distinct failure mode from ordinary degradation. Plausibly the same defect as the **+38.9% dit overestimate** (§17.3.2), the largest unexplained number in these documents |
-| 3 | **#31 WPM-locked adaptive BPF** | The only unbuilt idea that today's data actively supports rather than merely permits |
-| 4 | **#25 gap ambiguity inside the beam** | §17 measured 12.2% of structurally intact gaps misclassified at `noise 3.0` with errors flowing toward CHAR. Propagating gap ambiguity into the beam addresses a measured defect; #14/#15 address assumed ones |
-| 5 | **#26 callsign database** | Low complexity, low risk, post-decode only — cannot regress the detector |
-| 6 | **#24 likelihood-ratio detector** | Oracle ablation puts 100% of AWGN/QSB/QRN error at the detector, so the headroom is real and large. Still unvalidatable: see the row above |
+| 1 | **#31 WPM-locked adaptive BPF** | Now the single best-supported unbuilt idea, and the only detector-adjacent lever §21–28 did *not* touch. Those phases scaled the CUSUM *bound*; this scales *front-end bandwidth* to the locked WPM — a different mechanism, so §28's "bound-scaling is exhausted" does not apply. `+bpf20` already helps slow CW and costs 35 WPM (0.0390): a WPM-matched filter dissolves a *measured* tradeoff |
+| 2 | **#25 gap ambiguity inside the beam** | §17 measured 12.2% of structurally intact gaps misclassified at `noise 3.0`, errors flowing toward CHAR. A measured defect, and — unlike the detector bound — untouched by §21–28. Addresses the segmentation that the fast+heavy residual partly comes from |
+| 3 | **#26 callsign database** | Low complexity, low risk, post-decode only — cannot regress the detector. The safest remaining lever now that detector-side gains are exhausted |
+| 4 | **LR detector as a non-default variant** | ⊘ Open question, not a task: the LR detector *wins* on hand-keyed and worstcase and *loses* only on fast+heavy noise. Worth deciding whether it ships as a user-selectable option (not the default) for operators who know they are on clean hand-keyed signals. Needs a UI/config decision, not more measurement |
+| 5 | **#14 ATC, #15 coherent PLL** | No data and no oracle headroom estimate. The §10 scorecard puts pre-implementation predictions near 50% |
+| 6 | **#16 LSTM, #27 Bell trellis** | Future — a different detector class, the only lever §28 leaves open in principle (a new decision rule, not a new bound) |
+
+**Closed since the 2026-07-20 list:**
+- ~~Finish Phase 25~~ — **done** (§20): paired test in `[promotion]`, `handkeyed-30/35/40` added, `noise*`/`handkeyed*` decoupled by the factorial, real-audio variance noted.
+- ~~Runaway insertion at slow speed × heavy noise~~ — **resolved** (§21). The LR detector cut the log-timing runaway (noise3.0 CER 1.77 → 0.71); and the shipped default (`legacy`, Kalman) never had it — the runaway was a log-timing property. The linked +38.9% dit overestimate is also resolved (§23).
+- ~~#24 likelihood-ratio detector~~ — **done and boundary-mapped** (§21–28). Not promotable as the default; see the Approaches Matrix #24 and the variant row above.
 | 7 | **#14 ATC, #15 coherent PLL** | No data and no oracle headroom estimate. The §10 scorecard puts pre-implementation predictions near 50% |
 | 8 | **#16 LSTM, #27 Bell trellis** | Future |
 | — | **Noisy real recordings** (was rank 1) | **Demoted.** It would validate §15's synthetic fidelity; it would not resolve a tradeoff, because the candidates disagree with each other in the regime the recordings would add, not in the one they would confirm |
@@ -434,10 +452,10 @@ be trusted until the instrument that ranks them is repaired.
 > 0.1536 (not 0.1309). Do not use any row here to rank a variant; re-measure
 > with `comparePaired`.
 
-`legacy` is unchanged and retained for comparison, but is **no longer the
-default** — `legacy+lr+log` was promoted to `DEFAULT_CORE` on 2026-07-21 (§21),
-the campaign's first promotion. Full tables and method:
-`decoder-investigation-2026-07.md` §8–10, §21.
+`legacy` is unchanged and **is the default.** `legacy+lr+log` was promoted to
+`DEFAULT_CORE` on 2026-07-21 (§21) and reverted the same day (§25) — the
+campaign has no standing promotion. Full tables and method:
+`decoder-investigation-2026-07.md` §8–10, §21 (promotion), §25 (revert).
 
 | profile | `legacy` | `+kalman2` | `+log` | `+bimodal` |
 |---|---|---|---|---|
@@ -733,5 +751,11 @@ Full write-up, tables, and the re-adjudication: **`decoder-investigation-2026-07
 - **Parallel harness** (`cw_parallel.h`): 6× faster, byte-identical output.
 
 Still nothing promotable — the §19 conclusion, now on defensible evidence.
-Open: the runaway-insertion mode (CER > 1.0) and the `25 WPM × noise 2.0`
-anomaly.
+
+**Both open items are since closed.** The runaway-insertion mode (CER > 1.0) was
+cut by the LR detector (§21, noise3.0 1.77 → 0.71) and is absent from the shipped
+`legacy` path entirely (it was a log-timing property). The `25 WPM × noise 2.0`
+anomaly dissolved under a fine speed sweep (§25): there is no narrow spike at
+25 WPM — `legacy+lr+log` degrades monotonically across the fast range under noise,
+which is the regression that reverted the promotion. §26–28 then confirmed that
+regression is not closable by any bound rule. The detector line is closed.
