@@ -3484,3 +3484,47 @@ end at lock) — a larger change, deferred. The runtime rule as it stands is a c
 large, regression-free win; the ceiling marks the headroom still on the table.
 
 Kept as the variant `legacy+bpfauto`; promotion to default is a separate decision.
+
+## 32. Real audio refutes the runtime rule — but validates the thesis (2026-07-21)
+
+Before promoting `legacy+bpfauto`, the deferred real-audio validation (§31): add
+calibrated AWGN to the peak-normalized W1AW 20 WPM recording and adjudicate
+against legacy, plus fixed narrow filters as a diagnostic (`[recording-noise]`).
+The result split cleanly, and it blocks the promotion.
+
+| noiseAmp (~dB/2500, synth-eq) | legacy | bpfauto | bpf20 (fixed) | bpf30 |
+|---|---|---|---|---|
+| 1.0 (+2.0) | 0.121 | **0.121 (ns)** | **0.021 (t=−19)** | 0.024 |
+| 2.0 (−4.0) | 0.985 | 1.001 (ns) | 0.522 (t=−74) | 0.981 |
+| 3.0 (−7.5) | 0.996 | 0.996 (ns) | 1.264 (worse) | 1.711 |
+
+**The thesis transfers to real audio.** A fixed narrow BPF is a large, real win on
+real keying at moderate noise — `bpf20` cuts noiseAmp-1.0 CER 6× (0.121 → 0.021,
+t=−19). Narrowing the pre-detection bandwidth helps real signals, not only the
+synthetic generator. The §29 physics is sound.
+
+**But `legacy+bpfauto` fails on real audio — 0 wins, and it does not engage.** At
+noiseAmp 1.0, where `bpf20` wins 6×, `bpfauto` is byte-identical to legacy
+(delta 0.0000 on all 24 seeds): its narrowing never fired. The cause is the
+`getSNR` trigger. §31 already showed input SNR and the post-BPF `getSNR` diverge;
+here it is decisive — on real 20 WPM audio the post-wide-BPF `getSNR` reads above
+the 9.5 dB "stay wide" threshold (calibrated on synthetic 15 WPM), so the rule
+concludes no narrowing is needed exactly when a 6× win is available. The runtime
+trigger does not transfer across signal type, and `getSNR` was the wrong signal to
+gate on — the same post-filter-vs-input confusion the calibration section warned
+about.
+
+**A fixed narrow filter is not the fix either.** `bpf20` *worsens* the heaviest
+noise (noiseAmp 3.0: 0.996 → 1.264, emitting garbage) — at −7.5 dB it over-narrows
+the 20 WPM keying, the §4 "narrow filters emit garbage rather than going silent"
+floor. So the bandwidth genuinely must adapt to both speed and noise; the §29
+noise-aware *shape* is right, only its runtime *trigger* is broken.
+
+**Promotion blocked, and correctly so** — the synthetic gate ([bpf-runtime], 6
+wins / 0 regressions) passed a rule that does nothing on real audio. This is the
+methodology working: real audio caught what synthetic could not, and it also
+proved the underlying win is real and large (6× at moderate noise). The next step
+is a narrowing trigger that transfers — an *input*-referred noise estimate rather
+than the post-BPF `getSNR`, or narrowing driven by WPM alone with a separate
+over-narrowing guard for the heavy-noise garbage floor. Until then `legacy`
+remains the default and `legacy+bpfauto` stays a measured, non-promotable variant.

@@ -3,6 +3,7 @@
 #include "cw_test_signals.h"
 #include "cw_bench_stats.h"
 #include "cw_parallel.h"
+#include "cw_snr.h"
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -438,13 +439,33 @@ TEST_CASE("Recording: candidates under added noise", "[cw][.][recording-noise]")
     LoadedSession session = loadSession("w1aw_20wpm");
     normalizeToPeak(session.iq);
 
-    const char* candidates[] = {"legacy+edge", "legacy+edge+log", "legacy+edge+mf"};
+    // legacy+bpfauto is the WPM-locked noise-aware BPF promotion candidate (§30);
+    // legacy+edge+log is the known-bad canary (emits CER > 1.0 at heavy synthetic
+    // noise, §25) that proves the harness can register a real regression here.
+    // bpfauto is the runtime candidate; bpf20/bpf30 are FIXED narrow filters
+    // (narrow from the first sample, no lock dependency) — the decisive diagnostic
+    // for whether narrowing helps real audio at all, or only bpfauto's trigger is
+    // broken. edge+log is the known-bad canary.
+    const char* candidates[] = {"legacy+bpfauto", "legacy+bpf20", "legacy+bpf30", "legacy+edge+log"};
 
+    // The recordings are peak-normalized to 1.0, the same scale the synthetic
+    // axis uses, so the dB label is comparable to [bpf-snr-sweep]. Caveat: the
+    // WAV is a REAL tone (im = 0), so its key-down power is ~A²/2, not the
+    // synthetic complex tone's A² — the real SNR is ~3 dB below this label. It is
+    // the synthetic-EQUIVALENT SNR, exact for cross-referencing the synthetic
+    // gate, approximate as an absolute figure for real audio.
+    auto dbLabel = [](float amp) {
+        return amp <= 0 ? 99.0f : noiseAmpToSnrDb(amp, REF_BW_SSB, 1.0f, 8000.0f);
+    };
+
+    // [candidate][noiseAmp] -> paired delta vs legacy, for the assertions below.
+    std::map<std::string, std::map<float, PairedDelta>> res;
     for (float amp : noises) {
         auto baseCERs = coreCERsOverSeeds(session, amp, "legacy", TONE, SEEDS);
         const auto baseStats = summarize(baseCERs, 0.0f);
 
-        printf("\n=== w1aw_20wpm + noiseAmp %.1f (paired, n=%d) ===\n", amp, SEEDS);
+        printf("\n=== w1aw_20wpm + noiseAmp %.1f (~%+.1f dB/2500Hz synth-eq, paired, n=%d) ===\n",
+               amp, dbLabel(amp), SEEDS);
         printf("legacy CER %.4f (sd %.4f)\n", baseStats.mean, baseStats.stddev);
         printf("%-18s %9s %10s %10s %7s %10s  %s\n",
                "candidate", "cand", "delta", "stderr", "t", "worstcase", "verdict");
@@ -457,9 +478,8 @@ TEST_CASE("Recording: candidates under added noise", "[cw][.][recording-noise]")
             printf("%-18s %9.4f %+10.4f %10.4f %7.2f %+10.4f  %s%s\n",
                    cand, cs.mean, d.meanDelta, d.stderrDelta, d.t,
                    d.worstCaseDelta(), d.verdict(), harm ? " HARM" : "");
-
-            INFO("noiseAmp " << amp << " candidate " << cand);
             CHECK(d.nSeeds == SEEDS);
+            res[cand][amp] = d;
         }
     }
 
@@ -469,5 +489,29 @@ TEST_CASE("Recording: candidates under added noise", "[cw][.][recording-noise]")
     auto heavy = coreCERsOverSeeds(session, 3.0f, "legacy", TONE, SEEDS);
     CHECK(summarize(clean, 0.0f).mean == Approx(0.0f).margin(1e-6));
     CHECK(summarize(heavy, 0.0f).mean > 0.05f);
-    printf("\n");
+
+    // Findings on real audio (docs §32), asserted so they cannot silently rot:
+    //
+    // 1. The thesis TRANSFERS: a fixed narrow BPF is a large, real win on real
+    //    keying at moderate noise — bpf20 cuts noiseAmp-1.0 CER ~6x. Narrowing
+    //    the pre-detection bandwidth helps real audio, not only synthetic.
+    CHECK(res["legacy+bpf20"][1.0f].significant());
+    CHECK(res["legacy+bpf20"][1.0f].meanDelta < -0.05f);
+    // 2. But a FIXED narrow filter is not the answer: at the heaviest noise it
+    //    over-narrows the 20 WPM keying and emits garbage (CER > 1.0), worse than
+    //    legacy — so the bandwidth genuinely must adapt.
+    CHECK(res["legacy+bpf20"][3.0f].meanDelta > 0.0f);
+    // 3. The runtime rule bpfauto FAILS to capture the win: its getSNR trigger,
+    //    calibrated on synthetic 15 WPM, does not fire on real 20 WPM audio
+    //    (post-BPF getSNR reads too high), so at noiseAmp 1.0 — where bpf20 wins
+    //    6x — bpfauto is identical to legacy. This is the promotion blocker.
+    CHECK_FALSE(res["legacy+bpfauto"][1.0f].significant());
+    // 4. The canary can register a real regression: edge+log emits CER > 1.0 at
+    //    heavy synthetic-equivalent noise on real audio too.
+    CHECK(res["legacy+edge+log"][2.0f].significant());
+    CHECK(res["legacy+edge+log"][2.0f].meanDelta > 0.0f);
+
+    printf("\n  Finding (§32): narrowing helps real audio (bpf20 -6x at moderate "
+           "noise), but bpfauto's getSNR trigger does not fire on real audio — "
+           "promotion blocked, trigger needs redesign.\n");
 }
