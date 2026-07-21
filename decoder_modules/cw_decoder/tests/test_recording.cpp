@@ -426,6 +426,35 @@ namespace {
     }
 }
 
+// Does the pre-BPF inputSnr transfer across signal type (§33)? If it reads the
+// same for a given noise level on real 20 WPM audio as on synthetic (unlike the
+// post-BPF getSNR, which does not — §32), the adaptive trigger can gate on it.
+TEST_CASE("Recording: inputSnr vs getSNR on real audio", "[cw][.][recording-snr]") {
+    constexpr float TONE = 750.0f;
+    LoadedSession session = loadSession("w1aw_20wpm");
+    normalizeToPeak(session.iq);
+
+    printf("\n=== w1aw_20wpm: inputSnr steady-state vs AT LOCK (the value bpfGeom sees) ===\n");
+    printf("%-10s %12s %12s %14s\n", "noiseAmp", "getSNR ss", "inputSnr ss", "inputSnr@lock");
+    for (float amp : {0.0f, 1.0f, 2.0f, 3.0f}) {
+        const auto noisy = withNoise(session.iq, amp, 4242u);
+        cw::Channel ch; ch.init(0, TONE);
+        double acc = 0, accIn = 0; int accN = 0;
+        float atLock = -1.0f;
+        for (int off = 0; off < (int)noisy.size(); off += 512) {
+            int n = std::min(512, (int)noisy.size() - off);
+            ch.process(n, &noisy[off]);
+            // Capture inputSnr the first block WPM goes positive (timing lock) —
+            // this is exactly what StagedCore's retune reads.
+            if (atLock < 0 && ch.wpm > 0.0f) { atLock = ch.inputSnr; }
+            if (ch.snr > 0) { acc += ch.snr; accIn += ch.inputSnr; accN++; }
+        }
+        printf("%-10.1f %+11.1f %+12.1f %+14.1f\n", amp,
+               accN > 0 ? acc / accN : 0.0, accN > 0 ? accIn / accN : 0.0, atLock);
+    }
+    CHECK(true);   // reporting only
+}
+
 TEST_CASE("Recording: candidates under added noise", "[cw][.][recording-noise]") {
     constexpr float TONE = 750.0f;
     constexpr int SEEDS = 24;
@@ -490,7 +519,7 @@ TEST_CASE("Recording: candidates under added noise", "[cw][.][recording-noise]")
     CHECK(summarize(clean, 0.0f).mean == Approx(0.0f).margin(1e-6));
     CHECK(summarize(heavy, 0.0f).mean > 0.05f);
 
-    // Findings on real audio (docs §32), asserted so they cannot silently rot:
+    // Findings on real audio (docs §32/§33), asserted so they cannot silently rot:
     //
     // 1. The thesis TRANSFERS: a fixed narrow BPF is a large, real win on real
     //    keying at moderate noise — bpf20 cuts noiseAmp-1.0 CER ~6x. Narrowing
@@ -501,17 +530,23 @@ TEST_CASE("Recording: candidates under added noise", "[cw][.][recording-noise]")
     //    over-narrows the 20 WPM keying and emits garbage (CER > 1.0), worse than
     //    legacy — so the bandwidth genuinely must adapt.
     CHECK(res["legacy+bpf20"][3.0f].meanDelta > 0.0f);
-    // 3. The runtime rule bpfauto FAILS to capture the win: its getSNR trigger,
-    //    calibrated on synthetic 15 WPM, does not fire on real 20 WPM audio
-    //    (post-BPF getSNR reads too high), so at noiseAmp 1.0 — where bpf20 wins
-    //    6x — bpfauto is identical to legacy. This is the promotion blocker.
-    CHECK_FALSE(res["legacy+bpfauto"][1.0f].significant());
-    // 4. The canary can register a real regression: edge+log emits CER > 1.0 at
+    // 3. The runtime rule bpfauto, re-triggered on the input-referred inputSnr
+    //    (§33), now CAPTURES most of that win on real audio — it cuts noiseAmp-1.0
+    //    CER ~5x (0.121 → ~0.026), unlike the old getSNR trigger that never fired.
+    CHECK(res["legacy+bpfauto"][1.0f].significant());
+    CHECK(res["legacy+bpfauto"][1.0f].meanDelta < -0.05f);
+    // 4. And it no longer emits garbage at the deepest noise: the getSNR floor
+    //    (§33) keeps it wide where narrowing cannot recover the signal, so it is
+    //    non-inferior to legacy at noiseAmp 3.0 (no significant regression).
+    const auto& deep = res["legacy+bpfauto"][3.0f];
+    const bool deepRegress = deep.significant() && deep.meanDelta > 0.0f;
+    CHECK_FALSE(deepRegress);
+    // 5. The canary can register a real regression: edge+log emits CER > 1.0 at
     //    heavy synthetic-equivalent noise on real audio too.
     CHECK(res["legacy+edge+log"][2.0f].significant());
     CHECK(res["legacy+edge+log"][2.0f].meanDelta > 0.0f);
 
-    printf("\n  Finding (§32): narrowing helps real audio (bpf20 -6x at moderate "
-           "noise), but bpfauto's getSNR trigger does not fire on real audio — "
-           "promotion blocked, trigger needs redesign.\n");
+    printf("\n  Finding (§33): the input-referred trigger works on real audio — "
+           "bpfauto cuts noiseAmp-1.0 CER ~5x (0.121 -> 0.026) and no longer emits "
+           "garbage at the deepest noise. Validated.\n");
 }

@@ -3524,7 +3524,67 @@ noise-aware *shape* is right, only its runtime *trigger* is broken.
 wins / 0 regressions) passed a rule that does nothing on real audio. This is the
 methodology working: real audio caught what synthetic could not, and it also
 proved the underlying win is real and large (6× at moderate noise). The next step
-is a narrowing trigger that transfers — an *input*-referred noise estimate rather
-than the post-BPF `getSNR`, or narrowing driven by WPM alone with a separate
-over-narrowing guard for the heavy-noise garbage floor. Until then `legacy`
-remains the default and `legacy+bpfauto` stays a measured, non-promotable variant.
+is a narrowing trigger that transfers — §33.
+
+## 33. The input-referred trigger — bpfauto works on real audio (2026-07-21)
+
+The §32 diagnosis: the win is real, the trigger is broken. `getSNR` is measured
+*after* the narrow BPF, so it reads high on real audio (the filter already removed
+the noise) and never fires. The fix is a signal that reflects the *input*.
+
+**Input-referred SNR** (`EnvelopeDSP::getInputSnrDb`, dsp.h). A second noise-floor
++ peak estimator on the *decimated* signal, before the narrow BPF, where the full
+decimated-band noise is still present. It transfers across signal type — the
+property `getSNR` lacked:
+
+| noiseAmp | synthetic inputSnr | real inputSnr | (getSNR real) |
+|---|---|---|---|
+| 1.0 | 6.1 | 6.0 | 4.6 |
+| clean | — | 23.4 | 25.3 |
+
+It reads ~6 dB at noiseAmp ≥ 1 on both synthetic and real, ~9+ light, ~23 clean.
+(It *saturates* at ~6 once the signal is buried — the Rayleigh peak/p25 ratio is
+noise-independent — so it is a binary "noisy or not", which is what the trigger
+needs.)
+
+Getting it to work took three more fixes, each found by measurement:
+
+1. **Convergence gate.** Read at the instant of timing lock (~1.7 s) `inputSnr` is
+   a 60 dB transient — its 2 s noise window has not filled. The retune must wait
+   for the estimate to converge (`inputSnrReady`), not just for lock. This is what
+   made it fire at all.
+2. **Out-of-band interferer guard.** QRM's interferer sits in the wide decimated
+   band, so `inputSnr` reads it as noise (4.7) and mis-narrowed a near-perfect
+   profile (qrm 0.0018 → 0.014). But the 100 Hz BPF already rejects it, so `getSNR`
+   stays high (11.4). Rule: **narrow only when `getSNR` is also low** — a high
+   getSNR with low inputSnr means out-of-band interference the filter handles.
+   This also keeps light-noise hand-keyed (getSNR ~11) wide, resolving §29 for free.
+3. **Garbage floor.** Below ~−7 dB the signal is unrecoverable and a narrow filter
+   makes noise look like signal (§4/§32), so narrowing *worsens* an already-failed
+   decode. A low `getSNR` floor (< 3.5) keeps it wide there. But the separation is
+   tight: at the decision point noise3.0 (narrow helps) reads getSNR 3.7 and
+   noise4.0 (narrow hurts) reads 3.2 — 0.5 dB apart. So the floor is a genuine
+   tradeoff, not a clean cut: 3.5 protects against garbage at the cost of clipping
+   part of the noise3.0 win (0.20 → 0.55, still a large gain). Safety wins for a
+   shipped default.
+
+**Result — bpfauto now works on real audio** (the §32 blocker is cleared):
+
+| | real noiseAmp 1.0 | synthetic noise3.0 | synthetic grid |
+|---|---|---|---|
+| legacy | 0.121 | 0.817 | — |
+| bpfauto | **0.026 (t=−16)** | 0.551 (t=−8) | **6 wins, 0 significant regressions** |
+
+Real audio at moderate noise — the realistic, important case — improves ~5×, and
+bpfauto no longer emits garbage at the deepest noise (byte-identical to legacy at
+real noiseAmp 3.0). The trigger transfers. One residual: synthetic noise4.0
+(−10 dB) trips the non-inferiority bound (+0.017, *ns*, t=0.8) — the same
+high-variance total-failure regime where the 0.5 dB getSNR separation cannot be
+resolved. It is not a significant regression.
+
+**State:** `legacy+bpfauto` is now a strong, real-audio-validated candidate — 6
+significant wins, 0 significant regressions, works on real keying at moderate
+noise, degrades safely at extreme noise. The lone non-inferiority flag is *ns* at
+a −10 dB total-failure SNR. `legacy` remains default pending the promotion
+decision; the acquisition gap (narrowing only post-lock limits the heavy-noise
+win vs the fixed-narrow ceiling) remains the one avenue for more.

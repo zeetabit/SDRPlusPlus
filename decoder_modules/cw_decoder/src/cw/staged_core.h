@@ -46,17 +46,35 @@ namespace cw {
               mfResizePolicy(mfResize), minElementScale(minElemScale),
               adaptiveBpf(adaptiveBpf) {}
 
-        // Runtime noise-aware BPF geometry (docs §29–31), from the locked WPM
-        // (dit, ms) and the detector's SNR (dB). Matched-to-WPM narrowing
-        // (ENBW ≈ 2/T_dit, via the §4.1 cut↔ENBW fit) is a floor reached only at
-        // low SNR; at high SNR the geometry widens to the legacy (100, 100) so a
-        // jitter-limited signal is not over-narrowed and smeared (§29). SNR
-        // thresholds are the wide-filter getSNR at the ceiling's noise crossover
-        // (noiseAmp 0.5 → 9.5 dB wide, 1.5 → 5.4 dB narrow; §31 table).
-        static std::pair<float, float> bpfGeom(float ditMs, float snrDb) {
+        // Runtime noise-aware BPF geometry (docs §29–33), from the locked WPM
+        // (dit, ms) and the INPUT-referred SNR (dB, pre-BPF; frontEnd
+        // getInputSnrDb). Matched-to-WPM narrowing (ENBW ≈ 2/T_dit, via the §4.1
+        // cut↔ENBW fit) is a floor reached only at low SNR; at high SNR the
+        // geometry widens to legacy (100, 100) so a jitter-limited signal is not
+        // over-narrowed and smeared (§29).
+        //
+        // snrDb is the pre-BPF inputSnr, NOT the detector's post-BPF getSNR: the
+        // latter reads high on real audio because the wide filter already removed
+        // the noise, so it never fired the narrowing on real signals (§32). The
+        // pre-BPF estimate transfers across signal type — it reads ~6 dB at
+        // noiseAmp ≥ 1 on both synthetic and real audio, ~9+ for light noise, ~23
+        // clean (§33 table). Thresholds: wide above 9 dB (keeps synthetic
+        // hand-keyed, inputSnr 9.2, wide), matched below 6.5.
+        static std::pair<float, float> bpfGeom(float ditMs, float inputSnrDb, float postBpfSnrDb) {
             const float matched = std::min(std::max((2000.0f / ditMs + 2.0f) / 1.65f, 20.0f), 40.0f);
-            constexpr float SNR_HI = 9.5f, SNR_LO = 5.4f;
-            const float nf = std::min(std::max((SNR_HI - snrDb) / (SNR_HI - SNR_LO), 0.0f), 1.0f);
+            // Narrow only in a mid-SNR band [2.8, 9] dB post-BPF getSNR (§33):
+            //  - Above 9: either clean, or a high-getSNR/low-inputSnr split that
+            //    means out-of-band interference (QRM) the wide BPF already rejects
+            //    — narrowing buys nothing and only adds a retune transient. Also
+            //    keeps light-noise hand-keyed (getSNR ~11) wide, resolving the §29
+            //    over-narrowing concern directly.
+            //  - Below 2.8: the signal is too deep in noise to recover, and a
+            //    narrow filter there makes noise LOOK like signal — it emits
+            //    garbage rather than going silent (§4/§32 floor), a regression on
+            //    an already-failed decode. Stay wide.
+            if (postBpfSnrDb > 9.0f || postBpfSnrDb < 3.5f) { return {100.0f, 100.0f}; }
+            constexpr float SNR_HI = 9.0f, SNR_LO = 6.5f;
+            const float nf = std::min(std::max((SNR_HI - inputSnrDb) / (SNR_HI - SNR_LO), 0.0f), 1.0f);
             const float cut   = 100.0f * (1.0f - nf) + matched * nf;
             const float trans = 100.0f * (1.0f - nf) + (matched + 10.0f) * nf;
             return {cut, trans};
@@ -185,25 +203,6 @@ namespace cw {
                 if (timing->isLocked()) {
                     if (debugLog) fprintf(stderr, "[CW ch%d] TIMING LOCKED dit=%.1f wpm=%.1f\n", id, timing->getDitDuration(), timing->getWPM());
                     timingWasLocked = true;
-                    // WPM-locked, noise-aware BPF (docs §30). One-time at lock:
-                    // dit and SNR are now known, and the pre-lock events are
-                    // already captured, so the retune's transient falls in a
-                    // window that retroDecode replaces.
-                    if (adaptiveBpf && !bpfRetuned) {
-                        auto g = bpfGeom(timing->getDitDuration(), _snr);
-                        // Skip the retune when the target is the baseline width:
-                        // rebuilding the filter clears its history and injects a
-                        // transient, so at high SNR (no narrowing wanted) a retune
-                        // to (100, 100) would spuriously corrupt an otherwise clean
-                        // decode. Only pay the transient when narrowing actually buys
-                        // noise rejection.
-                        if (g.first < 99.0f) {
-                            frontEnd->setBandwidth(g.first, g.second);
-                            if (debugLog) fprintf(stderr, "[CW ch%d] BPF RETUNE cut=%.1f trans=%.1f snr=%.1f\n",
-                                                  id, g.first, g.second, _snr);
-                        }
-                        bpfRetuned = true;
-                    }
                     retroDecode(sink);
                 } else if (lastKeyUp >= 0 && !detector->isKeyDown() && !preLockEvents.empty()) {
                     float nowMs = (float)totalSamples / _internalRate * 1000.0f;
@@ -217,6 +216,24 @@ namespace cw {
                         flushed = true;
                     }
                 }
+            }
+
+            // WPM-locked, noise-aware BPF (docs §30/§33). Fires once, when timing
+            // has locked (WPM known) AND the input-SNR estimate has converged. At
+            // the lock instant the wide noise window is still filling and reads a
+            // huge transient (§33), so gating on lock alone never narrows on real
+            // audio — the readiness gate is what makes the trigger fire.
+            if (adaptiveBpf && !bpfRetuned && timingWasLocked && frontEnd->inputSnrReady()) {
+                auto g = bpfGeom(timing->getDitDuration(), frontEnd->getInputSnrDb(), _snr);
+                // Skip a no-op retune: rebuilding the filter clears its history
+                // and injects a transient, so at high SNR (no narrowing wanted) a
+                // retune to (100, 100) would corrupt an otherwise clean decode.
+                if (g.first < 99.0f) {
+                    frontEnd->setBandwidth(g.first, g.second);
+                    if (debugLog) fprintf(stderr, "[CW ch%d] BPF RETUNE cut=%.1f trans=%.1f inputSnr=%.1f\n",
+                                          id, g.first, g.second, frontEnd->getInputSnrDb());
+                }
+                bpfRetuned = true;
             }
 
             if (timingWasLocked && lastKeyUp >= 0 && !detector->isKeyDown()) {
@@ -272,7 +289,7 @@ namespace cw {
         }
 
         CoreStats stats() const override {
-            return { _snr, _wpm, _confidence, timingWasLocked };
+            return { _snr, _wpm, _confidence, timingWasLocked, frontEnd->getInputSnrDb() };
         }
 
         const float* diagnostic(int& countOut) const override {

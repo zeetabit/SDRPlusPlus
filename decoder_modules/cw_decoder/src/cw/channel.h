@@ -33,6 +33,7 @@ namespace cw {
         float snr = 0;
         float wpm = 0;
         float confidence = 0;
+        float inputSnr = 0;   // pre-BPF, input-referred SNR (docs §32/§33)
         TextBuffer text;
         ConversationTracker conversation;
 
@@ -77,6 +78,7 @@ namespace cw {
             snr = st.snr;
             wpm = st.wpm;
             confidence = st.confidence;
+            inputSnr = st.inputSnr;
         }
 
 

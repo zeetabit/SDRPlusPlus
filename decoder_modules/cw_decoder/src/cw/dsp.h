@@ -6,6 +6,8 @@
 #include <volk/volk.h>
 #include <cmath>
 #include <cstring>
+#include <vector>
+#include <algorithm>
 
 namespace cw {
 
@@ -56,6 +58,23 @@ namespace cw {
             decimBuf = dsp::buffer::alloc<dsp::complex_t>(65536);
             filteredBuf = dsp::buffer::alloc<dsp::complex_t>(65536);
             magBuf = dsp::buffer::alloc<float>(65536);
+
+            // Wide-band (pre-BPF) SNR estimator (docs §32/§33). Measures noise on
+            // the DECIMATED signal before the narrow BPF, so it reflects input
+            // conditions rather than the post-filter residual the detector's
+            // getSNR sees. 25th-percentile noise floor over ~2 s, peak with a
+            // 0.5 s decay — the same estimators the detector uses, one stage
+            // earlier where the full-band noise is still present.
+            wideDecay = 1.0f - expf(-1.0f / (0.5f * _internalRate));
+            wideNoiseSub = std::max(1, (int)(_internalRate / 125.0f));
+            wideNoiseSize = 250;
+            wideNoiseWin.assign(wideNoiseSize, 0.0f);
+            wideNoiseSorted.resize(wideNoiseSize);
+            wideNoisePos = 0;
+            wideNoiseCount = 0;
+            wideSubCtr = 0;
+            wideNoiseFloor = 1e-6f;
+            wideSignalPeak = 1e-6f;
         }
 
         ~EnvelopeDSP() {
@@ -97,6 +116,31 @@ namespace cw {
                 decimBuf[i].im = sum.im * scale;
             }
 
+            // 2b. Wide-band (pre-BPF) SNR estimate for the adaptive-filter
+            //     trigger (§33). Runs on the decimated signal before the narrow
+            //     BPF, so noiseFloor tracks the FULL decimated-band noise — the
+            //     input-referred estimate the post-BPF getSNR is not (§32).
+            for (int i = 0; i < decimCount; i++) {
+                const float m = sqrtf(decimBuf[i].re * decimBuf[i].re + decimBuf[i].im * decimBuf[i].im);
+                if (m > wideSignalPeak) { wideSignalPeak = m; }
+                else { wideSignalPeak += (m - wideSignalPeak) * wideDecay; }
+                if (++wideSubCtr >= wideNoiseSub) {
+                    wideSubCtr = 0;
+                    wideNoiseWin[wideNoisePos] = m;
+                    wideNoisePos = (wideNoisePos + 1) % wideNoiseSize;
+                    if (wideNoiseCount < wideNoiseSize) { wideNoiseCount++; }
+                    if (wideNoiseCount >= 10) {
+                        const int n = wideNoiseCount;
+                        wideNoiseSorted.resize(n);
+                        memcpy(wideNoiseSorted.data(), wideNoiseWin.data(), n * sizeof(float));
+                        const int idx = n / 4;
+                        std::nth_element(wideNoiseSorted.begin(), wideNoiseSorted.begin() + idx,
+                                         wideNoiseSorted.begin() + n);
+                        wideNoiseFloor = std::max(wideNoiseSorted[idx], 1e-9f);
+                    }
+                }
+            }
+
             // 3. Narrow bandpass FIR (complex)
             memcpy(bpfBufStart, decimBuf, decimCount * sizeof(dsp::complex_t));
             for (int i = 0; i < decimCount; i++) {
@@ -133,16 +177,48 @@ namespace cw {
         // pre-lock events are already captured. Only the BPF changes; the xlator,
         // decimator and smoothing LPF keep their state.
         void setBandwidth(float bpfCutoff, float bpfTrans) {
+            // Preserve the recent input history across the rebuild instead of
+            // zeroing it (docs §33). A hard clear injects a filter-length dropout;
+            // on a near-clean profile that still triggers narrowing (e.g. QRM,
+            // where a narrowband interferer reads as noise) that dropout is a
+            // spurious character. The delay line holds recent decimated input
+            // samples, which stay valid across a tap change — carry the newest
+            // min(old, new) of them into the tail of the new history.
+            std::vector<dsp::complex_t> hist;
+            if (bpfBuffer && bpfBufSize > 0) {
+                hist.assign(bpfBuffer, bpfBuffer + bpfBufSize);   // oldest → newest
+            }
             if (bpfTaps.taps) { dsp::taps::free(bpfTaps); }
             if (bpfBuffer) { dsp::buffer::free(bpfBuffer); }
             bpfTaps = dsp::taps::lowPass(bpfCutoff, bpfTrans, _internalRate);
             bpfBufSize = bpfTaps.size - 1;
             bpfBuffer = dsp::buffer::alloc<dsp::complex_t>(bpfBufSize + 65536);
             dsp::buffer::clear(bpfBuffer, bpfBufSize);
+            const int keep = std::min((int)hist.size(), bpfBufSize);
+            if (keep > 0) {
+                memcpy(&bpfBuffer[bpfBufSize - keep], &hist[hist.size() - keep],
+                       keep * sizeof(dsp::complex_t));
+            }
             bpfBufStart = &bpfBuffer[bpfBufSize];
         }
 
         float getToneFreq() const { return _toneFreq; }
+
+        // Input-referred SNR (dB), measured before the narrow BPF (docs §32/§33).
+        // Unlike the detector's getSNR (post-BPF, reads high on real audio because
+        // the filter already removed the noise), this tracks the full decimated-
+        // band noise, so it transfers across signal type and is the correct
+        // trigger for the adaptive filter.
+        float getInputSnrDb() const {
+            if (wideNoiseFloor < 1e-9f) { return 99.0f; }
+            return 10.0f * log10f(wideSignalPeak / wideNoiseFloor);
+        }
+
+        // The wide noise window (~2 s) must fill before getInputSnrDb is
+        // trustworthy: read at timing lock (~1.7 s) it is a huge transient
+        // (floor still near its initial value), which is why the retune must wait
+        // for this, not just for lock (docs §33).
+        bool inputSnrReady() const { return wideNoiseCount >= wideNoiseSize; }
 
     private:
         float _sampleRate = 8000;
@@ -171,6 +247,13 @@ namespace cw {
         dsp::complex_t* decimBuf = nullptr;
         dsp::complex_t* filteredBuf = nullptr;
         float* magBuf = nullptr;
+
+        // Wide-band (pre-BPF) SNR estimator (§32/§33)
+        float wideDecay = 0.002f;
+        float wideNoiseFloor = 1e-6f, wideSignalPeak = 1e-6f;
+        std::vector<float> wideNoiseWin, wideNoiseSorted;
+        int wideNoiseSub = 8, wideNoiseSize = 250;
+        int wideNoisePos = 0, wideNoiseCount = 0, wideSubCtr = 0;
     };
 
 }

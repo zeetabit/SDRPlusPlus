@@ -32,6 +32,8 @@ namespace cw {
             return dsp.process(count, in, out);
         }
         void setBandwidth(float cutoff, float trans) override { dsp.setBandwidth(cutoff, trans); }
+        float getInputSnrDb() const override { return dsp.getInputSnrDb(); }
+        bool inputSnrReady() const override { return dsp.inputSnrReady(); }
         const char* name() const override { return "envelope"; }
 
     private:

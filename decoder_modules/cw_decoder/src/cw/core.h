@@ -38,6 +38,7 @@ namespace cw {
         float wpm        = 0;
         float confidence = 0;
         bool  locked     = false;
+        float inputSnr   = 0;   // pre-BPF, input-referred SNR (docs §32/§33)
     };
 
     // Where decoded characters go.
@@ -92,6 +93,13 @@ namespace cw {
         // for front ends without a settable filter, so a fixed-geometry core is
         // unaffected.
         virtual void setBandwidth(float cutoff, float trans) { (void)cutoff; (void)trans; }
+        // Optional: input-referred SNR (dB), measured before the narrow filter
+        // (docs §32/§33) — the trigger for adaptive bandwidth. Default 99 (very
+        // high ⇒ never narrow) for front ends without the estimator.
+        virtual float getInputSnrDb() const { return 99.0f; }
+        // Whether getInputSnrDb has converged (its noise window has filled).
+        // Default true so cores without the estimator are unaffected.
+        virtual bool inputSnrReady() const { return true; }
     };
 
     // Stage 2: envelope → key up/down events.
