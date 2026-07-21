@@ -550,6 +550,18 @@ namespace cw_test {
             p.noiseAmp = f.amp;
             v.push_back({f.name, MSG_FULL(), p});
         }
+        // Weak hand-keyed: jitter 0.15 AND heavy noise. A jitter-only regime gate
+        // (§48) would pick log here (jittered) but log loses under heavy noise
+        // (§46b), so these gate the SNR condition — jitter-alone must not pass.
+        struct WeakHk { float dit; float amp; const char* name; };
+        const WeakHk weak[] = {
+            {60.0f, 1.5f, "hk20-n1.5"}, {48.0f, 1.5f, "hk25-n1.5"}, {40.0f, 1.5f, "hk30-n1.5"},
+        };
+        for (const auto& w : weak) {
+            SignalParams p = profileHandKeyed(w.dit);
+            p.noiseAmp = w.amp;
+            v.push_back({w.name, MSG_FULL(), p});
+        }
         return v;
     }
 

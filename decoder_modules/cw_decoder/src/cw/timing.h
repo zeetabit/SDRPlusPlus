@@ -28,6 +28,10 @@ namespace cw {
         TIMING_KALMAN_V2S,  // V2 with the confidence gate applied only below a WPM
                             // threshold (docs §41): keeps V2's slow/moderate wins,
                             // reverts to V1 learning at fast CW where V2 regresses (§40)
+        TIMING_SELECT,      // §48 regime selector: runs kalman2s + log, routes output to
+                            // log on jittered good-SNR signals (hand-keyed, where log wins
+                            // §46) and to kalman2s otherwise. Gated on jitter AND SNR so a
+                            // weak hand-keyed signal stays on kalman2s (log loses there §46b)
         TIMING_LOG,         // log-duration Kalman: multiplicative jitter model (Mills 1977)
         TIMING_LOG_ROBUST,  // + Huberised state update: outliers teach R but barely move x
         TIMING_LOG_GUARDED, // + hard x-freeze beyond guardK sigma; R still learns full.
@@ -662,16 +666,32 @@ namespace cw {
         void init(float sampleRate, TimingStrategy strategy = TIMING_KALMAN) {
             _sampleRate = sampleRate;
             _strategy = strategy;
-            kalman.setVariant((strategy == TIMING_KALMAN_V2 || strategy == TIMING_KALMAN_V2S)
-                              ? KALMAN_V2 : KALMAN_V1);
+            // §48: TIMING_SELECT routes between a kalman2s (V2 + speed gate) and a
+            // log model; both are configured and fed so the non-selected one stays
+            // warm for an instant switch.
+            const bool v2s = (strategy == TIMING_KALMAN_V2S || strategy == TIMING_SELECT);
+            kalman.setVariant((strategy == TIMING_KALMAN_V2 || v2s) ? KALMAN_V2 : KALMAN_V1);
             kalman.setGuardDah(strategy == TIMING_KALMAN_GUARD);
-            kalman.setSpeedGateWpm(strategy == TIMING_KALMAN_V2S ? defaultSpeedGateWpm : 0.0f);
+            kalman.setSpeedGateWpm(v2s ? defaultSpeedGateWpm : 0.0f);
             logTiming.setRobust(strategy == TIMING_LOG_ROBUST);
             logTiming.setGuarded(strategy == TIMING_LOG_GUARDED);
             reset();
         }
 
+        void setSnr(float s) { _snr = s; }
+
         TimingEvent classifyOn(float durationMs) {
+            // §48: SELECT feeds BOTH models (keeping the idle one warm) and routes
+            // the output by the latched jitter+SNR gate.
+            if (_strategy == TIMING_SELECT) {
+                TimingEvent kEvt = kalman.classifyOn(durationMs);
+                TimingEvent lEvt = logTiming.classifyOn(durationMs);
+                elementDurations.push_back(durationMs);
+                if ((int)elementDurations.size() > 30) elementDurations.erase(elementDurations.begin());
+                updateSelectGate();
+                return selectUseLog ? lEvt : kEvt;
+            }
+
             TimingEvent result;
             switch (_strategy) {
                 case TIMING_KMEANS:  result = kmeans.classifyOn(durationMs); break;
@@ -691,6 +711,26 @@ namespace cw {
             if ((int)elementDurations.size() > 30) elementDurations.erase(elementDurations.begin());
             return result;
         }
+
+        // §48: route the gap classifier and all queries to the selected model.
+        // classifyOff/getDitDuration read the selected model's dit, so a SELECT
+        // signal decodes coherently through one model at a time.
+    private:
+        void updateSelectGate() {
+            const float dit = kalman.getDitDuration();
+            if (dit < 1.0f) { return; }
+            float sum = 0, sumSq = 0; int n = 0;
+            for (float d : elementDurations) {
+                if (d > 0.5f * dit && d < 1.5f * dit) { sum += d; sumSq += d * d; n++; }
+            }
+            if (n < 6) { return; }                    // too few dits to judge jitter
+            const float mean = sum / n;
+            const float var  = std::max(0.0f, sumSq / n - mean * mean);
+            const float cv   = mean > 1.0f ? sqrtf(var) / mean : 0.0f;
+            if (!selectUseLog && cv > SELECT_CV_HI && _snr > SELECT_SNR_HI) { selectUseLog = true; }
+            else if (selectUseLog && (cv < SELECT_CV_LO || _snr < SELECT_SNR_LO)) { selectUseLog = false; }
+        }
+    public:
 
         TimingEvent classifyOff(float durationMs) {
             TimingEvent evt;
@@ -771,6 +811,7 @@ namespace cw {
                 case TIMING_KMEANS:  return kmeans.getWPM();
                 case TIMING_MEDIAN:  return median.getWPM();
                 case TIMING_BIMODAL: return bimodal.getWPM();
+                case TIMING_SELECT:  return selectUseLog ? logTiming.getWPM() : kalman.getWPM();
                 case TIMING_KALMAN:
                 case TIMING_KALMAN_V2S:
                 case TIMING_KALMAN_GUARD:
@@ -787,6 +828,7 @@ namespace cw {
                 case TIMING_KMEANS:  return kmeans.getDitDuration();
                 case TIMING_MEDIAN:  return median.getDitDuration();
                 case TIMING_BIMODAL: return bimodal.getDitDuration();
+                case TIMING_SELECT:  return selectUseLog ? logTiming.getDitDuration() : kalman.getDitDuration();
                 case TIMING_KALMAN:
                 case TIMING_KALMAN_V2S:
                 case TIMING_KALMAN_GUARD:
@@ -803,6 +845,7 @@ namespace cw {
                 case TIMING_KMEANS:  return kmeans.isLocked();
                 case TIMING_MEDIAN:  return median.isLocked();
                 case TIMING_BIMODAL: return bimodal.isLocked();
+                case TIMING_SELECT:  return selectUseLog ? logTiming.isLocked() : kalman.isLocked();
                 case TIMING_KALMAN:
                 case TIMING_KALMAN_V2S:
                 case TIMING_KALMAN_GUARD:
@@ -822,6 +865,7 @@ namespace cw {
             logTiming.reset();
             elementDurations.clear();
             gapDurations.clear();
+            selectUseLog = false;   // §48: start on kalman2s until a jittered good-SNR run is seen
         }
 
         TimingStrategy getStrategy() const { return _strategy; }
@@ -1007,6 +1051,17 @@ namespace cw {
         int  minGapSamples = 10;              // relaxed only for retro replay (docs §16.4)
         float _ditOverride = 0.0f;            // test-only confound probe (docs §38)
         float defaultSpeedGateWpm = 28.0f;    // §41 crossover centred between the 25wpm/30wpm profiles (§40)
+
+        // §48 regime selector state. The gate routes to log on a JITTERED
+        // (hand-keyed) signal at GOOD SNR — where log wins (§46) — and to
+        // kalman2s otherwise. Both conditions are required: a weak hand-keyed
+        // signal is jittered but log loses it (§46b), so low SNR forces kalman2s.
+        float _snr = 20.0f;                   // pushed each block by StagedCore::setSnr
+        bool  selectUseLog = false;           // latched gate (hysteresis)
+        static constexpr float SELECT_CV_HI  = 0.12f;  // dit-CV enter-log (hand-keyed jitter ~0.15)
+        static constexpr float SELECT_CV_LO  = 0.09f;  // dit-CV leave-log (machine at good SNR ~0.05-0.08)
+        static constexpr float SELECT_SNR_HI = 8.0f;   // getSNR enter-log (hand-keyed ~11+, noise2.0 ~4.5)
+        static constexpr float SELECT_SNR_LO = 6.0f;   // getSNR leave-log
     };
 
 }

@@ -136,6 +136,142 @@ TEST_CASE("bimodal hand-keyed win vs noise (§46)", "[cw][.][bimodal-noise]") {
     printf("\nIf bimodal(*) only at low noiseAmp -> selection signal is 'clean hand-keyed'.\n");
 }
 
+// §48 — adjudicate the selector vs the default at the pre-committed n=384 (§45).
+TEST_CASE("select adjudication n=384 (§48)", "[cw][.][select-adj]") {
+    adjudicateVsLegacy("select", 384);
+}
+
+// §48 — n=768 escalation on the select HARM cells (§42 protocol): which clear
+// (favourable mean + shrinking stderr) vs which are genuine garbage-cell bounds.
+TEST_CASE("select HARM escalation n=768 (§48)", "[cw][.][select-esc]") {
+    constexpr int SEEDS = 768;
+    constexpr float TOL = 0.005f;
+    struct Prof { const char* name; SignalParams params; };
+    auto n = [](float dit, float amp){ auto p = profileClean(dit); p.noiseAmp = amp; return p; };
+    auto hk = [](float dit, float amp){ auto p = profileHandKeyed(dit); p.noiseAmp = amp; return p; };
+    const Prof profs[] = {
+        {"noise4.0",       n(80.0f,4.0f)}, {"noise4.0-25wpm", n(48.0f,4.0f)},
+        {"noise4.0-30wpm", n(40.0f,4.0f)}, {"noise3.0-25wpm", n(48.0f,3.0f)},
+        {"noise3.0-30wpm", n(40.0f,3.0f)}, {"hk25-n1.5",      hk(48.0f,1.5f)},
+    };
+    printf("\n=== §48 select HARM cells at n=%d ===\n", SEEDS);
+    printf("%-16s %9s %9s %9s %8s %10s  %s\n",
+           "profile", "legacy", "select", "mean", "t", "bound", "verdict");
+    for (const auto& p : profs) {
+        auto a = runCell("legacy",        p.name, MSG_FULL(), p.params, SEEDS);
+        auto b = runCell("legacy+select", p.name, MSG_FULL(), p.params, SEEDS);
+        auto d = comparePaired(a.cerSamples, b.cerSamples);
+        printf("%-16s %9.4f %9.4f %+9.4f %8.2f %+10.4f  %s\n",
+               p.name, a.cerMean, b.cerMean, d.meanDelta, d.t, d.worstCaseDelta(),
+               d.harmful(TOL) ? "HARM" : "clean");
+    }
+}
+
+// §48 — is the selector's gate-acquisition overhead a real SHORT-message
+// regression? The n=384 adjudication used MSG_FULL; the failing benchmark gates
+// use MSG_CQ (short). Measure select vs legacy vs kalman2s on MSG_CQ, multi-seed.
+TEST_CASE("select on short messages (§48)", "[cw][.][select-short]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; };
+    const Prof profs[] = {
+        {"moderate-1.5", profileModerateNoise(80.0f)},
+        {"handkeyed-20", profileHandKeyed(60.0f)},
+        {"handkeyed-25", profileHandKeyed(48.0f)},
+    };
+    printf("\n=== §48 MSG_CQ (short) multi-seed, n=%d ===\n", SEEDS);
+    printf("%-14s %9s %9s %9s   %10s %6s\n", "profile", "legacy", "kal2s", "select", "sel-leg", "t");
+    for (const auto& p : profs) {
+        auto l = runCell("legacy",         p.name, MSG_CQ(), p.params, SEEDS);
+        auto k = runCell("legacy+kalman2s",p.name, MSG_CQ(), p.params, SEEDS);
+        auto s = runCell("legacy+select",  p.name, MSG_CQ(), p.params, SEEDS);
+        auto d = comparePaired(l.cerSamples, s.cerSamples);
+        printf("%-14s %9.4f %9.4f %9.4f   %+10.4f %6.2f\n",
+               p.name, l.cerMean, k.cerMean, s.cerMean, d.meanDelta, d.t);
+    }
+    printf("\nIf sel-leg >0 significantly on MSG_CQ, the gate hurts short messages.\n");
+}
+
+// §48 — attribute the moderate-noise/contest ratchet failures: inherited from
+// kalman2s (V2 timing) or added by the selector mechanism? These profiles are
+// NOT in standardProfiles, so the [promotion] gate missed them.
+TEST_CASE("select ratchet attribution (§48)", "[cw][.][select-ratchet]") {
+    constexpr int SEEDS = 24;
+    printf("\n=== §48 moderate-noise & contest, n=%d (ratchet: 0.0 / 0.008) ===\n", SEEDS);
+    struct C { const char* name; const char* msg; SignalParams p; float ratchet; };
+    const C cases[] = {
+        {"moderate-noise", MSG_FULL(),  profileModerateNoise(80.0f), 0.0f},
+        {"contest-20wpm",  MSG_MIXED(), profileContest(60.0f),       0.008f},
+    };
+    for (const auto& c : cases) {
+        printf("%-16s ratchet=%.3f\n", c.name, c.ratchet);
+        for (const char* core : {"legacy", "legacy+kalman2s", "legacy+log", "legacy+select"}) {
+            auto s = runCell(core, c.name, c.msg, c.p, SEEDS);
+            printf("    %-18s mean=%.4f p95=%.4f worst=%.4f\n",
+                   core, s.cerMean, s.cerP95, s.cerP95);
+        }
+    }
+}
+
+// §48 — verify legacy+select routes correctly: it should track log on good-SNR
+// hand-keyed (where log wins) and kalman2s on noise (never log's catastrophic
+// noise CER) and on weak hand-keyed (§46b). n=96 (routing is a large effect).
+TEST_CASE("select routing verification (§48)", "[cw][.][select-verify]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; const char* want; };
+    SignalParams n3 = profileClean(80.0f); n3.noiseAmp = 3.0f;
+    SignalParams hk25n15 = profileHandKeyed(48.0f); hk25n15.noiseAmp = 1.5f;
+    const Prof profs[] = {
+        {"handkeyed-25", profileHandKeyed(48.0f),  "log"},      // good SNR jittered -> log
+        {"handkeyed-40", profileHandKeyed(30.0f),  "log"},
+        {"noise3.0",     n3,                        "kalman2s"}, // heavy noise -> kalman2s
+        {"noise3.0-30wpm",[]{auto p=profileClean(40.0f);p.noiseAmp=3.0f;return p;}(), "kalman2s"},
+        {"hk25-n1.5",    hk25n15,                   "kalman2s"}, // weak hand-keyed -> kalman2s
+        {"noise2.0",     [] { auto p = profileClean(80.0f); p.noiseAmp = 2.0f; return p; }(), "kalman2s"},
+    };
+
+    printf("\n=== §48 select routing (CER, n=%d) — select should match its target ===\n", SEEDS);
+    printf("%-16s %8s %8s %8s %8s  %s\n", "profile", "kal2s", "log", "select", "want", "ok?");
+    for (const auto& p : profs) {
+        auto k = runCell("legacy+kalman2s", p.name, MSG_FULL(), p.params, SEEDS).cerMean;
+        auto l = runCell("legacy+log",      p.name, MSG_FULL(), p.params, SEEDS).cerMean;
+        auto s = runCell("legacy+select",   p.name, MSG_FULL(), p.params, SEEDS).cerMean;
+        const float target = std::string(p.want) == "log" ? l : k;
+        const float other  = std::string(p.want) == "log" ? k : l;
+        const bool ok = std::fabs(s - target) < std::fabs(s - other) + 1e-6f;
+        printf("%-16s %8.4f %8.4f %8.4f %8s  %s\n", p.name, k, l, s, p.want, ok ? "OK" : "MISROUTED");
+        CHECK(s <= std::max(k, l) + 0.02f);   // select never worse than the worse of its two options
+    }
+}
+
+// §47 — the conservative gate's CEILING before building switch machinery. A
+// perfect regime gate picks the best core per profile (= per regime). Its win
+// over kalman2s upper-bounds any real gate; a real jitter+SNR gate captures a
+// fraction. If the ceiling is small or the wins scatter into cells a gate can't
+// identify, the switch isn't worth it. n=192; full standard gate.
+TEST_CASE("conservative gate ceiling (§47)", "[cw][.][gate-ceiling]") {
+    constexpr int SEEDS = 192;
+    const auto profiles = standardProfiles();
+
+    printf("\n=== §47 perfect-regime-gate ceiling vs kalman2s (n=%d) ===\n", SEEDS);
+    printf("gate2 = min(kal2s,log) [conservative]; gate3 = min(kal2s,log,bimodal)\n");
+    printf("%-16s %8s %8s %8s   %9s %9s\n",
+           "profile", "kal2s", "log", "bimodal", "gate2HR", "gate3HR");
+    float sum2 = 0, sum3 = 0;
+    for (const auto& pr : profiles) {
+        auto k = runCell("legacy+kalman2s", pr.name, pr.message, pr.params, SEEDS).cerMean;
+        auto l = runCell("legacy+log",      pr.name, pr.message, pr.params, SEEDS).cerMean;
+        auto b = runCell("legacy+bimodal",  pr.name, pr.message, pr.params, SEEDS).cerMean;
+        const float g2 = k - std::min(k, l);
+        const float g3 = k - std::min({k, l, b});
+        sum2 += g2; sum3 += g3;
+        printf("%-16s %8.4f %8.4f %8.4f   %+9.4f %+9.4f\n", pr.name, k, l, b, g2, g3);
+    }
+    printf("  %-14s %8s %8s %8s   %+9.4f %+9.4f  (summed CER capturable)\n",
+           "TOTAL", "", "", "", sum2, sum3);
+    printf("\nA real jitter+SNR gate captures a FRACTION of gate2HR, only on cells it\n");
+    printf("can identify at runtime. Small/scattered ceiling => switch not worth it.\n");
+}
+
 // §46b — the load-bearing check for jitter-gated log: does jitter separate the
 // regime where log WINS (hand-keyed) from where it REGRESSES (machine fast-CW
 // under noise, §25)? Same speed and noise, jitter 0.0 (machine) vs 0.15 (hand).

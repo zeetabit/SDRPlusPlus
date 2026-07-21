@@ -124,6 +124,7 @@ namespace cw {
 
             auto events = detector->process(mfBuf, envCount);
             _snr = detector->getSNR();
+            timing->setSnr(_snr);   // §48: SNR-gated regime selection (no-op for other timings)
             // B: smoothed getSNR, started only AFTER the estimate has converged.
             // The §36 EMA failed because it averaged from t=0 through the
             // acquisition transient; gating the start on inputSnrReady keeps it

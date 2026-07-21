@@ -172,6 +172,7 @@ namespace cw {
                 case TIMING_KALMAN_V2: return "kalman2";
                 case TIMING_KALMAN_GUARD: return "ditguard";
                 case TIMING_KALMAN_V2S: return "kalman2s";
+                case TIMING_SELECT:     return "select";
                 case TIMING_LOG:        return "log";
                 case TIMING_LOG_ROBUST: return "logrobust";
                 case TIMING_LOG_GUARDED: return "logguard";
@@ -187,6 +188,8 @@ namespace cw {
             t.setMinGapSamples(on ? 4 : 10);
             t.setGapBootstrap(on);
         }
+
+        void setSnr(float s) override { t.setSnr(s); }
 
     private:
         AdaptiveTiming t;

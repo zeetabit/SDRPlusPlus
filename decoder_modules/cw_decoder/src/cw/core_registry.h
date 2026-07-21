@@ -94,6 +94,13 @@ namespace cw {
             {"legacy+kalman2s", "Legacy pipeline, speed-gated V2 Kalman timing",
              []{ return detail::makeStaged(TIMING_KALMAN_V2S); }},
 
+            // §48: regime-adaptive timing selector. Routes to log on jittered
+            // good-SNR signals (hand-keyed, where log wins §46) and to kalman2s
+            // otherwise, gated on jitter AND getSNR so weak hand-keyed stays on
+            // kalman2s (§46b). Targets the +0.17 good-SNR hand-keyed ceiling (§47).
+            {"legacy+select", "Legacy pipeline, jitter+SNR timing selector (log/kalman2s)",
+             []{ return detail::makeStaged(TIMING_SELECT); }},
+
             // ── Log-duration timing (Stage 4). Multiplicative jitter model:
             //    dit/dah differ by a constant ln(3) offset and share one
             //    measurement variance, so the linear model's dah-gain error
@@ -251,5 +258,16 @@ namespace cw {
     // evidence lag being too large a fraction of a short fast element. The
     // detector's big wins (hand-keyed, worstcase, the runaway fix) stand, so it
     // is kept as a variant while a speed-adaptive fix is developed (§26).
+    //
+    // legacy+select: promoted then REVERTED 2026-07-21 (§48). It wins the paired
+    // n=384 [promotion] gate (13 better, 0 significant worse) but the FULL suite
+    // exposed two absolute-ratchet failures on profiles [promotion] does not
+    // cover: moderate-noise (0.0 → 0.0012) and contest (0.008 → 0.0146). The
+    // moderate-noise 0.0 ratchet is unpassable by select — legacy (V1) decodes it
+    // exactly, and both kalman2s and log introduce a tiny error, so any routing
+    // regresses it. Contest is the selector's own mode-instability (0.0146 is
+    // worse than BOTH kalman2s 0.0125 and log 0.0042 — the gate flips mid-message
+    // on mixed content). Per the don't-raise-a-ratchet rule, promotion is blocked.
+    // Kept as the strongest variant; legacy remains the default.
     inline constexpr const char* DEFAULT_CORE = "legacy";
 }

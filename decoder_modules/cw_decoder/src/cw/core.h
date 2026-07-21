@@ -139,6 +139,11 @@ namespace cw {
         // Retro replay sets it because it holds the complete pre-lock gap set and
         // will never receive more, so the live sample floor does not apply.
         virtual void setRetroMode(bool) {}
+
+        // Opt-in, defaulted to a no-op: the post-BPF getSNR, pushed each block so
+        // a regime-selecting timing (§48) can gate its strategy on SNR. Most
+        // timings ignore it.
+        virtual void setSnr(float) {}
     };
 
     // Stage 4: element sequence → character.

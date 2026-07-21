@@ -4264,3 +4264,87 @@ that clean regime and never approaches the fuzzy heavy-noise boundary. Modest,
 low-risk (~0.02–0.05 CER on good-SNR hand-keyed); a broad selector is not robustly
 gateable. Decision point: build the conservative gate, or stop — kalman2s already
 holds the robust usable-regime win.
+
+## 47. Conservative gate ceiling — the win is real and low-risk; §46b measured the wrong regime (2026-07-21)
+
+`[gate-ceiling]`, n=192, perfect-regime gate (picks best core per profile) vs
+kalman2s, over the full standard gate:
+
+| profile | kal2s | log | bimodal | gate2 HR (log) | gate3 HR (+bimodal) |
+|---|---|---|---|---|---|
+| handkeyed-15 | 0.0291 | 0.0244 | 0.0414 | +0.0048 | +0.0048 |
+| handkeyed-20 | 0.0505 | 0.0354 | 0.0381 | +0.0150 | +0.0150 |
+| handkeyed-25 | 0.1270 | 0.0935 | 0.0557 | +0.0335 | +0.0713 |
+| handkeyed-30 | 0.1308 | 0.1255 | 0.0796 | +0.0053 | +0.0512 |
+| handkeyed-35 | 0.1277 | 0.1180 | 0.0780 | +0.0098 | +0.0497 |
+| handkeyed-40 | 0.1602 | 0.0789 | 0.0642 | +0.0813 | +0.0960 |
+| worstcase | 0.3793 | 0.3616 | 0.6071 | +0.0177 | +0.0177 |
+| noise2.0 | 0.0379 | 0.0356 | 0.1106 | +0.0023 | +0.0023 |
+| noise3.0 / 4.0 / all fast×heavy | — | worse | worse | **0** | **0** |
+| **TOTAL** | | | | **+0.1715** | **+0.3103** |
+
+**Two findings that reverse §46b's pessimism:**
+
+1. **The entire ceiling is on good-SNR hand-keyed** (the standard hk profiles are
+   noiseAmp 0.3 = +11.7 dB), where jitter cleanly identifies the regime. §46b found
+   fuzzy jitter separation only at −2.3/−4.8 dB — cells that carry *zero* ceiling,
+   so their fuzziness is irrelevant.
+2. **Every noise/fast×heavy cell contributes zero ceiling** — log/bimodal are worse
+   there, so the perfect gate stays kalman2s. Gating errors on noise have no upside
+   to miss, and the good-SNR gate condition prevents the catastrophic mis-pick
+   (log at noise3.0 is 1.056 vs kalman2s 0.725 — the SNR condition is load-bearing).
+
+**gate2 (log-only): +0.17 CER capturable, low-risk** (log is only mildly worse on
+noise). **gate3 (+bimodal): +0.31 but risky** — bimodal collapses on noise
+(worstcase 0.607), so one mis-gate is costly. Recommend gate2 as the safe build.
+
+**Verdict: build the conservative gate** — jitter high AND getSNR comfortably
+positive → log timing, else kalman2s. Targets the good-SNR hand-keyed ceiling where
+gating is clean; the good-SNR condition confines log-selection away from the
+noise cells where it would hurt. Adjudicate at n=384 / n=768 escalation (§45).
+Key implementation risk: getSNR must reliably exclude heavy noise (the §32 post-BPF
+concern) — validate the gate never selects log on the noise3.0+ cells.
+
+## 48. The regime selector (`legacy+select`) — the campaign's strongest candidate (2026-07-21)
+
+**Built** (§47 said the ceiling was worth it). `TIMING_SELECT` runs a kalman2s
+(V2 + speed gate) and a log model in parallel, both fed every element, and routes
+the output by a latched gate: → log only when the dit-cluster CV is high (jittered,
+hand-keyed) AND getSNR is comfortably positive; → kalman2s otherwise. Both
+conditions are load-bearing — a weak hand-keyed signal is jittered but log loses it
+(§46b), so low SNR forces kalman2s. SNR is plumbed via `ITiming::setSnr` (no-op
+default), pushed each block by StagedCore. New gate cells added: hand-keyed × noise
+(hk20/25/30-n1.5), so a jitter-only gate cannot pass by gaming the coverage gap.
+
+**Routing verified** (`[select-verify]`): select tracks log on good-SNR hand-keyed
+(hk-25 0.098≈log 0.092, hk-40 0.088≈log 0.080) and kalman2s on noise (noise3.0
+0.709, NOT log's 1.096) and weak hand-keyed (hk25-n1.5 0.122=kalman2s, conservatively
+skipping log's 0.083 — non-inferiority over greed).
+
+**Adjudication (paired n=384 vs legacy, full gate incl. weak-hand-keyed):
+13 better, 0 WORSE, 12 ns, 6 harmful.**
+
+- All hand-keyed 15–40 BETTER (t −2 to −16): the win kalman2s could not get, now
+  captured via log routing (hk-15 −0.155, hk-25 −0.070, hk-40 −0.098).
+- worstcase −0.226 (t −30.8), noise2.0/3.0, qsb, noise2.0-25wpm, hk20/30-n1.5 all
+  BETTER — every kalman2s win retained, plus the hand-keyed regime.
+- **Zero significant regressions.** kalman2s had a significant noise3.0-25wpm WORSE
+  (t 2.33, §43); select has it ns. **Select strictly dominates kalman2s.**
+
+**n=768 escalation of the 6 HARM (§42 protocol):** noise4.0 and noise4.0-25wpm
+clear (better mean); 4 remain, all non-significant (t < 2): noise4.0-30wpm,
+noise3.0-25wpm, noise3.0-30wpm (garbage cells, CER 0.89–0.97, both decoders failed)
+and hk25-n1.5 (moderate-noise hand-keyed, +0.0047 ns — select is conservatively on
+kalman2s where log would have won). Means +0.0007 to +0.0075; none a real
+regression.
+
+**Verdict.** `legacy+select` is the campaign's strongest candidate: it delivers
+log's hand-keyed excellence AND kalman2s's noise robustness, adaptively, with **no
+significant regression anywhere** and broad large wins. Under the strict
+non-inferiority rule it is blocked by 4 ns bounds — 3 on garbage cells where the
+0.005 tolerance is arguably meaningless (both cores fail), 1 on moderate-noise
+hand-keyed. Promotion is a maintainer judgment on those 4 ns bounds, and a stronger
+case than kalman2s ever had (which carried a real significant regression). legacy
+remains default pending that decision; select ships as the strongest variant. The
+gate permanently gains the weak-hand-keyed cells. Byte-identical: legacy/kalman2
+unchanged; suite green (1665/225, serial verified).
