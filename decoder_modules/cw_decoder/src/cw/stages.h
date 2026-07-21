@@ -150,7 +150,12 @@ namespace cw {
     public:
         explicit AdaptiveTimingStage(TimingStrategy s = TIMING_KALMAN) : _strategy(s) {}
 
-        void init(float internalRate) override { t.init(internalRate, _strategy); }
+        void init(float internalRate) override {
+            t.init(internalRate, _strategy);
+            if (_speedGate >= 0.0f) { t.setSpeedGateWpm(_speedGate); }
+        }
+        // §41 sweep hook: override the strategy's default speed-gate threshold.
+        void setSpeedGateWpm(float w) { _speedGate = w; }
         void reset() override { t.reset(); }
         TimingEvent classifyOn(float ms) override { return t.classifyOn(ms); }
         TimingEvent classifyOff(float ms) override { return t.classifyOff(ms); }
@@ -165,6 +170,8 @@ namespace cw {
                 case TIMING_BIMODAL: return "bimodal";
                 case TIMING_KALMAN:    return "kalman";
                 case TIMING_KALMAN_V2: return "kalman2";
+                case TIMING_KALMAN_GUARD: return "ditguard";
+                case TIMING_KALMAN_V2S: return "kalman2s";
                 case TIMING_LOG:        return "log";
                 case TIMING_LOG_ROBUST: return "logrobust";
                 case TIMING_LOG_GUARDED: return "logguard";
@@ -184,6 +191,7 @@ namespace cw {
     private:
         AdaptiveTiming t;
         TimingStrategy _strategy;
+        float _speedGate = -1.0f;   // §41: <0 keeps the strategy default
     };
 
     // ── Stage 4: symbol decoder ─────────────────────────────────

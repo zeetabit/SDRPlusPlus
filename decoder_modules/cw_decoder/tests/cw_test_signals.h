@@ -534,11 +534,21 @@ namespace cw_test {
                          MSG_FULL(), p});
         }
         // Fast CW under noise: the noise axis above is all 15 WPM, which hid a
-        // detector regression at speed (§25). Both dit and noise vary here.
-        for (float dit : {48.0f, 40.0f}) {   // 25, 30 WPM
-            SignalParams p = profileClean(dit);
-            p.noiseAmp = 2.0f;
-            v.push_back({dit == 48.0f ? "noise2.0-25wpm" : "noise2.0-30wpm", MSG_FULL(), p});
+        // detector regression at speed (§25) AND a speed-switch regression at
+        // fast×heavy noise (§43) — the cells where this campaign keeps failing.
+        // The full 25/30 WPM × noise 2/3/4 grid is gated so no future candidate
+        // is adjudicated blind to that regime, even though 3.0/4.0 are garbage
+        // cells (CER > 0.9): a candidate that worsens them is misfiring.
+        struct FastCell { float dit; float amp; const char* name; };
+        const FastCell fast[] = {
+            {48.0f, 2.0f, "noise2.0-25wpm"}, {40.0f, 2.0f, "noise2.0-30wpm"},
+            {48.0f, 3.0f, "noise3.0-25wpm"}, {40.0f, 3.0f, "noise3.0-30wpm"},
+            {48.0f, 4.0f, "noise4.0-25wpm"}, {40.0f, 4.0f, "noise4.0-30wpm"},
+        };
+        for (const auto& f : fast) {
+            SignalParams p = profileClean(f.dit);
+            p.noiseAmp = f.amp;
+            v.push_back({f.name, MSG_FULL(), p});
         }
         return v;
     }

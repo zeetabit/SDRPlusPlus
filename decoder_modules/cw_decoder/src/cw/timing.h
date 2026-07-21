@@ -25,6 +25,9 @@ namespace cw {
         TIMING_KALMAN_GUARD,// V1 + asymmetric dah-absorption guard (docs §39): blocks the
                             // one-directional ditEst runaway §38b traced to V1 learning
                             // from noise-shortened dahs, without V2's blanket gate
+        TIMING_KALMAN_V2S,  // V2 with the confidence gate applied only below a WPM
+                            // threshold (docs §41): keeps V2's slow/moderate wins,
+                            // reverts to V1 learning at fast CW where V2 regresses (§40)
         TIMING_LOG,         // log-duration Kalman: multiplicative jitter model (Mills 1977)
         TIMING_LOG_ROBUST,  // + Huberised state update: outliers teach R but barely move x
         TIMING_LOG_GUARDED, // + hard x-freeze beyond guardK sigma; R still learns full.
@@ -430,6 +433,12 @@ namespace cw {
         // be a dit, in the one direction the runaway occurs.
         void setGuardDah(bool on) { guardDah = on; }
         void setGuardDahFactor(float f) { guardDahFactor = f; }
+        // §41 speed-gated V2. The confidence gate (§38b fix) wins at slow/moderate
+        // but regresses fast CW (§40): fast elements are noisier, so more updates
+        // are gated and the responsive V2 filter is starved. Applying the gate
+        // only below this WPM keeps the runaway fix where the runaway lives (slow)
+        // and reverts to V1's always-learn where it hurts (fast). 0 = always gate.
+        void setSpeedGateWpm(float wpm) { speedGateWpm = wpm; }
 
         TimingEvent classifyOn(float durationMs) {
             TimingEvent evt;
@@ -501,7 +510,34 @@ namespace cw {
             // tracks fast and a corrupted measurement moves it a long way.
             float totalLikPre = ditLik + dahLik;
             float confPre = (totalLikPre > 0) ? std::max(ditLik, dahLik) / totalLikPre : 0.5f;
-            bool learn = (variant == KALMAN_V1) || (confPre >= learnThreshold);
+            // §41: V2 is a package — the dah-gain fix (R/9) drives both the win
+            // and the fast-CW regression, and the confidence gate protects that
+            // responsiveness (§41 decomposition). Speed-gating only the gate did
+            // nothing (§41); the whole V1/V2 behaviour must switch on speed. Above
+            // speedGateWpm the estimator reverts to V1 (9R dah-gain + always-learn)
+            // where V2 regresses (§40); below it (and during the runaway, where
+            // inflated ditEst reads slow) it is full V2. speedGateWpm==0 keeps
+            // pure V2.
+            // §41: switch V1/V2 on a smoothed WPM with HYSTERESIS. A single EMA +
+            // one threshold cannot serve both sides — slow signals (qsb/qrm) need
+            // stability to stay in V2 through fade bursts, fast signals need to
+            // stay in V1 through downward jitter dips. A latched mode with a
+            // ±2 WPM dead-band gives bidirectional stability: leave V2 only above
+            // 29, return only below 25, so jitter/fade excursions inside the band
+            // never flip the mode. Seeded from the first estimate, so steady-state
+            // speed is right immediately. speedGateWpm==0 keeps pure V2.
+            const float curWpm    = ditEst > 1.0f ? 1200.0f / ditEst : 0.0f;
+            const float switchWpm = switchWpmEma > 0.0f ? switchWpmEma : curWpm;
+            // §43: latch-at-lock was refuted — under heavy noise the estimate is
+            // already corrupted by the lock point, so freezing traps 30wpm-n3/n4
+            // in V2 (3 regressions vs the per-element switch's 1). The per-element
+            // hysteresis switch below is the better form.
+            if (speedGateWpm > 0.0f) {
+                if (switchInV2 && switchWpm > speedGateWpm + switchHyst)      { switchInV2 = false; }
+                else if (!switchInV2 && switchWpm < speedGateWpm - switchHyst) { switchInV2 = true; }
+            }
+            const bool effV2 = (variant == KALMAN_V2) && (speedGateWpm <= 0.0f || switchInV2);
+            bool learn = !effV2 || (confPre >= learnThreshold);
 
             if (ditLik >= dahLik) {
                 evt.element = DIT;
@@ -536,7 +572,7 @@ namespace cw {
                 // than they should.
                 if (learn) {
                     float impliedDit = durationMs / 3.0f;
-                    float dahR = (variant == KALMAN_V1) ? (9.0f * R) : (R / 9.0f);
+                    float dahR = effV2 ? (R / 9.0f) : (9.0f * R);   // §41: V1 gain above speedGateWpm
                     float K = P / (P + dahR);
                     ditEst += K * (impliedDit - ditEst);
                     P *= (1.0f - K);
@@ -549,12 +585,21 @@ namespace cw {
             // R is a variance (ms^2), so the floor must be quadratic in dit.
             // The old floor was linear (ditEst * 0.05), which is dimensionally
             // meaningless and evaluated to ~4 ms^2 at every speed.
-            float rFloor = (variant == KALMAN_V1) ? std::max(ditEst * 0.05f, 4.0f)
-                                                  : std::max(0.05f * ditEst * 0.05f * ditEst, 4.0f);
+            // §41: rFloor is the third V1/V2 difference; switch it on effV2 too so
+            // above the threshold the estimator is exactly V1 (legacy), below it
+            // exactly V2. (effV2 already governs the learn gate and the dah gain.)
+            float rFloor = !effV2 ? std::max(ditEst * 0.05f, 4.0f)
+                                  : std::max(0.05f * ditEst * 0.05f * ditEst, 4.0f);
             R = std::clamp(R, rFloor, ditEst * ditEst * 0.1f);
 
             float totalLik = ditLik + dahLik;
             evt.confidence = (totalLik > 0) ? std::max(ditLik, dahLik) / totalLik : 0.5f;
+
+            // §41: smoothed WPM feeding the hysteresis latch above. Moderate
+            // 0.9 retention — the dead-band, not the EMA speed, provides the
+            // stability now, so this only needs to reject per-element spikes.
+            const float wpmNow = ditEst > 1.0f ? 1200.0f / ditEst : 0.0f;
+            switchWpmEma = switchWpmEma > 0.0f ? (0.9f * switchWpmEma + 0.1f * wpmNow) : wpmNow;
 
             return evt;
         }
@@ -569,6 +614,8 @@ namespace cw {
             P = 1600.0f;     // initial uncertainty (40ms std)
             R = 64.0f;       // measurement noise (8ms std)
             elementCount = 0;
+            switchWpmEma = 0.0f;
+            switchInV2 = true;
         }
 
     private:
@@ -582,8 +629,14 @@ namespace cw {
         static constexpr float learnThreshold = 0.60f;  // V2: skip state update below this classification confidence
         KalmanVariant variant = KALMAN_V1;
         static constexpr float processNoise = 0.001f;  // slow drift allowed
+        float switchWpmEma = 0.0f;                     // §41 smoothed WPM for the V1/V2 speed switch
+        bool  switchInV2 = true;                       // §41 latched mode (hysteresis), V2 by default
+        static constexpr float switchHyst = 1.5f;      // §41 dead-band half-width: band [26.5,29.5]
+                                                       // brackets the 25wpm (V2) and 30wpm (V1) profiles,
+                                                       // whose 15% jitter ranges otherwise overlap
         bool guardDah = false;                          // §39 asymmetric dah-guard
         float guardDahFactor = 1.5f;                    // DIT updates above this*ditEst are dah-absorption
+        float speedGateWpm = 0.0f;                      // §41: gate confidence only below this WPM (0 = always)
 
         float seedBuf[8] = {};
         float ditEst = 80.0f;
@@ -609,8 +662,10 @@ namespace cw {
         void init(float sampleRate, TimingStrategy strategy = TIMING_KALMAN) {
             _sampleRate = sampleRate;
             _strategy = strategy;
-            kalman.setVariant(strategy == TIMING_KALMAN_V2 ? KALMAN_V2 : KALMAN_V1);
+            kalman.setVariant((strategy == TIMING_KALMAN_V2 || strategy == TIMING_KALMAN_V2S)
+                              ? KALMAN_V2 : KALMAN_V1);
             kalman.setGuardDah(strategy == TIMING_KALMAN_GUARD);
+            kalman.setSpeedGateWpm(strategy == TIMING_KALMAN_V2S ? defaultSpeedGateWpm : 0.0f);
             logTiming.setRobust(strategy == TIMING_LOG_ROBUST);
             logTiming.setGuarded(strategy == TIMING_LOG_GUARDED);
             reset();
@@ -623,6 +678,7 @@ namespace cw {
                 case TIMING_MEDIAN:  result = median.classifyOn(durationMs); break;
                 case TIMING_BIMODAL: result = bimodal.classifyOn(durationMs); break;
                 case TIMING_KALMAN:
+                case TIMING_KALMAN_V2S:
                 case TIMING_KALMAN_GUARD:
                 case TIMING_KALMAN_V2: result = kalman.classifyOn(durationMs); break;
                 case TIMING_LOG:
@@ -716,6 +772,7 @@ namespace cw {
                 case TIMING_MEDIAN:  return median.getWPM();
                 case TIMING_BIMODAL: return bimodal.getWPM();
                 case TIMING_KALMAN:
+                case TIMING_KALMAN_V2S:
                 case TIMING_KALMAN_GUARD:
                 case TIMING_KALMAN_V2: return kalman.getWPM();
                 case TIMING_LOG:
@@ -731,6 +788,7 @@ namespace cw {
                 case TIMING_MEDIAN:  return median.getDitDuration();
                 case TIMING_BIMODAL: return bimodal.getDitDuration();
                 case TIMING_KALMAN:
+                case TIMING_KALMAN_V2S:
                 case TIMING_KALMAN_GUARD:
                 case TIMING_KALMAN_V2: return kalman.getDitDuration();
                 case TIMING_LOG:
@@ -746,6 +804,7 @@ namespace cw {
                 case TIMING_MEDIAN:  return median.isLocked();
                 case TIMING_BIMODAL: return bimodal.isLocked();
                 case TIMING_KALMAN:
+                case TIMING_KALMAN_V2S:
                 case TIMING_KALMAN_GUARD:
                 case TIMING_KALMAN_V2: return kalman.isLocked();
                 case TIMING_LOG:
@@ -785,6 +844,10 @@ namespace cw {
 
         // §39 dah-guard factor sweep (test-only). See KalmanTiming::guardDahFactor.
         void setKalmanGuardFactor(float f) { kalman.setGuardDahFactor(f); }
+
+        // §41 speed-gate threshold. Applied by init() for TIMING_KALMAN_V2S; a
+        // setter after init lets the probe sweep it. See KalmanTiming::speedGateWpm.
+        void setSpeedGateWpm(float wpm) { defaultSpeedGateWpm = wpm; kalman.setSpeedGateWpm(wpm); }
 
         // Gap-centre instrumentation (docs §16). estimateGapCenters silently
         // substitutes hardcoded ratios both when it has too little data and when
@@ -943,6 +1006,7 @@ namespace cw {
         bool gapBootstrap = false;            // config, not state: survives reset()
         int  minGapSamples = 10;              // relaxed only for retro replay (docs §16.4)
         float _ditOverride = 0.0f;            // test-only confound probe (docs §38)
+        float defaultSpeedGateWpm = 28.0f;    // §41 crossover centred between the 25wpm/30wpm profiles (§40)
     };
 
 }

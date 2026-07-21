@@ -87,6 +87,13 @@ namespace cw {
             {"legacy+ditguard", "Legacy pipeline + asymmetric dah-absorption guard",
              []{ return detail::makeStaged(TIMING_KALMAN_GUARD); }},
 
+            // §41: V2 with the confidence gate applied only below 27 WPM. Keeps
+            // V2's slow/moderate/worstcase wins, reverts to V1 learning at fast CW
+            // where §40 found V2 regresses (noise2.0-30wpm t=4.79). Tests whether
+            // the slow-vs-fast tradeoff separates on the orthogonal speed axis.
+            {"legacy+kalman2s", "Legacy pipeline, speed-gated V2 Kalman timing",
+             []{ return detail::makeStaged(TIMING_KALMAN_V2S); }},
+
             // ── Log-duration timing (Stage 4). Multiplicative jitter model:
             //    dit/dah differ by a constant ln(3) offset and share one
             //    measurement variance, so the linear model's dah-gain error

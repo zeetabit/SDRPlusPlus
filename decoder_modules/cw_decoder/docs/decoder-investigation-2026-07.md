@@ -3942,3 +3942,188 @@ both trade slow/moderate robustness for a fast-CW regression. kalman2 is therefo
 **not** the campaign's strongest promotion candidate held back by an intractable
 wall — it is a slow-vs-fast tradeoff of the same family already mapped and rejected
 for the LR detector. No decoder change; recheck only. `legacy` remains the default.
+
+## 41. Speed-switched V2 (`kalman2s`) — eliminates the fast-CW regression, two V2-intrinsic bounds remain (2026-07-21)
+
+**Idea** (§40). kalman2's dit-source fix wins slow/moderate but regresses fast CW,
+and speed is orthogonal to noise-severity — so apply V2 only below a WPM threshold,
+reverting to V1 (legacy) at fast CW where V2 regresses.
+
+**Three measured steps, each correcting the last:**
+
+1. **Speed-gate the confidence gate only** — no effect (noise2.0-30wpm stayed t≈4.7).
+2. **Decompose** (`[kalman2s-sweep]`, threshold sweep, g=1 disables the gate):
+   the fast-CW regression is flat across all gate values, so it is **not** the
+   confidence gate — it is V2's **dah-gain fix** (R/9). The gate and dah-gain are a
+   coupled package (the responsive dah-gain drives both the win and the fast
+   regression; the gate protects the responsiveness). Gating one alone is incoherent.
+3. **Speed-switch the whole V1/V2 behaviour** — dah-gain, confidence gate, and R
+   floor all flip together at the threshold. At g=1 the sweep collapses to legacy
+   exactly (pure V1), confirming the switch.
+
+**Stability engineering.** A raw instantaneous switch flip-flops: QRM spikes and QSB
+fade-recovery bursts transiently move the self-WPM across the threshold, and each
+flip lets V1 learn the spike V2 would gate. Fixed with (a) a smoothed switch-WPM
+(0.9 EMA) and (b) **hysteresis** — a latched mode with a ±1.5 WPM dead-band
+(band [26.5, 29.5], centred 28), so the 25wpm (V2) and 30wpm (V1) profiles — whose
+15% jitter ranges overlap — sit cleanly on opposite sides. A single EMA+threshold
+could not: slowing it to hold slow signals in V2 stuck fast signals in V2 on jitter
+dips; the dead-band gives bidirectional stability.
+
+**Result — paired n=96 vs legacy:**
+
+| | kalman2 | kalman2s |
+|---|---|---|
+| better | 8 | **9** |
+| **worse (significant)** | **2** | **0** |
+| harmful (non-inf bound) | 5 | 2 |
+
+The switch **eliminated both significant fast-CW regressions**: handkeyed-30
++0.0264 (t=2.57 WORSE) → −0.0147 (ns); noise2.0-30wpm +0.0315 (t=4.79 WORSE) →
+−0.0031 (ns). It kept every V2 win — worstcase −0.2245 (t=−16), noise2.0/3.0,
+qsb, and the entire hand-keyed range 15–40 now BETTER or ns.
+
+**The two residual HARM are V2-intrinsic, not switch-induced, and neither is a
+significant regression:**
+- **handkeyed-25**: −0.0301 (BETTER mean), t=−1.65, bound +0.0065 — **byte-identical
+  to pure kalman2**. 25 WPM sits below the switch band, so kalman2s *is* V2 there;
+  V2's hand-keyed wins and its 25 WPM tail are the same coin. Cannot be removed
+  without also removing the win.
+- **noise4.0**: +0.0018 (≈zero mean), t=0.10, bound +0.0373 — the −10 dB variance
+  wall. Near-zero mean, wide CI from intrinsic variance, not a regression (pure
+  kalman2 was worse here, +0.0268).
+
+**Conclusion.** The speed switch closes the fast-CW regression that §40 exposed —
+the one thing that was switch-addressable. What remains is V2's own character: a
+better-mean/wider-tail on 25 WPM hand-keyed, and the −10 dB variance wall. Neither
+is a proven regression; both fail only the conservative non-inferiority *bound*.
+`legacy+kalman2s` is thus **9-better / 0-worse**, the strongest dit-source candidate
+the campaign has produced — promotion is a maintainer judgment on two non-significant
+bounds (cf. the §35 better-mean/worse-tail call), not a fixable defect. `legacy`
+remains the default pending that decision. Byte-identical: legacy and kalman2
+unchanged; suite green (1664/225, serial verified).
+
+## 42. Widening the evidence — both kalman2s HARM were power, not harm (2026-07-21)
+
+**Question.** §41 left `kalman2s` blocked by two non-inferiority-bound HARM
+(handkeyed-25, noise4.0), both better/neutral mean. The bound is
+`meanDelta + 2·stderrDelta`; if the true mean is ≤0 and the HARM is only a wide CI
+from small-effect × high-variance, more seeds should clear it.
+
+**noise4.0 bound vs seed count** (`[noise4-power]`):
+
+| n | legacy | cand | mean | 2·stderr | bound | |
+|---|---|---|---|---|---|---|
+| 96 | 0.9108 | 0.9126 | +0.0018 | 0.0355 | +0.0373 | HARM |
+| 192 | 0.9034 | 0.8981 | −0.0053 | 0.0195 | +0.0142 | HARM |
+| 384 | 0.9077 | 0.9008 | −0.0069 | 0.0135 | +0.0066 | HARM |
+| 768 | 0.9071 | 0.8983 | **−0.0087** | 0.0090 | **+0.0003** | **clean** |
+
+The mean converges **negative** (−0.0087) — the +0.0018 at n=96 was upward sampling
+noise — so the bound benefits from both a better mean and 1/√n stderr shrink. It
+clears 0.005 at n=768. noise4.0 was never a variance wall for kalman2s; it is a
+power problem, and kalman2s is genuinely *better* at −10 dB.
+
+**Full gate at n=192** (`[kalman2s-power]`): handkeyed-25 clears —
+−0.0420, t=−2.96, bound −0.0136, **BETTER** (its −0.0301 mean was solidly negative;
+n=96's +0.0065 bound was one stderr too wide). At n=192 the only remaining HARM is
+noise4.0, which §42 above clears at n=768.
+
+**Conclusion — kalman2s is non-inferior at adequate power.** Every block was
+underpowered evidence of non-inferiority on a small-effect/high-variance profile,
+not evidence of harm; all means are favourable. Adjudicated with power, the gate is
+**0 worse, 0 harmful, ~11 better** (worstcase t=−21, hand-keyed 15–40 better or ns,
+noise2.0/3.0/qsb better). This is the campaign's first clean promotion candidate.
+
+**Method note (not goalpost-moving).** §20 set n=96 as the default *and* made
+non-inferiority the rule precisely because "significance alone is absence of
+evidence." Demonstrating non-inferiority at higher n on the two highest-variance
+profiles is the correct application of that rule, with the convergence trajectory
+shown rather than asserted — not a relaxed threshold. The tolerance (0.005) and the
+`mean + 2·stderr` bound are unchanged.
+
+## 43. The noise×speed grid — the coverage gap the standard gate hid (2026-07-21)
+
+**Prompt.** The standard gate has noise2.0/3.0/4.0 at 15 WPM plus noise2.0 at
+25/30 WPM — but **no fast×heavy-noise cell**. kalman2s switches on the
+self-estimated WPM, which the §38b runaway inflates under heavy noise, so a fast
+signal could read slow and flip into V2. `[kalman2s-grid]` tests the full 3×3
+(15/25/30 WPM × noise 2/3/4), attributing via pure kalman2.
+
+| WPM | noise | legacy CER | kalman2 t | kalman2s t |
+|---|---|---|---|---|
+| 15 | 2.0 | 0.123 | −8.25 ◄ | −8.17 ◄ |
+| 15 | 3.0 | 0.817 | −5.67 ◄ | −5.47 ◄ |
+| 15 | 4.0 | 0.911 | +1.21 | +0.10 |
+| 25 | 2.0 | 0.184 | −7.63 ◄ | −5.44 ◄ |
+| 25 | 3.0 | 0.957 | +1.27 | **+2.33 ►** |
+| 25 | 4.0 | 0.903 | **+5.04 ►** | −0.29 |
+| 30 | 2.0 | 0.287 | **+4.79 ►** | −1.08 |
+| 30 | 3.0 | 0.912 | **+4.82 ►** | +1.61 |
+| 30 | 4.0 | 0.887 | **+4.80 ►** | +1.70 |
+
+**Findings.**
+
+1. **The switch works at fast×heavy noise.** Pure V2 (kalman2) has FOUR significant
+   fast regressions — 30wpm-n2/n3/n4 (t≈4.8) and 25wpm-n4 (t=5.04). kalman2s
+   neutralises **all four** to ns. The runaway-flips-to-V2 hole feared for 30wpm
+   under heavy noise does not reach significance: the early V1 latch + hysteresis
+   hold it.
+
+2. **But the switch introduces one boundary regression: 25wpm-n3.0 (t=2.33),** a
+   cell where pure V2 was fine (ns, +1.27). 25 WPM sits at the band's lower edge
+   [26.5, 29.5]; under n3.0 the corrupted WPM estimate wobbles across the boundary,
+   and mode-switching instability is worse than committing to either mode. This is
+   the §33 estimator-corruption wall reaching the switch *decision itself* — the
+   switch keys on the estimate the noise corrupts.
+
+3. **Every regression is garbage-vs-garbage.** 25wpm-n3.0 is legacy 0.957 vs
+   kalman2s 0.978 — both >95% CER, total decode failure. The usable regime
+   (noise ≤ 2.0, or CER < ~0.3) is clean at every speed: better or ns.
+
+**Consequence for §42's verdict.** The "0 worse / 0 harmful at power" conclusion
+was an artefact of the standard gate's missing fast×heavy cells. With the grid,
+kalman2s has one significant regression (25wpm-n3.0) and a consistent-if-ns worse
+pattern across the heavy-noise fast cells. It is **not** cleanly promotable under
+the strict "worse on any profile blocks" rule — but the sole significant regression
+is a garbage cell, and the entire usable-decode regime is dominated. This is a
+maintainer judgment (usable-regime dominance vs a garbage-cell regression), and it
+also exposes a real gate defect: **standardProfiles() should include fast×heavy-noise
+cells** so future candidates are adjudicated where this campaign keeps failing.
+`legacy` remains the default.
+
+### 43b. Latch-at-lock refuted, and the complete-gate verdict (2026-07-21)
+
+**Latch-at-lock (§43 fix attempt) — refuted.** To kill the 25wpm-n3.0 boundary
+oscillation, the V1/V2 mode was frozen at timing lock instead of re-decided each
+element. It fixed 25wpm-n3.0 (t 2.33 → 0.18 ns) but **broke three other cells**:
+25wpm-n4.0 (−0.29 → +2.67 ►), 30wpm-n3.0 (+1.61 ns → +2.74 ►), 30wpm-n4.0
+(+1.70 ns → +2.13 ►) — net 3 significant regressions vs the per-element switch's 1.
+Cause: under heavy noise the runaway has already corrupted the estimate by the
+lock point, so 30wpm-n3/n4 latches into V2 and is trapped there, where the
+per-element switch could at least recover to V1 on a momentary fast reading. There
+is no clean speed estimate to switch on under heavy noise, sampled once or
+continuously — the §33 wall is inescapable for the switch in the garbage regime.
+Reverted; the per-element hysteresis switch (§41) is the better form.
+
+**Gate defect fixed.** `standardProfiles()` now gates the full 25/30 WPM × noise
+2/3/4 grid (was 15 WPM only + noise2.0 at speed). Future candidates are adjudicated
+where this campaign keeps failing.
+
+**Complete-gate verdict for kalman2s (n=96, 24 profiles): 9 better, 1 worse,
+12 ns, 6 harmful → blocked.** The 1 significant regression (noise3.0-25wpm, t=2.33)
+and 5 of the 6 HARM are the fast×heavy cells; the sixth (handkeyed-25) is
+V2-intrinsic. **Every failure is a garbage cell (CER > 0.9)** — noise3.0-25wpm is
+0.957 vs 0.978, both total decode failure. The usable-decode regime (noise ≤ 2.0,
+all speeds) is dominated: better or ns everywhere, worstcase t=−16.
+
+**Final conclusion on the dit-source line (§38–43).** The V2 dit-source fix is a
+large, real improvement at usable SNR — the campaign's biggest timing-side win. The
+speed switch (§41) makes it non-inferior across the usable regime by reverting to
+legacy at fast CW. What it cannot do is win the fast×heavy-noise garbage cells,
+because the switch keys on the speed estimate that heavy noise corrupts — the same
+wall that blocked LR (§25) and bpfauto (§35–37), now mapped from the timing-estimator
+side and shown to bound even a speed-adaptive fix. `legacy+kalman2s` is the strongest
+dit-source variant — a clean usable-regime win — but is **not promotable to default**
+under the strict rule: it regresses garbage cells at fast×heavy noise. `legacy`
+remains the default; kalman2s ships as a benchmarked variant.
