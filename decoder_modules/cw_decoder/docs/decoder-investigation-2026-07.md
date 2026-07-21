@@ -3342,13 +3342,41 @@ the smear (handkeyed-40 gets a 40 Hz filter, −0.009 ns). This is a front-end
 mechanism, orthogonal to the detector, and a *minimal* change to the shipped
 default — only the BPF bandwidth, Schmitt and timing unchanged.
 
-**One caveat blocks a clean promotion.** Six hand-keyed profiles flag the
-non-inferiority bound (HARM): small positive deltas (+0.008…+0.033), all
-*non-significant* (t < 1.7, ndiff 71–90) — not proven regressions, not proven
-safe. Hand-keyed is noiseAmp 0.3 + 15% jitter: a bandwidth matched to *white
-noise* over-narrows a signal whose problem is *jitter*, and the narrow filter's
-longer impulse response smears the already-jittery edges. The matched ENBW should
-be a floor that *widens* when SNR is high (light noise does not need the
-rejection and cannot afford the smear) — a noise-aware bandwidth, the next step.
-Until then this is a measured ceiling, not a promotion: real, large, and pointed
-at the exact regime the detector work could not reach.
+**One caveat blocked a clean promotion, and it is now fixed.** In the
+speed-only rule six hand-keyed profiles flagged the non-inferiority bound: small
+positive deltas (+0.008…+0.033), all *non-significant*. Hand-keyed is noiseAmp
+0.3 + 15% jitter — jitter-limited, not noise-limited — so a bandwidth matched to
+*white noise* over-narrows it and the narrow filter's longer impulse response
+smears the jittered edges. The `[bpf-sweep]` curve confirmed the mechanism: at a
+*fixed* 15 WPM, the heavy-noise profile argmins narrow (noise3.0 20 Hz 0.075 vs
+100 Hz 0.827) while hand-keyed argmins wide (0.158 at 100 Hz) — same speed,
+opposite bandwidth. Bandwidth must key on noise, not just speed.
+
+**Noise-aware bandwidth (the fix).** The WPM-matched cutoff becomes a *floor*
+reached only at low SNR; at high SNR the geometry widens back to legacy's exact
+(100, 100) — a byte-exact no-op, so a jitter-limited signal cannot regress.
+Blend on noise level: legacy at noiseAmp ≤ 0.5, matched at ≥ 1.5, linear between.
+Result (`[bpf-noise]`, paired n=96):
+
+| | count |
+|---|---|
+| significant better | 6 (worstcase, noise2.0/3.0/4.0, noise2.0-25/30wpm) |
+| significant worse | 0 |
+| harmful (non-inferiority) | **0** |
+
+Every light-noise profile is now delta exactly 0.0000 (byte-identical to legacy),
+every heavy-noise win is retained. **The ground-truth ceiling is clean and
+promotable** — including the noise2.0-25/30wpm regime the entire LR arc (§21–28)
+could not touch. Notably `worstcase` carries 20% jitter *and* heavy noise and
+still wins narrow (0.610 → 0.462), evidence the narrowing is safe under jitter
+once noise is heavy.
+
+**What this is not, yet: a runtime rule.** The ceiling keys on the generator's
+*true* dit and *true* noiseAmp. A shipping decoder must approximate both — WPM
+from the timing lock (`getDitDuration`), noise from the detector's SNR
+(`getSNR`) — and retune the BPF once at lock without a filter-transition glitch
+(cf. the §12 MF-resize transient). Two coverage gaps to close there: the current
+profiles all sit at the blend extremes (noiseAmp ≤ 0.5 or ≥ 1.5), so the partial
+zone (moderate SNR) is untested; and the ground-truth→SNR mapping is
+un-measured. The ceiling says the target is worth building; the runtime rule is
+§30.
