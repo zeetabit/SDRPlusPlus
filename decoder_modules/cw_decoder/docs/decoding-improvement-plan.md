@@ -26,7 +26,7 @@
 > is a **single noise realization on `seed = 42`**. See the Benchmark Results
 > section.
 >
-> ### Work completed since (all in the registry, none promoted)
+> ### Work completed since (all in the registry; one promoted — §21)
 >
 > | stage | outcome |
 > |---|---|
@@ -49,7 +49,8 @@
 > | Farnsworth gap centres (Phase 21) | cause found (one cold-start gap, not the clustering); fix **not shipped** — fragile by 0.5 ms and breaks a gate. Retro gap seeding promoted instead: `qrm` 0.0100 → 0.0035 (§16) |
 > | Gap classification under noise (Phase 22) | ⊘ item closed, measurement only. Error multiplication **confirmed**: 12.2% of structurally intact gaps misclassified at noise 3.0 vs 0.0% clean — but the driver is a **+38.9% dit overestimate**, not gap fragmentation. Two new measured defects; #29 reframed (§17) |
 > | Real recordings — ARRL W1AW (Phase 23) | **#30 closed as a blocker.** Paired audio + published text, five sessions pinned and gated; 15 and 20 WPM decode at **CER 0.0000**. Found and fixed two defects the synthetic suite cannot express: a broken audio→IQ conversion and unmapped period/comma (§18) |
-> | Measurement repair (Phase 25) | The comparison method, not the decoder. Paired per-seed testing added (`comparePaired`); n=24 shown to give wrong verdicts in both directions; the four-variable confound between the `noise*` and `handkeyed*` families identified and separated by a speed×noise factorial; hand-keyed coverage found to stop at 25 WPM. **Every better/worse tally in Phases 12–24 is unreliable as recorded.** No decoder change |
+> | **LR detector — PROMOTED (Phase 26)** | The §20.8 fix, shipped. `legacy+lr+log`: a sequential CUSUM detector that rejects spikes by evidence duration, not magnitude. Solves the runaway (noise3.0 +0.97 t=18 → −0.11 win), 9 significant wins including worstcase 0.61→0.42, 0 significant regressions, clean/Farnsworth identical. Now `DEFAULT_CORE`; gates re-ratcheted (§21) |
+| Measurement repair (Phase 25) | The comparison method, not the decoder. Paired per-seed testing added (`comparePaired`); n=24 shown to give wrong verdicts in both directions; the four-variable confound between the `noise*` and `handkeyed*` families identified and separated by a speed×noise factorial; hand-keyed coverage found to stop at 25 WPM. **Every better/worse tally in Phases 12–24 is unreliable as recorded.** No decoder change |
 | Registry vs real audio (Phase 24) | `legacy+mf` fixes the 35 WPM errors (0.0089 → 0.0000), so §12.3's refutation was scope-limited — but timing-only cores fix them too, so they are **marginal**, not proof of the matched-filter mechanism. **Nothing promotable**: every candidate regresses on ≥1 synthetic profile; the real-audio winner doubles CER on heavy noise (§19) |
 >
 > **Next: repair the instrument before ranking anything else with it.** Phase 25
@@ -385,7 +386,7 @@ Key finding: **filter bandwidth is the dominant factor** — 35 Hz vs 68 Hz = 20
 | 21 | Log-duration timing (Mills) | Very High | Medium | Medium | **Done — variant `+log`** |
 | 22 | Narrow pre-detection BPF | Low (−) | Very High | Low | **Measured — variants `+bpf*`** |
 | 23 | Huberised robust timing update | Low | None | Low | **Refuted (2026-07)** |
-| 24 | Likelihood-ratio detector | Medium | High | High | **Still blocked.** #30 closed as data collection, but the ARRL sessions are 19–76 dB and this is a noise technique — it would still be validated only against a generator whose envelope is exactly the Rician model it assumes |
+| 24 | Likelihood-ratio detector | Medium | High | High | **DONE — PROMOTED (§21).** Sequential CUSUM detector (`legacy+lr+log`) rejects spikes by evidence duration, solving the §20.8 runaway: noise3.0 +0.97 (t=18) → −0.11 (win), 9 significant improvements, 0 significant regressions. Now `DEFAULT_CORE`. ⚠ heavy-noise wins validated partly against Gaussian noise |
 | 25 | Gap ambiguity inside the beam | High | Medium | Medium | Candidate |
 | 26 | Callsign database (SCP/Master.dta) | N/A | N/A | Low | Candidate |
 | 27 | Bell 1977 trellis core | High | Very High | Very High | Future |
@@ -433,8 +434,10 @@ be trusted until the instrument that ranks them is repaired.
 > 0.1536 (not 0.1309). Do not use any row here to rank a variant; re-measure
 > with `comparePaired`.
 
-`legacy` is unchanged and remains the default; nothing below was promoted.
-Full tables and method: `decoder-investigation-2026-07.md` §8–10.
+`legacy` is unchanged and retained for comparison, but is **no longer the
+default** — `legacy+lr+log` was promoted to `DEFAULT_CORE` on 2026-07-21 (§21),
+the campaign's first promotion. Full tables and method:
+`decoder-investigation-2026-07.md` §8–10, §21.
 
 | profile | `legacy` | `+kalman2` | `+log` | `+bimodal` |
 |---|---|---|---|---|

@@ -140,17 +140,16 @@ resolve. No decoder changed; nothing became promotable.
 
 **Candidates now, in dependency order:**
 
-1. **The runaway-insertion mode — diagnosed and its fix ruled out (§20.7–20.8).**
-   `legacy+edge+log` reaches CER 1.79 at 15 WPM / noise 3.0 (t=18) and 1.21 on
-   real audio + noise, a flood of the shortest letters from `log` under-estimating
-   dit by 44% (opposite sign to legacy's +37%). The tail-robust variant
-   (`+logguard`, freeze dit for spike-magnitude outliers) halves the moderate-noise
-   runaway but cannot touch heavy noise: R-saturation reopens the gate, and
-   freezing R too reintroduces the qrm/qrn catastrophe (0.002→0.197). Spike and
-   interference are the same innovation magnitude, so no magnitude gate separates
-   them. A real fix needs a non-magnitude spike discriminator — the
-   likelihood-ratio detector (#24), still blocked on the noise regime lacking
-   real-audio ground truth.
+1. ✓ **The runaway-insertion mode — SOLVED, and the fix promoted (§20.7–20.8,
+   §21).** `legacy+edge+log` reached CER 1.79 at 15 WPM / noise 3.0 (t=18) from
+   `log` under-estimating dit by 44%. The tail-robust timing variant failed
+   (§20.8): spike and interference are the same innovation magnitude, so no
+   magnitude gate in the timing layer separates them. The fix was the
+   non-magnitude discriminator §20.8 named — a sequential likelihood-ratio
+   detector (`legacy+lr+log`, §21) that rejects spikes by evidence *duration*.
+   It turns the +0.97 (t=18) noise3.0 catastrophe into −0.11 (a win), with 9
+   significant improvements and zero significant regressions, and is now the
+   production **DEFAULT_CORE** — the campaign's first promotion.
 2. **Why is dit +38.9% at noise 3.0?** (§17.3.2) The largest unexplained number
    in these docs, and it sits upstream of the gap classifier — gap centres derive
    from `dit`, so nothing in gap classification can be fixed while its input is
@@ -2874,3 +2873,109 @@ noise regime having no real-audio ground truth.
   own membership and naming. Only `test_matrix.cpp` and `test_promotion.cpp`
   adopted `standardProfiles()`; unifying the rest would renumber tables these
   docs cite and was deferred.
+
+## 21. The likelihood-ratio detector — first promotion (Phase 26, 2026-07-21)
+
+§20.8 proved the log runaway could not be fixed in the timing layer: a noise
+spike and qrm/qrn interference are the same innovation magnitude, so no
+magnitude-based gate separates them. §20.8 named the missing ingredient — a
+discriminator that rejects a brief excursion by the **duration of sustained
+evidence**, not amplitude. This phase built it, and it is the first change in
+the campaign to be promoted to the production default.
+
+### 21.1 The detector
+
+The envelope out of `EnvelopeFrontEnd` is `|LPF(IQ)|`: Rayleigh under noise,
+Rician under signal. The Schmitt detector keys on `v > threshold`, so a noise
+excursion that momentarily clears the threshold becomes a spurious key event —
+the *same* detector feeds legacy and log, which is why one flood of short events
+sinks log (§20.7) while legacy merely deletes.
+
+`LRDetector` (`tone_detector.h`) replaces the instantaneous threshold with a
+clamped CUSUM. Per sample it forms a range-normalized evidence
+`u = (v - noiseFloor) / (signalPeak - noiseFloor)` — 0 at the noise level, 1 at
+the signal level — and accumulates `u - theta` into `S ∈ [-bound, +bound]`,
+keying down when `S` reaches the upper bound and up at the lower. A brief spike
+contributes only a few samples of evidence and never crosses; rejection is by
+duration. Output is hard `KeyEvent`s, so timing, the beam, and every interface
+are unchanged (registered via `makeLR`, cores `legacy+lr`, `legacy+lr+log`).
+
+⚠ **The first statistic was wrong and clean signal exposed it.** The exact energy
+form `v²/(2σ²)` explodes as the noise estimate → 0: on a noiseless signal the
+25th-percentile noise floor collapses, the ringing tail during a gap reads as
+`stat ≫ 1`, the CUSUM never falls, and elements merge (clean-15 decoded as 22
+garbled characters). The exact Rician LLR also grows only *linearly* in `v`, not
+quadratically. Range normalization — tracking the signal level the way the
+Schmitt threshold does — keeps `u` bounded at every SNR, and `theta = 0.5` makes
+both edges lag symmetrically so element and gap durations are preserved. This is
+an SPRT in spirit with a robust affine proxy for the LLR increment, not the
+textbook energy statistic. Clean and Farnsworth then decode identically to
+legacy.
+
+### 21.2 Operating point
+
+A sweep over `theta × bound` (n=48 paired vs legacy):
+
+- `theta = 0.6` is uniformly bad — it breaks the symmetric-lag property and
+  every profile regresses.
+- `bound = 2` leaves a heavy-noise regression (noise4.0 WORSE); `bound = 4+`
+  starts costing qsb.
+- **`theta = 0.5, bound = 3.0`** is the sweet spot: raising the required
+  evidence from 2 to 3 rejects the residual spikes that drove the noise3.0 /
+  noise4.0 regressions, turning noise3.0 into a *win* without losing the
+  hand-keyed and worstcase gains.
+
+### 21.3 Result: the runaway is solved
+
+`legacy+lr+log` vs `legacy`, paired n=96 (`[promotion]`):
+
+| profile | delta | t | verdict |
+|---|---|---|---|
+| handkeyed-15…35 | −0.09 to −0.16 | −6.3 to −9.9 | BETTER |
+| worstcase | −0.191 | −13.7 | BETTER (0.61 → 0.42) |
+| noise2.0 | −0.094 | −8.5 | BETTER |
+| **noise3.0** | **−0.111** | **−5.51** | **BETTER** |
+| qrm | −0.002 | −2.4 | BETTER |
+| handkeyed-40 | −0.019 | −0.9 | ns (BETTER at n=192) |
+| qsb | +0.003 | +1.3 | ns |
+| noise4.0 | +0.017 | +0.7 | ns |
+| clean-15/25, farnsworth20 | 0.0000 | — | identical |
+
+**9 significant improvements, zero significant regressions.** The headline
+comparison: `legacy+edge+log` had noise3.0 **+0.97 (t=18)** and noise4.0 **+0.90
+(t=12)** — catastrophic; the LR detector turns those into **−0.11 (a win)** and
+**+0.017 (ns)**. §20.8's prediction held exactly: the non-magnitude
+discriminator broke the coupling the timing layer could not.
+
+The strict non-inferiority gate flagged three profiles; n=192 resolved them —
+handkeyed-40 was underpowered and is a win (−0.029, t=−2.3), leaving two
+non-significant sub-character costs: qsb (+0.002, upper bound 0.0053, a hair over
+the 0.005 tolerance) and noise4.0 (+0.011 at SNR ≈ 1.1, where legacy already
+scores 0.90). Every previously blocked candidate had a *significant* regression;
+this one has none.
+
+### 21.4 Promotion and re-ratcheting
+
+Promoted to `DEFAULT_CORE` on the user's decision, `legacy` retained in the
+registry for comparison. Consequences, all handled:
+
+- **Two single-seed contest benchmarks failed** (seed 42 unlucky). Multi-seed
+  measurement showed the profile is fine — mean 0.0021, 47/48 seeds decode
+  exactly, and the specific bug they guard (B → 6 in K1ABC) occurs **0/48**.
+  Converted both to multi-seed gates: the fragile single-seed assertions were
+  exactly what this document criticised, so this fixes a known-bad test rather
+  than loosening.
+- **The always-on gates re-ratcheted** to the new default's `mean + 2·stderr`.
+  Most tightened as the promotion earned it: hand-keyed 0.238 → 0.045, worstcase
+  0.667 → 0.46, noise3.0 0.886 → 0.77. Three rose — qsb, contest, noise4.0 — the
+  approved sub-character costs.
+- **The real-audio gate improved**: 35 WPM 0.0089 → 0.0014, ratchet tightened to
+  0.005. Every session decodes as well or better; clean and Farnsworth exact.
+
+⚠ **Validation caveat, unchanged.** The heavy-noise wins are measured against the
+generator's Gaussian noise and the noise-augmented real audio (§20.5), both
+partly the LR test's own Rician model. The real-recording gate (§18) is genuine
+off-the-air keying and lr+log holds or improves there, but the specific
+heavy-noise regime that decided the promotion has no real-audio ground truth.
+The promotion rests on a broad, significant, cross-validated win; the noise4.0
+cost is a bound, not a measured failure.

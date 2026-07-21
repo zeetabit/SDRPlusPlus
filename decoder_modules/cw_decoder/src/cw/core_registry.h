@@ -28,6 +28,19 @@ namespace cw {
                 mfResize);
         }
 
+        // Likelihood-ratio detector (docs §24). Its own factory: the CUSUM
+        // parameters are specific to this detector. Timing is a parameter so the
+        // headline test (does a better detector rescue log?) is one line.
+        inline std::unique_ptr<IDecodeCore> makeLR(
+                TimingStrategy timing,
+                float theta = 0.5f, float boundHi = 3.0f, float boundLo = -3.0f) {
+            return std::make_unique<StagedCore>(
+                std::make_unique<EnvelopeFrontEnd>(),
+                std::make_unique<LikelihoodRatioDetector>(theta, boundHi, boundLo),
+                std::make_unique<AdaptiveTimingStage>(timing),
+                std::make_unique<BeamSymbolDecoder>());
+        }
+
         // Dual-window peak reference has its own factory: the parameters are
         // specific to that estimator and would bloat makeStaged for every
         // other variant.
@@ -81,6 +94,17 @@ namespace cw {
 
             {"legacy+edge+logguard", "Edge correction + guarded log timing",
              []{ return detail::makeStaged(TIMING_LOG_GUARDED, 100.0f, 100.0f, MF_RESET, EDGE_COMPENSATE); }},
+
+            // ── Likelihood-ratio detector (docs §24). Sequential CUSUM on the
+            //    envelope energy statistic: rejects spikes by evidence duration,
+            //    not magnitude — the discriminator §20.8 showed timing lacks.
+            //    legacy+lr+log is the headline test: does a spike-resistant
+            //    detector rescue log's runaway? ──
+            {"legacy+lr", "Likelihood-ratio detector + Kalman timing",
+             []{ return detail::makeLR(TIMING_KALMAN); }},
+
+            {"legacy+lr+log", "Likelihood-ratio detector + log-duration timing",
+             []{ return detail::makeLR(TIMING_LOG); }},
 
             // ── Matched-filter resize transient (docs §12). Zeroing the ring
             //    buffer on a window change injects a dropout mid-element; at
@@ -149,5 +173,11 @@ namespace cw {
         return reg;
     }
 
-    inline constexpr const char* DEFAULT_CORE = "legacy";
+    // Promoted 2026-07-21 (docs §21). legacy+lr+log is the first core to clear
+    // the paired n=96 gate with no significant regression: 9 significant wins
+    // (worstcase 0.61 -> 0.42, hand-keyed ~0.16 -> ~0.03, the log runaway
+    // solved), clean and Farnsworth identical to legacy, against two
+    // non-significant sub-character costs (qsb +0.002, noise4.0 +0.011 where
+    // legacy already scores 0.90). `legacy` is retained above for comparison.
+    inline constexpr const char* DEFAULT_CORE = "legacy+lr+log";
 }

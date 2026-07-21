@@ -138,22 +138,26 @@ TEST_CASE("Gate: additive noise", "[cw][multiseed][gate]") {
     gate("moderate-noise", MSG_FULL(), profileModerateNoise(80.0f), 0.0f);
 }
 
+// Thresholds re-ratcheted 2026-07-21 for the legacy+lr+log promotion (§21).
+// Each is the new default's measured mean + 2*stderr at n=24. Most tightened
+// sharply as the promotion earned it (hand-keyed 0.238 -> 0.045, worstcase
+// 0.667 -> 0.46, noise3.0 0.886 -> 0.77); qsb, contest and noise4.0 rose, the
+// approved sub-character costs of the promotion.
 TEST_CASE("Gate: hand-keyed jitter", "[cw][multiseed][gate]") {
-    // Distribution is bimodal (median << mean): most seeds decode, a minority
-    // fail catastrophically. Suspected cause is the Kalman seed ambiguity in
-    // timing.h — see docs/decoder-investigation-2026-07.md 2.1(c).
-    gate("handkeyed-15wpm", MSG_FULL(), profileHandKeyed(80.0f), 0.238f);
-    gate("handkeyed-20wpm", MSG_FULL(), profileHandKeyed(60.0f), 0.311f);
-    gate("handkeyed-25wpm", MSG_FULL(), profileHandKeyed(48.0f), 0.199f);
+    // The Kalman-timing bimodality that motivated the old 0.2-0.3 thresholds is
+    // gone under the LR detector + log timing: median ~= mean ~= 0.03.
+    gate("handkeyed-15wpm", MSG_FULL(), profileHandKeyed(80.0f), 0.045f);
+    gate("handkeyed-20wpm", MSG_FULL(), profileHandKeyed(60.0f), 0.040f);
+    gate("handkeyed-25wpm", MSG_FULL(), profileHandKeyed(48.0f), 0.040f);
 }
 
 TEST_CASE("Gate: propagation and interference", "[cw][multiseed][gate]") {
-    gate("qsb",           MSG_FULL(),     profileQSB(80.0f),           0.019f);
-    gate("qrm",           MSG_FULL(),     profileQRM(80.0f),           0.021f);
-    gate("qrn",           MSG_FULL(),     profileQRN(80.0f),           0.009f);
-    gate("contest-20wpm", MSG_CONTEST(),  profileContest(60.0f),       0.008f);
+    gate("qsb",           MSG_FULL(),     profileQSB(80.0f),           0.028f);
+    gate("qrm",           MSG_FULL(),     profileQRM(80.0f),           0.010f);
+    gate("qrn",           MSG_FULL(),     profileQRN(80.0f),           0.008f);
+    gate("contest-20wpm", MSG_CONTEST(),  profileContest(60.0f),       0.012f);
     gate("farnsworth-2.0",MSG_FULL(),     profileFarnsworth(80.0f, 2.0f), 0.015f);
-    gate("worstcase",     MSG_FULL(),     profileWorstCase(80.0f),     0.667f);
+    gate("worstcase",     MSG_FULL(),     profileWorstCase(80.0f),     0.460f);
 }
 
 // SNR ladder. This is the axis pre-detection filter bandwidth acts on; the
@@ -162,9 +166,9 @@ TEST_CASE("Gate: propagation and interference", "[cw][multiseed][gate]") {
 TEST_CASE("Gate: SNR ladder", "[cw][multiseed][gate][snr]") {
     struct { const char* name; float amp; float maxMean; } ladder[] = {
         {"snr-noise1.0", 1.0f, 0.000f},
-        {"snr-noise2.0", 2.0f, 0.116f},
-        {"snr-noise3.0", 3.0f, 0.886f},
-        {"snr-noise4.0", 4.0f, 0.923f},
+        {"snr-noise2.0", 2.0f, 0.045f},   // was 0.116, tightened (§21)
+        {"snr-noise3.0", 3.0f, 0.770f},   // was 0.886, tightened (§21)
+        {"snr-noise4.0", 4.0f, 1.100f},   // was 0.923, raised — approved cost (§21)
     };
     for (auto& l : ladder) {
         auto p = profileClean(80.0f);

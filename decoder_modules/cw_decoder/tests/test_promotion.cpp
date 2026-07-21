@@ -148,6 +148,8 @@ TEST_CASE("Promotion: paired adjudication vs legacy", "[cw][.][promotion]") {
     adjudicate("legacy+edge+mf",    baselines);
     adjudicate("legacy+logguard",   baselines);
     adjudicate("legacy+edge+logguard", baselines);
+    adjudicate("legacy+lr",         baselines);
+    adjudicate("legacy+lr+log",     baselines);
     const Verdict edgeLog = adjudicate("legacy+edge+log", baselines);
 
     // ── Instrument self-checks ────────────────────────────────

@@ -110,11 +110,13 @@ decoding better. Declaring it keeps the comparison honest.
 `core_registry.h` is the single list of benchmarkable configurations. The config
 UI lists it; the benchmark matrix iterates it. Adding a core or a stage
 combination is one entry. Names are persisted in module config — keep them
-stable. Unknown names fall back to `legacy` rather than failing.
+stable. Unknown names fall back to the default rather than failing.
 
 | name | configuration | status |
 |---|---|---|
-| `legacy` | Schmitt + Kalman V1 + beam search | **production default** |
+| `legacy+lr+log` | LR detector + log-duration timing | **production default (§21)** — solves the runaway, 9 significant wins, 0 significant regressions |
+| `legacy+lr` | LR detector + Kalman timing | helps interference; hand-keyed underpowered |
+| `legacy` | Schmitt + Kalman V1 + beam search | prior default, retained for comparison |
 | `legacy+kmeans` | K-means timing | worse on jitter and QRM/QRN |
 | `legacy+median` | median-split timing | worst overall |
 | `legacy+bimodal` | bimodal-histogram timing | best on handkeyed-25; poor at high noise |
@@ -159,8 +161,11 @@ it.
 
 ## Per-Channel Processing Pipeline (the `legacy` core)
 
-This section describes the **`legacy`** core — the production default. Other
-registry variants differ only in the stage noted in the table above.
+This section describes the **`legacy`** core. It was the production default
+through 2026-07-21; the default is now `legacy+lr+log`, which swaps the Schmitt
+detector for the sequential LR detector (§21) and the timing for log-duration.
+The pipeline below is otherwise shared. Other registry variants differ only in
+the stage noted in the table above.
 
 `Channel` owns the front-end-to-text chain via its core. All blocks run inline in
 the DSP thread callback — no internal threads.
@@ -785,6 +790,9 @@ Learned the hard way; each one has an incident behind it.
 | **No assertion that cannot fail.** A diagnostic test still needs a real check | Three sweeps shipped with `CHECK(true)`, `CHECK(NG > 0)` and `CHECK(better + worse >= 0)`. They printed tables and reported "passed" regardless of the numbers. |
 | Every parameter sweep asserts that its **parameter reaches the code** | Otherwise a dead knob prints one value N times and every conclusion drawn from the table is vacuous. Pattern: some cell must differ from the baseline column. |
 | A sweep that overrides a constant asserts the **default column is a no-op** | `guard-sweep` checks `g=1.8` reproduces registry `legacy` exactly on all 12 profiles; without it the sweep could be measuring the plumbing, not the constant. |
+| A statistic referenced to an **absolute** noise estimate explodes where that estimate → 0 | The LR detector's exact energy form `v²/(2σ²)` merged every element on a *clean* signal: with no noise the percentile floor collapses and ringing reads as signal. Range-normalizing to the signal span (as the Schmitt threshold does) fixed it. Clean signal is the test that caught it, not noisy (§21.1). |
+| **Promoting the default re-ratchets every gate that resolves through it** | Changing `DEFAULT_CORE` moved 3 gates immediately and silently loosened ~10 more; each was re-set to the new default's `mean+2·stderr` — tightening where earned (hand-keyed 0.238→0.045), raising only the approved costs. A promotion that only fixes the failures leaves the wins ungated (§21.4). |
+| A single-seed benchmark gates on **luck**, not the decoder | Two contest tests failed on seed 42 under the new default; multi-seed showed 47/48 decode exactly and the guarded bug (B→6) never occurs. Converting them to multi-seed fixed a known-bad test — not loosening (§21.4). |
 | Run only the tests the change can affect | The hidden sweeps are minutes each; re-running the whole battery to re-check one edit is the single biggest time sink in this work. |
 | A **multiseed mean can improve while a single-seed gate breaks** — check both | Phase 21: `worstcase`'s 24-seed mean went 0.6244 → 0.6232 while the seed behind its gate crossed 0.6 (0.6087). Averaging hides the tail; the config with the best table was the only one that failed. |
 | A probe that **bypasses a stage cannot measure what enters through it** | `[farnsworth-probe]` walks truth segments, so noise — which reaches gap classification only via the detector — is invisible to it. Adding a noisy profile produced a byte-identical table. Structural blindness reads exactly like a clean pass. |

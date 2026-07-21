@@ -457,4 +457,155 @@ namespace cw {
         float impulseHoldValue = 0.0f;
     };
 
+    // ════════════════════════════════════════════════════════════
+    // Likelihood-ratio detector (docs §24, motivated by §20.8).
+    //
+    // The Schmitt detector keys on envelope magnitude (v > threshold), so a
+    // noise excursion that momentarily clears the threshold becomes a spurious
+    // key event. Under heavy noise this floods the timing stage with short
+    // elements, which log-duration timing cannot survive (§20.7). Magnitude
+    // alone cannot separate a spike from a real element (§20.8).
+    //
+    // The envelope out of EnvelopeFrontEnd is |LPF(IQ)|: Rayleigh under noise,
+    // Rician under signal. Per sample it forms a range-normalized evidence
+    // u = (v - noiseFloor) / (signalPeak - noiseFloor) — 0 at the noise level,
+    // 1 at the signal level — and accumulates (u - theta) into a clamped CUSUM,
+    // keying on the accumulator crossing a bound. A brief spike contributes only
+    // a few samples of evidence and never crosses, so rejection is by DURATION
+    // of sustained evidence, not amplitude — the discriminator §20.8 showed the
+    // timing layer cannot provide.
+    //
+    // The increment is a robust affine proxy for the true Rician/Rayleigh
+    // log-likelihood ratio, not the exact form: v^2/(2 sigma^2) is the exact
+    // energy statistic but explodes as the noise estimate -> 0 on a clean
+    // signal (the ringing tail alone then reads as signal), and the exact Rician
+    // LLR grows only linearly in v. Range normalization tracks the signal level
+    // the way the Schmitt threshold does, so u stays bounded at every SNR.
+    // theta = 0.5 makes both edges lag symmetrically, preserving element and gap
+    // durations. This is a sequential probability ratio test in the SPRT sense.
+    //
+    // Output is hard KeyEvents, identical in kind to ToneDetector — timing and
+    // the beam are unchanged. The soft accumulator margin is available for the
+    // Phase 27 experiment but not exported here.
+    class LRDetector {
+    public:
+        void init(float sampleRate) {
+            _sampleRate = sampleRate;
+            noiseSubsample = std::max(4, (int)(sampleRate / 125.0f));
+            noiseWinSize = 250;
+            noiseWin.assign(noiseWinSize, 0.0f);
+            noiseSorted.assign(noiseWinSize, 0.0f);
+            reset();
+        }
+
+        void setTheta(float t) { theta = t; }
+        void setBounds(float hi, float lo) { boundHi = hi; boundLo = lo; }
+
+        std::vector<KeyEvent> process(const float* envelope, int count) {
+            std::vector<KeyEvent> events;
+            for (int i = 0; i < count; i++) {
+                const float v = envelope[i];
+
+                if (v > signalPeak) { signalPeak = v; }
+                else { signalPeak += (v - signalPeak) * decayAlpha; }
+
+                if (++subsampleCounter >= noiseSubsample) {
+                    subsampleCounter = 0;
+                    noiseWin[noiseWinPos] = v;
+                    noiseWinPos = (noiseWinPos + 1) % noiseWinSize;
+                    if (noiseWinCount < noiseWinSize) { noiseWinCount++; }
+                    if (noiseWinCount >= 10) {
+                        const int n = noiseWinCount;
+                        noiseSorted.resize(n);
+                        memcpy(noiseSorted.data(), noiseWin.data(), n * sizeof(float));
+                        const int idx = n / 4;   // 25th percentile ~ noise level
+                        std::nth_element(noiseSorted.begin(), noiseSorted.begin() + idx,
+                                         noiseSorted.begin() + n);
+                        noiseFloor = std::max(noiseSorted[idx], 1e-12f);
+                    }
+                }
+
+                // Warmup: no noise estimate yet, hold key up.
+                if (noiseWinCount < 10) { totalProcessed++; continue; }
+
+                // Range-normalized evidence: 0 at the noise level, 1 at the
+                // signal level. Accumulate its excess over theta into a clamped
+                // CUSUM. Sustained signal (u > theta) drives S to boundHi;
+                // sustained noise (u < theta) drives it to boundLo. The clamp
+                // gives hysteresis on both edges: a momentary excursion cannot
+                // cross a full bound, so a spike is rejected by duration.
+                const float range = std::max(signalPeak - noiseFloor, 1e-6f);
+                const float u = (v - noiseFloor) / range;
+                S += u - theta;
+                if (S > boundHi) { S = boundHi; }
+                if (S < boundLo) { S = boundLo; }
+
+                if (!currentState && S >= boundHi) {
+                    currentState = true;
+                    events.push_back({true, i});
+                } else if (currentState && S <= boundLo) {
+                    currentState = false;
+                    events.push_back({false, i});
+                }
+                totalProcessed++;
+            }
+            return events;
+        }
+
+        float getSNR() const {
+            return (noiseFloor < 1e-12f) ? 0 : 10.0f * log10f(signalPeak / noiseFloor);
+        }
+        bool isKeyDown() const { return currentState; }
+
+        void preseed(float level, int count) {
+            (void)count;
+            const float lv = std::max(level, 1e-12f);
+            signalPeak = lv;
+            noiseFloor = lv;
+            noiseWin.assign(noiseWinSize, lv);
+            noiseWinCount = noiseWinSize;
+        }
+
+        void reset() {
+            decayAlpha = 1.0f - expf(-1.0f / (0.5f * _sampleRate));
+            signalPeak = 0.001f;
+            noiseFloor = 0.001f;
+            S = 0.0f;
+            currentState = false;
+            std::fill(noiseWin.begin(), noiseWin.end(), 0.0f);
+            noiseWinPos = 0;
+            noiseWinCount = 0;
+            subsampleCounter = 0;
+            totalProcessed = 0;
+        }
+
+    private:
+        float _sampleRate = 1000.0f;
+        float decayAlpha = 0.002f;
+
+        // theta in [0,1] is the decision level on the normalized evidence; 0.5
+        // makes the two edges lag symmetrically so durations are preserved. The
+        // bound magnitude sets required evidence: ~2*bound/(1-theta) samples of
+        // sustained signal to key down. Operating point theta 0.5 / bound 3.0
+        // chosen by sweep (docs §21): bound 2 leaves a heavy-noise regression,
+        // bound 4+ costs qsb, theta 0.6 breaks the symmetric-lag property.
+        float theta = 0.5f;
+        float boundHi = 3.0f;
+        float boundLo = -3.0f;
+
+        float S = 0.0f;
+        bool currentState = false;
+        float signalPeak = 0.001f;
+        float noiseFloor = 0.001f;
+
+        int noiseSubsample = 8;
+        int noiseWinSize = 250;
+        int noiseWinPos = 0;
+        int noiseWinCount = 0;
+        int subsampleCounter = 0;
+        long long totalProcessed = 0;
+        std::vector<float> noiseWin;
+        std::vector<float> noiseSorted;
+    };
+
 }

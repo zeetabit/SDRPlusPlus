@@ -101,6 +101,34 @@ namespace cw {
         float _guard = 1.8f;
     };
 
+    // Sequential likelihood-ratio detector (docs §24). Same IDetector role as
+    // SchmittDetector, different decision rule: sustained evidence, not
+    // magnitude. Constructor exposes the CUSUM knobs so a sweep can vary them.
+    class LikelihoodRatioDetector : public IDetector {
+    public:
+        explicit LikelihoodRatioDetector(float theta = 0.5f,
+                                         float boundHi = 3.0f, float boundLo = -3.0f)
+            : _theta(theta), _boundHi(boundHi), _boundLo(boundLo) {}
+
+        void init(float internalRate) override {
+            det.init(internalRate);
+            det.setTheta(_theta);
+            det.setBounds(_boundHi, _boundLo);
+        }
+        void reset() override { det.reset(); }
+        std::vector<KeyEvent> process(const float* env, int count) override {
+            return det.process(env, count);
+        }
+        float getSNR() const override { return det.getSNR(); }
+        bool isKeyDown() const override { return det.isKeyDown(); }
+        void preseed(float level, int count) override { det.preseed(level, count); }
+        const char* name() const override { return "lr"; }
+
+    private:
+        LRDetector det;
+        float _theta, _boundHi, _boundLo;
+    };
+
     // ── Stage 3: timing ─────────────────────────────────────────
 
     class AdaptiveTimingStage : public ITiming {
