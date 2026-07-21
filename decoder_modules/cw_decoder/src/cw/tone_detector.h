@@ -9,6 +9,12 @@ namespace cw {
     struct KeyEvent {
         bool keyDown;
         int sampleOffset;
+        // Detector's confidence that this transition closed a real element, in
+        // [0,1]. Only the LR detector in soft mode sets it (from accumulated
+        // evidence); everything else leaves it 1.0, so the beam weighting is
+        // unchanged for those cores. Carried on the key-UP event, which is where
+        // StagedCore closes the element (docs §22).
+        float confidence = 1.0f;
     };
 
     // How to handle the Schmitt trigger's on/off threshold asymmetry.
@@ -500,6 +506,7 @@ namespace cw {
 
         void setTheta(float t) { theta = t; }
         void setBounds(float hi, float lo) { boundHi = hi; boundLo = lo; }
+        void setSoft(bool s) { soft = s; }
 
         std::vector<KeyEvent> process(const float* envelope, int count) {
             std::vector<KeyEvent> events;
@@ -536,16 +543,29 @@ namespace cw {
                 // cross a full bound, so a spike is rejected by duration.
                 const float range = std::max(signalPeak - noiseFloor, 1e-6f);
                 const float u = (v - noiseFloor) / range;
+
+                // Soft evidence: mean u over the key-down is how far the element
+                // sat above the decision level — 1 for a clean element, near
+                // theta for a marginal one. Accumulated while keyed down, mapped
+                // to a confidence on the key-up that closes the element.
+                if (currentState) { elemUSum += u; elemUCount++; }
+
                 S += u - theta;
                 if (S > boundHi) { S = boundHi; }
                 if (S < boundLo) { S = boundLo; }
 
                 if (!currentState && S >= boundHi) {
                     currentState = true;
+                    elemUSum = 0.0f; elemUCount = 0;   // new element begins
                     events.push_back({true, i});
                 } else if (currentState && S <= boundLo) {
                     currentState = false;
-                    events.push_back({false, i});
+                    float conf = 1.0f;
+                    if (soft && elemUCount > 0) {
+                        const float meanU = elemUSum / elemUCount;
+                        conf = std::min(std::max((meanU - theta) / (1.0f - theta), 0.1f), 0.95f);
+                    }
+                    events.push_back({false, i, conf});
                 }
                 totalProcessed++;
             }
@@ -572,6 +592,8 @@ namespace cw {
             noiseFloor = 0.001f;
             S = 0.0f;
             currentState = false;
+            elemUSum = 0.0f;
+            elemUCount = 0;
             std::fill(noiseWin.begin(), noiseWin.end(), 0.0f);
             noiseWinPos = 0;
             noiseWinCount = 0;
@@ -592,11 +614,14 @@ namespace cw {
         float theta = 0.5f;
         float boundHi = 3.0f;
         float boundLo = -3.0f;
+        bool soft = false;
 
         float S = 0.0f;
         bool currentState = false;
         float signalPeak = 0.001f;
         float noiseFloor = 0.001f;
+        float elemUSum = 0.0f;
+        int elemUCount = 0;
 
         int noiseSubsample = 8;
         int noiseWinSize = 250;

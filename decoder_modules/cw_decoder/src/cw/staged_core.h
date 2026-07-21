@@ -140,8 +140,13 @@ namespace cw {
                                 if (debugLog) fprintf(stderr, "[CW ch%d] t=%.0f elem=%.1fms %s conf=%.2f sqF=%.2f dit=%.1f wpm=%.1f\n",
                                     id, now, elemMs, te.element == DIT ? "DIT" : "DAH", te.confidence,
                                     sqFactor, timing->getDitDuration(), timing->getWPM());
-                                symbols->addElement(te.element, te.confidence * sqFactor);
-                                _confidence = te.confidence * sqFactor;
+                                // evt.confidence is the detector's element
+                                // plausibility (1.0 for all cores except soft
+                                // LR): a marginally-detected element down-weights
+                                // the beam commitment, widening the search.
+                                const float elemConf = te.confidence * sqFactor * evt.confidence;
+                                symbols->addElement(te.element, elemConf);
+                                _confidence = elemConf;
                             } else if (debugLog) {
                                 fprintf(stderr, "[CW ch%d] t=%.0f elem=%.1fms REJECTED min=%.1f\n", id, now, elemMs, minElementMs());
                             }

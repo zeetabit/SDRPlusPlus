@@ -32,11 +32,11 @@ namespace cw {
         // parameters are specific to this detector. Timing is a parameter so the
         // headline test (does a better detector rescue log?) is one line.
         inline std::unique_ptr<IDecodeCore> makeLR(
-                TimingStrategy timing,
+                TimingStrategy timing, bool soft = false,
                 float theta = 0.5f, float boundHi = 3.0f, float boundLo = -3.0f) {
             return std::make_unique<StagedCore>(
                 std::make_unique<EnvelopeFrontEnd>(),
-                std::make_unique<LikelihoodRatioDetector>(theta, boundHi, boundLo),
+                std::make_unique<LikelihoodRatioDetector>(theta, boundHi, boundLo, soft),
                 std::make_unique<AdaptiveTimingStage>(timing),
                 std::make_unique<BeamSymbolDecoder>());
         }
@@ -105,6 +105,16 @@ namespace cw {
 
             {"legacy+lr+log", "Likelihood-ratio detector + log-duration timing",
              []{ return detail::makeLR(TIMING_LOG); }},
+
+            // ── Soft LR (docs §22): the detector's per-element evidence margin
+            //    feeds the beam confidence, so a marginally-detected element
+            //    widens the beam instead of committing. Everything else as the
+            //    promoted default. ──
+            {"legacy+lr+soft", "Soft LR detector (evidence-weighted) + Kalman timing",
+             []{ return detail::makeLR(TIMING_KALMAN, true); }},
+
+            {"legacy+lr+soft+log", "Soft LR detector + log-duration timing",
+             []{ return detail::makeLR(TIMING_LOG, true); }},
 
             // ── Matched-filter resize transient (docs §12). Zeroing the ring
             //    buffer on a window change injects a dropout mid-element; at

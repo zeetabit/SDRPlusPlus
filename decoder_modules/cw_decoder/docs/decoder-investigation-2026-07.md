@@ -2979,3 +2979,45 @@ off-the-air keying and lr+log holds or improves there, but the specific
 heavy-noise regime that decided the promotion has no real-audio ground truth.
 The promotion rests on a broad, significant, cross-validated win; the noise4.0
 cost is a bound, not a measured failure.
+
+## 22. Soft evidence to the beam — refuted (Phase 27, 2026-07-21)
+
+Phase 26 kept the LR detector's decision hard: it emits key events, the soft
+CUSUM margin stays internal. Phase 27 tested whether propagating that margin
+helps. The beam already has a soft channel — `addElement(Element, confidence)`
+forks weighted by confidence and widens under low confidence (`morse_tree.h`) —
+so the detector's per-element evidence was folded in without new interfaces:
+`KeyEvent` gained a `confidence` field (1.0 for every other core), the LR
+detector in *soft* mode set it from the mean normalized evidence over the
+element, and `StagedCore` multiplied it into the beam confidence. Cores
+`legacy+lr+soft`, `legacy+lr+soft+log`.
+
+**It is significantly worse and helps nowhere.** Paired n=96 vs the promoted
+default `legacy+lr+log`:
+
+| profile | default | soft | delta | t |
+|---|---|---|---|---|
+| noise2.0 | 0.0289 | 0.1097 | +0.081 | **+50.4** |
+| qsb | 0.0156 | 0.0399 | +0.024 | +25.2 |
+| worstcase | 0.4183 | 0.4531 | +0.035 | +11.8 |
+| handkeyed-20 | 0.0257 | 0.0317 | +0.006 | +6.9 |
+| noise3.0 | 0.7060 | 0.7127 | +0.007 | +5.9 |
+| qrm / noise4.0 | — | — | ~0 | ns |
+
+**The confidence channel is the wrong home for detector plausibility, and the
+reason is semantic.** `addElement`'s confidence means *how certain is the
+dit-vs-dah classification* — a timing quantity. The soft evidence carries *how
+strong was the detection* — orthogonal to it. A faded-but-real dit (weak signal,
+but unambiguous by duration) has low evidence, so folding it in down-weights a
+correctly-classified element and widens the beam onto wrong alternatives. The
+damage lands exactly where real elements are weak — qsb (fading) and noise2.0.
+The hard LR decision had already extracted the useful information; the soft
+margin only injects noise into a channel that expects a different measurement.
+
+This vindicates the Phase 26 scope choice (hard events out, LR internal). The
+plan's fallback — genuine soft key-state to timing and gaps via new interfaces —
+is not pursued: the beam demonstrably does not benefit from detection strength,
+so a larger interface change is unjustified. Soft evidence is a dead end at this
+formulation. The soft cores stay in the registry as the measured negative
+result; the default is unchanged (the `KeyEvent.confidence` multiply is 1.0 for
+every non-soft core, so `legacy+lr+log` is byte-identical).
