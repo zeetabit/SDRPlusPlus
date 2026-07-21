@@ -46,6 +46,8 @@ namespace {
         int sourceHist[5] = {};
         float ditErrPct = 0;        // learned dit vs the generator's
         int seeds = 0;
+        std::vector<float> ditOnMs;  // §38b: dit-cluster ON durations fed to classifyOn
+        float trueDitMs = 0;
     };
 
     int gapKindIndex(TruthKind k) {
@@ -109,7 +111,8 @@ namespace {
     // permissive end of the decoder's real filter, not an exact replica.
     GapNoiseStats probeNoisyGaps(const char* message, SignalParams params, int seeds,
                                  bool minElem, bool useLR = false,
-                                 cw::TimingStrategy strat = cw::TIMING_KALMAN) {
+                                 cw::TimingStrategy strat = cw::TIMING_KALMAN,
+                                 bool oracleDit = false, float guardFactor = 0.0f) {
         GapNoiseStats out;
         out.seeds = seeds;
 
@@ -145,6 +148,11 @@ namespace {
             // the pipeline, and this must observe the same sequence it sees.
             cw::AdaptiveTiming timing;
             timing.init(RATE, strat);
+            // Confound probe: force the classifier's gap centres to the true dit
+            // while leaving the detector event stream (and thus the matched-gap
+            // set) identical to the estimated-dit run.
+            if (oracleDit && sig.model.ditMs > 0) { timing.setDitOverride(sig.model.ditMs); }
+            if (guardFactor > 0.0f) { timing.setKalmanGuardFactor(guardFactor); }
 
             long long lastDown = -1, lastUp = -1;
             for (const auto& e : probe->events()) {
@@ -168,7 +176,15 @@ namespace {
                         const float onMs = (float)(e.sample - lastDown);
                         const float floorMs = (minElem && timing.isLocked())
                             ? std::max(5.0f, timing.getDitDuration() * 0.15f) : 5.0f;
-                        if (onMs >= floorMs) { timing.classifyOn(onMs); }
+                        if (onMs >= floorMs) {
+                            timing.classifyOn(onMs);
+                            // §38b: the dit cluster the estimator actually builds
+                            // from (short ONs), captured post-gate as the Kalman
+                            // sees them, to test mean-vs-median tail pull.
+                            if (sig.model.ditMs > 0 && onMs < 2.0f * sig.model.ditMs) {
+                                out.ditOnMs.push_back(onMs);
+                            }
+                        }
                     }
                     lastUp = e.sample;
                 }
@@ -177,6 +193,7 @@ namespace {
             if (sig.model.ditMs > 0) {
                 out.ditErrPct += 100.0f * (timing.getDitDuration() - sig.model.ditMs)
                                / sig.model.ditMs;
+                out.trueDitMs = sig.model.ditMs;
             }
         }
 
@@ -303,4 +320,154 @@ TEST_CASE("gap classification: default chain vs legacy (§23)", "[cw][.][gap-noi
     // promotion wins noise3.0 (§21) — the gap centres are no longer corrupted.
     CHECK(std::fabs(defaultDitErr) < std::fabs(legacyDitErr));
     CHECK(defaultClsErr <= legacyClsErr);
+}
+
+// §38 CONFOUND CHECK for #25 (gap ambiguity inside the beam).
+//
+// #25 proposes propagating gap ambiguity as soft beam branches instead of a
+// hard argmax. That is only the right lever if the misclassification is a
+// genuine *ambiguity* — the measured gap duration sits between two centres.
+// If instead it is driven by a BIASED dit estimate (the +38.9% overestimate,
+// §17.3.2), the centres themselves are wrong and soft branching would only
+// spread probability mass symmetrically about the wrong boundary — the fix
+// would be a dit-bias correction, not the beam.
+//
+// This substitutes the generator's TRUE dit into the classifier while holding
+// the detector event stream (hence the matched-gap set) identical, and reports
+// how much misclassification survives. The residual is the part #25 can address;
+// the removed part belongs to dit estimation, upstream of the beam.
+TEST_CASE("gap classification: dit-bias confound (§38)", "[cw][.][gap-noise-confound]") {
+    constexpr int SEEDS = 8;
+
+    struct Prof { const char* name; SignalParams params; };
+    SignalParams n3 = profileClean(80.0f); n3.noiseAmp = 3.0f;
+    const Prof profs[] = {
+        {"noise-3.0", n3},
+        {"worstcase", profileWorstCase(80.0f)},
+    };
+
+    printf("\n=== Gap misclassification: estimated dit vs TRUE dit (%d seeds) ===\n", SEEDS);
+    printf("est  = shipping default (Schmitt+Kalman), dit self-estimated\n");
+    printf("true = same detector events, classifier fed the generator's dit\n");
+    printf("%-11s %-4s %8s %8s  %-28s\n",
+           "profile", "dit", "ditErr%", "clsErr%", "confusion truth->cls");
+
+    for (const auto& p : profs) {
+        GapNoiseStats est  = probeNoisyGaps(MSG_FULL(), p.params, SEEDS, true,
+                                            false, cw::TIMING_KALMAN, false);
+        GapNoiseStats tru  = probeNoisyGaps(MSG_FULL(), p.params, SEEDS, true,
+                                            false, cw::TIMING_KALMAN, true);
+
+        auto row = [&](const char* tag, const GapNoiseStats& g) {
+            printf("%-11s %-4s %+8.1f %7.1f%%  E>C%3d E>W%2d C>E%3d C>W%2d W>C%2d W>E%2d\n",
+                   p.name, tag, g.ditErrPct, classErrPct(g),
+                   g.confusion[0][1], g.confusion[0][2],
+                   g.confusion[1][0], g.confusion[1][2],
+                   g.confusion[2][1], g.confusion[2][0]);
+        };
+        row("est", est);
+        row("true", tru);
+
+        const int estE  = classErrors(est);
+        const int truE  = classErrors(tru);
+        printf("            -> true dit removes %d of %d errors (%.0f%%); "
+               "residual %d is genuine ambiguity (#25's target)\n\n",
+               estE - truE, estE,
+               estE > 0 ? 100.0f * (estE - truE) / estE : 0.0f, truE);
+
+        CHECK(est.matched > 0);
+        CHECK(tru.matched > 0);
+        // The confound is real: fixing the dit removes a substantial share of
+        // the misclassification. If this fails, the dit bias is NOT load-bearing
+        // and #25 can proceed on the beam alone.
+        CHECK(truE < estE);
+    }
+}
+
+// §38b — SOURCE of the dit overestimate, aimed before any fix (user request).
+//
+// The +38.9% dit bias (§38) has two candidate sources, with different fixes:
+//   (a) detector edge widening — the Schmitt holds key-down longer under noise,
+//       so every ON is geometrically stretched before timing sees it. Measured
+//       by onStretchPct (up-delay minus down-delay vs true dit). Fix lives in
+//       the detector.
+//   (b) estimator tail-pull — even if ONs are only mildly widened on average,
+//       the Kalman tracks a mean and a noise-stretched right tail drags it up.
+//       Measured by mean vs median vs p25 of the dit-cluster ONs the estimator
+//       consumes. Fix is a robust dit estimator (median/mode), cheap and local.
+//
+// This does not fix anything; it points the fix.
+TEST_CASE("gap classification: dit-bias source (§38b)", "[cw][.][gap-dit-source]") {
+    constexpr int SEEDS = 8;
+
+    struct Prof { const char* name; SignalParams params; };
+    SignalParams n3 = profileClean(80.0f); n3.noiseAmp = 3.0f;
+    const Prof profs[] = {
+        {"clean",     profileClean(80.0f)},
+        {"noise-3.0", n3},
+        {"worstcase", profileWorstCase(80.0f)},
+    };
+
+    auto pctile = [](std::vector<float> v, float q) {
+        if (v.empty()) { return 0.0f; }
+        std::sort(v.begin(), v.end());
+        return v[std::min(v.size() - 1, (size_t)(q * v.size()))];
+    };
+    auto meanOf = [](const std::vector<float>& v) {
+        if (v.empty()) { return 0.0f; }
+        float s = 0; for (float x : v) { s += x; } return s / v.size();
+    };
+
+    printf("\n=== Dit overestimate: detector geometry vs estimator tail-pull (%d seeds) ===\n", SEEDS);
+    printf("detector = onStretchPct (edge widening, source a)\n");
+    printf("estimator = Kalman ditErr; ON-cluster mean/median/p25 err vs true dit (source b)\n");
+    printf("%-11s %10s %10s   %8s %8s %8s\n",
+           "profile", "onStretch%", "kalmanErr%", "on-mean%", "on-med%", "on-p25%");
+
+    for (const auto& p : profs) {
+        auto det = measureDetectorMulti(MSG_FULL(), p.params, SEEDS);
+        GapNoiseStats g = probeNoisyGaps(MSG_FULL(), p.params, SEEDS, true);
+
+        const float d = g.trueDitMs;
+        auto errPct = [&](float v) { return d > 0 ? 100.0f * (v - d) / d : 0.0f; };
+        const float onMean = errPct(meanOf(g.ditOnMs));
+        const float onMed  = errPct(pctile(g.ditOnMs, 0.5f));
+        const float onP25  = errPct(pctile(g.ditOnMs, 0.25f));
+
+        // Same probe, same seeds, different timing strategy: isolates whether the
+        // inflation is V1's ungated learning (V2 gates on classification
+        // confidence) or the linear-ms coordinate (LOG is multiplicative).
+        GapNoiseStats v2  = probeNoisyGaps(MSG_FULL(), p.params, SEEDS, true,
+                                           false, cw::TIMING_KALMAN_V2);
+        GapNoiseStats lg  = probeNoisyGaps(MSG_FULL(), p.params, SEEDS, true,
+                                           false, cw::TIMING_LOG);
+        GapNoiseStats gd  = probeNoisyGaps(MSG_FULL(), p.params, SEEDS, true,
+                                           false, cw::TIMING_KALMAN_GUARD);
+
+        printf("%-11s %+10.1f %+10.1f   %+8.1f %+8.1f %+8.1f   v2=%+.1f log=%+.1f guard=%+.1f\n",
+               p.name, det.mean.onStretchPct, g.ditErrPct, onMean, onMed, onP25,
+               v2.ditErrPct, lg.ditErrPct, gd.ditErrPct);
+
+        CHECK(!g.ditOnMs.empty());
+    }
+    printf("\nRead: kalmanErr(V1) driven by absorbed dahs (boundary=2*ditEst runaway);\n");
+    printf("      v2/log err << V1 err  => the confidence gate / log coord is the fix.\n");
+
+    // §39 factor sweep: the guard band (factor*ditEst, 2*ditEst) also contains
+    // jittered legitimate dits. Too low a factor blocks them and collapses ditEst
+    // downward; too high catches no absorbed dahs. Find the factor whose noise-3.0
+    // dit error is nearest zero without perturbing clean.
+    printf("\n=== §39 dah-guard factor sweep (dit err %% vs true) ===\n");
+    printf("%-11s %8s %8s %8s %8s %8s %8s\n",
+           "profile", "1.5", "1.6", "1.7", "1.8", "1.9", "1.95");
+    const float factors[] = {1.5f, 1.6f, 1.7f, 1.8f, 1.9f, 1.95f};
+    for (const auto& p : profs) {
+        printf("%-11s", p.name);
+        for (float f : factors) {
+            GapNoiseStats gd = probeNoisyGaps(MSG_FULL(), p.params, SEEDS, true,
+                                              false, cw::TIMING_KALMAN_GUARD, false, f);
+            printf(" %+8.1f", gd.ditErrPct);
+        }
+        printf("\n");
+    }
 }

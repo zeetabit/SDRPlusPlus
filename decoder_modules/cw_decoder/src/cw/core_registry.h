@@ -80,6 +80,13 @@ namespace cw {
             {"legacy+kalman2", "Legacy pipeline, corrected Kalman timing (V2)",
              []{ return detail::makeStaged(TIMING_KALMAN_V2); }},
 
+            // §39: V1 + asymmetric dah-absorption guard. Targets the exact
+            // +38.9% dit runaway §38b traced to V1 learning from noise-shortened
+            // dahs, narrower than V2's blanket confidence gate. Tests whether the
+            // one-directional guard clears the -10 dB wall that blocks V2/bpfauto/LR.
+            {"legacy+ditguard", "Legacy pipeline + asymmetric dah-absorption guard",
+             []{ return detail::makeStaged(TIMING_KALMAN_GUARD); }},
+
             // ── Log-duration timing (Stage 4). Multiplicative jitter model:
             //    dit/dah differ by a constant ln(3) offset and share one
             //    measurement variance, so the linear model's dah-gain error

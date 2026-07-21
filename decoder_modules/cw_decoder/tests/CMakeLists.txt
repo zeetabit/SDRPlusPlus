@@ -38,6 +38,7 @@ add_executable(cw_decoder_tests
     test_speed.cpp
     test_farnsworth.cpp
     test_gap_noise.cpp
+    test_ditguard.cpp
     test_recording.cpp
     test_corrector.cpp
     test_conversation.cpp

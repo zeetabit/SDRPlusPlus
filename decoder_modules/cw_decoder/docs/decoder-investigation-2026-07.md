@@ -3725,3 +3725,169 @@ proven against a feedback safety, not just a feed-forward threshold. bpfauto's t
 gate misses are therefore not fixable by a garbage-revert or re-eval layer. The
 variants are kept as measured negative results; `legacy` remains the default and
 bpfauto the robust-at-usable-SNR variant it became in §36.
+
+## 38. #25 confound check — gap misclassification is mostly a dit-bias, not ambiguity (2026-07-21)
+
+**Question.** #25 ("gap ambiguity inside the beam") proposes replacing the gap
+classifier's hard argmax with soft beam branches, so an ambiguous gap forks the
+beam instead of committing. That is the right lever *only if* the noise-3.0
+misclassification (§17: 12.2% of structurally intact gaps) is genuine ambiguity —
+the measured duration sitting between two centres. If it is instead driven by the
++38.9% dit **overestimate** (§17.3.2), the centres themselves are wrong
+(`elem=dit`, `char=3·dit`, `word=7·dit` all scale with the biased dit), and soft
+branching would only spread probability mass symmetrically about a wrong boundary.
+Fixing the dit is a different, upstream fix.
+
+**Method** (`[gap-noise-confound]`, `AdaptiveTiming::setDitOverride`, test-only).
+Substitute the generator's TRUE dit into the classifier's centre/sigma computation
+while holding the detector event stream — hence the matched-gap set — byte-identical
+to the estimated-dit run. Everything the classifier does is unchanged except the
+dit it reasons from. 8 seeds, MSG_FULL, shipping default (Schmitt+Kalman).
+
+| profile | dit | ditErr% | clsErr% | E>C | C>E | W>C |
+|---|---|---|---|---|---|---|
+| noise-3.0 | estimated | +38.9 | 12.4% | 64 | 35 | 39 |
+| noise-3.0 | **true** | +38.9 | **3.8%** | 18 | 5 | 16 |
+| worstcase | estimated | +7.3 | 7.7% | 40 | 22 | 32 |
+| worstcase | **true** | +7.3 | **3.4%** | 9 | 9 | 24 |
+
+**Result.** Feeding the true dit removes **69%** of the noise-3.0
+misclassification (101 of 146 errors) and **56%** of worstcase (55 of 98) — with
+zero change to the detector or the gap durations. The residual (3.8% / 3.4%) is
+the genuine ambiguity #25 could address.
+
+**Two findings, both against proceeding with #25 as scoped:**
+
+1. **The dit bias is the dominant driver, not a co-factor.** The naive centre-shift
+   analysis predicted only C>E and W>C would be inflation-driven (a true 1-dit gap
+   sits below the inflated elem centre, so E>C looked like pure edge-jitter). The
+   measurement refutes that: E>C also collapses 64→18. The inflated dit corrupts
+   the *adaptive* centre estimator too (`boundary=2·dit` mis-sorts stretched
+   element gaps into the long cluster), so the bias reaches every cell, not just
+   the two the static-centre model predicted. Even worstcase's modest +7.3% dit
+   error drives 56% of its gap errors — gap boundaries are multiplicative in dit,
+   so the classifier is disproportionately sensitive to a small dit bias.
+
+2. **Soft branching without a dit fix is centred on the wrong boundary.** Spreading
+   mass about `char=3·dit` when the true char gap is at `3·D` and `dit=1.389·D`
+   biases every soft branch the same way the hard decision is biased. The beam
+   would hedge around a systematically wrong centre — second-order polish on a
+   first-order error.
+
+**Reframe.** The measured lever is the **noise-driven dit overestimate in the
+shipping `legacy` default**, upstream of the beam. LR+log already largely removes
+it (§23) but was reverted for fast-CW regression (§25); the open question is
+whether the Kalman/Schmitt dit estimate can be made noise-robust on its own (the
+ON-duration mean is stretched asymmetrically by noise — a robust/mode estimator or
+a gap-cross-checked dit are the candidates). #25's soft-branch idea remains valid
+for the ~3.5% residual but is not the first move. No decoder change this section;
+one test-only hook added.
+
+## 38b. Source of the dit overestimate — V1 Kalman's ungated dah-absorption runaway (2026-07-21)
+
+**Question** (aimed before any fix). §38 showed the +38.9% dit bias drives most of
+the noise-3.0 gap misclassification. Two candidate sources, two different fixes:
+(a) detector edge-widening — measured by `onStretchPct`; fix in the detector.
+(b) estimator tail-pull — measured by mean/median/p25 of the dit-cluster ONs the
+estimator consumes; fix is a robust (median/mode) dit estimator.
+
+**Method** (`[gap-dit-source]`, 8 seeds, MSG_FULL, aligned seeds). Report the
+detector's ON widening next to the Kalman's dit output next to the distribution of
+the dit-cluster ONs, plus the same probe under V2 (confidence-gated) and LOG.
+
+| profile | onStretch% (det) | ditErr% V1 | on-mean% | on-med% | on-p25% | V2 | LOG |
+|---|---|---|---|---|---|---|---|
+| clean | +9.8 | +7.9 | +10.0 | +8.8 | +7.5 | +3.0 | +5.4 |
+| noise-3.0 | **−8.7** | **+38.9** | **−10.1** | **−7.5** | −26.2 | **−6.7** | −33.5 |
+| worstcase | −2.8 | +7.3 | +9.4 | +4.3 | −18.5 | −14.3 | −12.7 |
+
+**Both candidate fixes are refuted, and the real source is isolated:**
+
+1. **Not detector edge-widening.** Under noise-3.0 the detector *shortens* ONs
+   (onStretch −8.7%), the opposite sign to the +38.9% dit output. Source (a) dead.
+2. **Not estimator tail-pull.** The dit-cluster ONs the estimator consumes average
+   **−10%** (median −7.5%): everything fed in is biased *short*. A median/mode
+   estimator on that cluster would return −7.5%, not repair +38.9%. Source (b) dead.
+3. **The +38.9% is manufactured inside V1's dit/dah classification.** The dit
+   output is disconnected from the durations consumed — only possible if elements
+   *outside* the dit cluster are being absorbed into ditEst. The mechanism:
+   `boundary = (ditEst + 3·ditEst)/2 = 2·ditEst`, and `legacy = TIMING_KALMAN` is
+   V1, which learns from **every** element (`timing.h:494`, V2's `confPre >=
+   learnThreshold` gate is V1-exempt). Once ditEst drifts up, a noise-shortened dah
+   (240 ms → ~219 ms) falls below `2·ditEst` (222 ms at ditEst=111), is classified
+   DIT, and its `ditEst += K·(219 − 111)` pushes ditEst higher — an **asymmetric
+   positive-feedback runaway**. V2's confidence gate blocks the ambiguous updates
+   that drive it: **+38.9% → −6.7%**, back onto the true dit cluster. LOG
+   over-corrects to −33.5% (the coordinate that reverted LR+log, §25).
+
+**Synthesis and the wall.** The #25 line traces cleanly: gap misclassification ←
+dit-centre corruption ← +38.9% dit bias (§38) ← V1 ungated dah-absorption (§38b).
+The fix already exists as the confidence gate (`+kalman2` = V2), which repairs the
+dit source and, per the n=24 survey, wins 10 of 11 profiles (noise-3.0 0.816→0.706,
+worstcase 0.624→0.350, hand-keyed 0.158→0.034) — but regresses at **noise-4.0**
+(0.903→0.989), the same −10 dB total-failure regime that blocked bpfauto (§35–37)
+and the LR detector (§25). Three independent, mechanistically-different improvements
+now converge on the same wall.
+
+**A new, surgical angle the prior campaigns did not try.** The runaway is
+*asymmetric* — it only inflates. That admits a fix narrower than V2's blanket
+confidence gate: refuse (or down-weight) a DIT-classified update whose duration is
+suspiciously long for a dit (e.g. > 1.5·ditEst), blocking dah-absorption in the
+one direction it occurs without gating the low-confidence updates V2 also drops at
+noise-4.0. Whether that clears the −10 dB wall or merely joins it is the open,
+testable question. No decoder change this section; measurement only.
+
+## 39. The asymmetric dah-guard — refuted, the runaway is one-directional but the fix cannot be (2026-07-21)
+
+**Hypothesis** (§38b). The dit runaway is asymmetric (dahs only ever inflate
+ditEst), so a fix narrower than V2's blanket confidence gate should work: refuse
+learning from a DIT-classified element longer than `factor·ditEst`, blocking
+dah-absorption in the one direction it occurs. Built as `legacy+ditguard`
+(`TIMING_KALMAN_GUARD` = V1 + `guardDah`), `factor` swept 1.5–1.95.
+
+**Result — refuted at both the estimator and the decode level.**
+
+Dit-error sweep (`[gap-dit-source]`, 8 seeds):
+
+| profile | 1.5 | 1.6 | 1.7 | 1.8 | 1.9 | 1.95 |
+|---|---|---|---|---|---|---|
+| clean | +7.9 | +7.9 | +7.9 | +7.9 | +7.9 | +7.9 |
+| noise-3.0 | −57.5 | −57.5 | −57.5 | −57.2 | −56.4 | −56.4 |
+| worstcase | −9.8 | −5.2 | +0.2 | +4.4 | +9.6 | +9.6 |
+
+Decode CER (`[ditguard]`, 48 seeds):
+
+| profile | legacy | ditguard | kalman2 |
+|---|---|---|---|
+| clean | 0.0000 | 0.0000 | 0.0000 |
+| noise-2.0 | 0.0977 | 0.0387 | 0.0370 |
+| noise-3.0 | 0.8348 | **1.7347** | 0.6884 |
+| noise-4.0 | 0.9090 | **1.9859** | 0.9798 |
+| handkeyed | 0.1749 | 0.0516 | 0.0311 |
+| worstcase | 0.6168 | 0.4357 | 0.3542 |
+
+**Why it fails — the estimator is bistable under heavy noise.** The +38.9% dit
+error (V1, §38b) is not a drift toward a wrong point; it is a stable equilibrium
+where the upward pull (absorbed dahs) balances the downward pull (short noise
+dits/fragments). Remove *only* the upward pull and ditEst collapses through true
+(−57%); once it falls below true, real dits sit above the `2·ditEst` boundary,
+are classified DAH, and the few remaining DIT-classified elements are the shortest
+noise fragments, which drive an even faster downward runaway. The factor barely
+moves noise-3.0 (−57.5 at 1.5, still −56.4 at 1.95, blocking only a sliver) because
+the system is at an unstable equilibrium: any nudge to one side tips it fully.
+
+**The decode split confirms the mechanism.** Where the estimator stays near the
+good equilibrium — noise-2.0, hand-keyed, worstcase — the guard *helps* (0.098→0.039,
+0.175→0.052, 0.617→0.436), approaching kalman2. Where noise-3.0+ tips it into
+collapse, CER goes to garbage (>1.0, 2× worse than legacy). The guard detonates on
+the −10 dB wall rather than clearing it.
+
+**Conclusion.** The runaway is one-directional but the *correction* cannot be:
+V2's confidence gate works precisely because it drops low-confidence updates in
+**both** directions (noise-3.0 dit +38.9%→−6.7%), preserving the balance. kalman2
+dominates ditguard on every profile and beats legacy on 5 of 6 — its sole blocker
+is noise-4.0 (0.980 vs 0.909), the same −10 dB wall. Three mechanistically-distinct
+timing/detector/front-end fixes (LR §25, bpfauto §35–37, and now every dit-estimate
+fix) fail at exactly that regime. The wall is a property of the signal at −10 dB,
+not of any stage. `legacy+ditguard` kept as a measured negative; `legacy` remains
+the default.

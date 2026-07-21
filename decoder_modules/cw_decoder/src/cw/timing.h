@@ -22,6 +22,9 @@ namespace cw {
         TIMING_BIMODAL,
         TIMING_KALMAN,      // Kalman filter with Bayesian gap classification (V1, historical)
         TIMING_KALMAN_V2,   // + corrected dah gain, confidence-gated learning, fixed R floor
+        TIMING_KALMAN_GUARD,// V1 + asymmetric dah-absorption guard (docs §39): blocks the
+                            // one-directional ditEst runaway §38b traced to V1 learning
+                            // from noise-shortened dahs, without V2's blanket gate
         TIMING_LOG,         // log-duration Kalman: multiplicative jitter model (Mills 1977)
         TIMING_LOG_ROBUST,  // + Huberised state update: outliers teach R but barely move x
         TIMING_LOG_GUARDED, // + hard x-freeze beyond guardK sigma; R still learns full.
@@ -420,6 +423,13 @@ namespace cw {
     public:
         void init() { reset(); }
         void setVariant(KalmanVariant v) { variant = v; }
+        // Asymmetric dah-absorption guard (docs §38b/§39). V1 learns from every
+        // element; under noise a shortened dah can fall below the 2*ditEst
+        // boundary, be classified DIT, and inflate ditEst in a positive-feedback
+        // runaway. This blocks learning from DIT-classified elements too long to
+        // be a dit, in the one direction the runaway occurs.
+        void setGuardDah(bool on) { guardDah = on; }
+        void setGuardDahFactor(float f) { guardDahFactor = f; }
 
         TimingEvent classifyOn(float durationMs) {
             TimingEvent evt;
@@ -495,7 +505,13 @@ namespace cw {
 
             if (ditLik >= dahLik) {
                 evt.element = DIT;
-                if (learn) {
+                // §39: a DIT-classified element longer than guardDahFactor*ditEst
+                // is a noise-shortened dah absorbed across the 2*ditEst boundary.
+                // Learning from it is the sole driver of the +38.9% runaway
+                // (§38b), and the runaway is one-directional, so the guard is too:
+                // classification is unchanged, only the upward learning is blocked.
+                const bool dahAbsorption = guardDah && durationMs > guardDahFactor * ditEst;
+                if (learn && !dahAbsorption) {
                     float K = P / (P + R);
                     ditEst += K * (durationMs - ditEst);
                     P *= (1.0f - K);
@@ -566,6 +582,8 @@ namespace cw {
         static constexpr float learnThreshold = 0.60f;  // V2: skip state update below this classification confidence
         KalmanVariant variant = KALMAN_V1;
         static constexpr float processNoise = 0.001f;  // slow drift allowed
+        bool guardDah = false;                          // §39 asymmetric dah-guard
+        float guardDahFactor = 1.5f;                    // DIT updates above this*ditEst are dah-absorption
 
         float seedBuf[8] = {};
         float ditEst = 80.0f;
@@ -592,6 +610,7 @@ namespace cw {
             _sampleRate = sampleRate;
             _strategy = strategy;
             kalman.setVariant(strategy == TIMING_KALMAN_V2 ? KALMAN_V2 : KALMAN_V1);
+            kalman.setGuardDah(strategy == TIMING_KALMAN_GUARD);
             logTiming.setRobust(strategy == TIMING_LOG_ROBUST);
             logTiming.setGuarded(strategy == TIMING_LOG_GUARDED);
             reset();
@@ -604,6 +623,7 @@ namespace cw {
                 case TIMING_MEDIAN:  result = median.classifyOn(durationMs); break;
                 case TIMING_BIMODAL: result = bimodal.classifyOn(durationMs); break;
                 case TIMING_KALMAN:
+                case TIMING_KALMAN_GUARD:
                 case TIMING_KALMAN_V2: result = kalman.classifyOn(durationMs); break;
                 case TIMING_LOG:
                 case TIMING_LOG_ROBUST:
@@ -625,7 +645,12 @@ namespace cw {
             gapDurations.push_back(durationMs);
             if ((int)gapDurations.size() > 40) gapDurations.erase(gapDurations.begin());
 
-            float dit = getDitDuration();
+            // _ditOverride (test-only, docs §38) substitutes a known dit into
+            // the gap-centre and sigma computation ONLY, leaving getDitDuration()
+            // and the element gate untouched. It isolates the gap misclassifi-
+            // cation driven by a biased dit estimate from the part driven by
+            // detector edge-jitter on the measured gap duration.
+            float dit = _ditOverride > 0.0f ? _ditOverride : getDitDuration();
             if (dit < 1.0f) dit = 80.0f;
 
             float sigma = estimateJitterSigma(dit);
@@ -691,6 +716,7 @@ namespace cw {
                 case TIMING_MEDIAN:  return median.getWPM();
                 case TIMING_BIMODAL: return bimodal.getWPM();
                 case TIMING_KALMAN:
+                case TIMING_KALMAN_GUARD:
                 case TIMING_KALMAN_V2: return kalman.getWPM();
                 case TIMING_LOG:
                 case TIMING_LOG_ROBUST:
@@ -705,6 +731,7 @@ namespace cw {
                 case TIMING_MEDIAN:  return median.getDitDuration();
                 case TIMING_BIMODAL: return bimodal.getDitDuration();
                 case TIMING_KALMAN:
+                case TIMING_KALMAN_GUARD:
                 case TIMING_KALMAN_V2: return kalman.getDitDuration();
                 case TIMING_LOG:
                 case TIMING_LOG_ROBUST:
@@ -719,6 +746,7 @@ namespace cw {
                 case TIMING_MEDIAN:  return median.isLocked();
                 case TIMING_BIMODAL: return bimodal.isLocked();
                 case TIMING_KALMAN:
+                case TIMING_KALMAN_GUARD:
                 case TIMING_KALMAN_V2: return kalman.isLocked();
                 case TIMING_LOG:
                 case TIMING_LOG_ROBUST:
@@ -751,6 +779,12 @@ namespace cw {
         // hardcoded 1:3:7 cold start is a paired measurement on identical seeds
         // rather than a rebuild, and so the losing arm stays reproducible.
         void setGapBootstrap(bool on) { gapBootstrap = on; }
+
+        // Test-only (docs §38 confound probe). 0 disables. See classifyOff.
+        void setDitOverride(float ms) { _ditOverride = ms; }
+
+        // §39 dah-guard factor sweep (test-only). See KalmanTiming::guardDahFactor.
+        void setKalmanGuardFactor(float f) { kalman.setGuardDahFactor(f); }
 
         // Gap-centre instrumentation (docs §16). estimateGapCenters silently
         // substitutes hardcoded ratios both when it has too little data and when
@@ -908,6 +942,7 @@ namespace cw {
         std::vector<float> gapDurations;      // recent OFF-durations for gap center estimation
         bool gapBootstrap = false;            // config, not state: survives reset()
         int  minGapSamples = 10;              // relaxed only for retro replay (docs §16.4)
+        float _ditOverride = 0.0f;            // test-only confound probe (docs §38)
     };
 
 }
