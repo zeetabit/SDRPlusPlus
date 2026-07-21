@@ -140,15 +140,17 @@ resolve. No decoder changed; nothing became promotable.
 
 **Candidates now, in dependency order:**
 
-1. **The runaway-insertion mode — diagnosed (§20.7).** `legacy+edge+log` reaches
-   CER 1.79 at 15 WPM / noise 3.0 (t=18) and 1.21 on real audio + noise, emitting
-   2.6× the reference as a flood of the shortest letters. Cause: `log` timing
-   under-estimates dit by 44% under noise (opposite sign to legacy's +37%
-   overestimate, which §20.7 independently reproduces), admitting noise as
-   elements. `log`'s jitter win and its noise catastrophe are the same
-   tail-insensitivity property, so it is not tunable into a free win here. Next
-   would be testing a tail-robust `log` variant — an experiment, no longer a
-   diagnosis.
+1. **The runaway-insertion mode — diagnosed and its fix ruled out (§20.7–20.8).**
+   `legacy+edge+log` reaches CER 1.79 at 15 WPM / noise 3.0 (t=18) and 1.21 on
+   real audio + noise, a flood of the shortest letters from `log` under-estimating
+   dit by 44% (opposite sign to legacy's +37%). The tail-robust variant
+   (`+logguard`, freeze dit for spike-magnitude outliers) halves the moderate-noise
+   runaway but cannot touch heavy noise: R-saturation reopens the gate, and
+   freezing R too reintroduces the qrm/qrn catastrophe (0.002→0.197). Spike and
+   interference are the same innovation magnitude, so no magnitude gate separates
+   them. A real fix needs a non-magnitude spike discriminator — the
+   likelihood-ratio detector (#24), still blocked on the noise regime lacking
+   real-audio ground truth.
 2. **Why is dit +38.9% at noise 3.0?** (§17.3.2) The largest unexplained number
    in these docs, and it sits upstream of the gap classifier — gap centres derive
    from `dit`, so nothing in gap classification can be fixed while its input is
@@ -2818,9 +2820,54 @@ noise, opposite bias, opposite catastrophe.
 **Consequence for `log`.** Its clean-signal timing win (§20.3: helps jitter at
 every speed) and its noise catastrophe are the *same* property — insensitivity to
 the long-duration tail helps when jitter stretches elements and destroys it when
-noise fragments them. It is not tunable into a free win at this formulation.
-⊘ Whether a tail-robust variant (e.g. down-weighting sub-threshold-duration
-events before the log transform) breaks the coupling is unmeasured.
+noise fragments them. It is not tunable into a free win at this formulation —
+§20.8 measured the tail-robust variant and confirms it.
+
+### 20.8 The tail-robust log experiment fails, for a precise reason
+
+The §20.7 diagnosis names the driver as short spikes pulling `x` down until
+`minElementMs` (`0.15·getDitDuration()`, staged_core.h) collapses and admits more
+spikes. `TIMING_LOG_GUARDED` (`legacy+logguard`, `legacy+edge+logguard`) attacks
+exactly that: freeze `x` for any element beyond `guardK = 3σ`, so a spike cannot
+move the estimate. This is distinct from the two attempts already on record —
+`logrobust` only *downweights* `x` (Huber, never zero), and the hard gate the
+`LogTiming` comment rejected dropped the `R` update too.
+
+Two configurations, both measured against the paired n=96 gate (`[promotion]`):
+
+**Freeze `x`, let `R` learn** (shipped as `legacy+logguard`). The runaway halves
+at moderate noise and is untouched at heavy noise:
+
+| | legacy | +edge+log | +edge+logguard |
+|---|---|---|---|
+| noise3.0 | 0.8173 | +0.971 (t=18.1) | **+0.600 (t=10.7)** |
+| noise4.0 | 0.9108 | +0.898 (t=12.4) | +0.970 (t=13.9) |
+
+Interference is preserved (qrm/qrn unchanged), but noise4.0 does not move,
+because `R` still learns the full spike innovation, saturates to its 0.25 cap,
+`V` grows, and `z = |innov|/√V` falls back under `guardK` — the gate widens and
+the guard stops firing. Freezing `x` cannot outrun `R` saturation.
+
+**Also freeze `R` beyond `guardK`** (tried, reverted). It blunts the runaway
+further but reintroduces the exact catastrophe the `LogTiming` comment warned of:
+
+| | +log qrm | +log qrn |
+|---|---|---|
+| R learns (guard off) | 0.0018 | 0.0006 |
+| R frozen on outliers | **0.1966** | **0.0980** |
+
+**The finding is the coupling, and it is stronger than the author's note.** Noise
+spikes and qrm/qrn interference are both large-innovation outliers,
+indistinguishable by magnitude. `R`-learning-from-outliers is simultaneously the
+runaway driver (saturates the gate under a flood) and the interference tolerance
+(widens acceptance so the decoder rides through qrm/qrn). The same trigger serves
+both, so no magnitude-based gate separates them: freezing `R` to stop the runaway
+destroys the tolerance, and leaving `R` free lets the runaway proceed at heavy
+noise. `legacy+logguard` is kept as the measured partial result; **nothing here is
+promotable.** A real fix would need a spike discriminator that is not innovation
+magnitude — envelope shape, or the detector rejecting the excursion before timing
+sees it — which is the likelihood-ratio detector line (#24), still blocked on the
+noise regime having no real-audio ground truth.
 
 - ⊘ The `25 WPM × noise 2.0` anomaly (§20.3).
 - **Debt, not done:** four of the five hardcoded profile lists still carry their

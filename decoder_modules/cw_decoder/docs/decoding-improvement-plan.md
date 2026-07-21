@@ -405,6 +405,7 @@ Key finding: **filter bandwidth is the dominant factor** — 35 Hz vs 68 Hz = 20
 | 30 | Real-recording benchmark + model-mismatch profiles | N/A | N/A | Medium | **Done (Phase 23)** — closed as data collection, open as validation for #24 |
 | 31 | WPM-locked adaptive BPF (runtime tap update) | N/A | High | Medium | **Candidate — evidence-backed.** From Phase 10 "future work", never in this matrix. `+bpf20` helps slow CW and costs 35 WPM (0.0390): a filter matched to locked WPM dissolves a tradeoff already measured, rather than one assumed |
 | 32 | Paired per-seed comparison + factorial profiles | N/A | N/A | Low | **Done (Phase 25)** — `comparePaired` in `cw_bench_stats.h` |
+| 33 | Guarded log timing (x-freeze for spikes) | Low | High | Low | **Measured, not promoted (§20.8)** — `+logguard`. Halves the noise3.0 runaway, useless at noise4.0; R-saturation is inseparable from qrm/qrn tolerance |
 
 ### Reprioritized leftovers (2026-07-20, after Phase 25)
 

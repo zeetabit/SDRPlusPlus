@@ -24,6 +24,13 @@ namespace cw {
         TIMING_KALMAN_V2,   // + corrected dah gain, confidence-gated learning, fixed R floor
         TIMING_LOG,         // log-duration Kalman: multiplicative jitter model (Mills 1977)
         TIMING_LOG_ROBUST,  // + Huberised state update: outliers teach R but barely move x
+        TIMING_LOG_GUARDED, // + hard x-freeze beyond guardK sigma; R still learns full.
+                            // Targets the diagnosed runaway (docs §20.7): a spike
+                            // flood pulls x down, shrinking minElementMs, admitting
+                            // more spikes. LOG_ROBUST only downweights x (never 0)
+                            // and its full-R learning saturates R, widening the gate
+                            // and disabling its own Huber weight. Freezing x breaks
+                            // the drift; full-R keeps the qrm/qrn tolerance.
     };
 
     // ════════════════════════════════════════════════════════════
@@ -274,6 +281,7 @@ namespace cw {
     public:
         void init() { reset(); }
         void setRobust(bool r) { robust = r; }
+        void setGuarded(bool g) { guarded = g; }
 
         TimingEvent classifyOn(float durationMs) {
             TimingEvent evt;
@@ -349,6 +357,21 @@ namespace cw {
                     float z = fabsf(innovation) / sqrtf(V);
                     if (z > huberK) { w = huberK / z; }
                 }
+                // GUARDED: freeze the state entirely beyond guardK sigma (a real
+                // element sits within ~1 sigma of its hypothesis, so a large
+                // innovation is a noise spike, not a speed change). Unlike ROBUST
+                // (w = huberK/z, never 0) this stops the spike moving x at all.
+                //
+                // R still learns full here, deliberately: also freezing R fixes
+                // the runaway further but reintroduces the qrm/qrn catastrophe
+                // (qrm 0.002 -> 0.197), because interference outliers and noise
+                // spikes are the same magnitude and R-learning is what rides
+                // through interference (docs §20.7). Keeping R means this only
+                // partially blunts the runaway — measured, not promoted.
+                if (guarded) {
+                    float z = fabsf(innovation) / sqrtf(V);
+                    if (z > guardK) { w = 0.0f; }
+                }
                 x += w * K * innovation;
                 P *= (1.0f - w * K);
                 R = R * 0.95f + 0.05f * innovation * innovation;
@@ -382,7 +405,9 @@ namespace cw {
         static constexpr float learnThreshold = 0.60f;
         static constexpr float ditPrior = 1.2f;
         static constexpr float huberK = 2.0f;   // innovations beyond 2 sigma are downweighted
+        static constexpr float guardK = 3.0f;    // innovations beyond 3 sigma freeze x entirely
         bool robust = false;
+        bool guarded = false;
 
         float seedBuf[8] = {};
         float x = 4.382027f;   // ln 80 ms
@@ -568,6 +593,7 @@ namespace cw {
             _strategy = strategy;
             kalman.setVariant(strategy == TIMING_KALMAN_V2 ? KALMAN_V2 : KALMAN_V1);
             logTiming.setRobust(strategy == TIMING_LOG_ROBUST);
+            logTiming.setGuarded(strategy == TIMING_LOG_GUARDED);
             reset();
         }
 
@@ -580,7 +606,8 @@ namespace cw {
                 case TIMING_KALMAN:
                 case TIMING_KALMAN_V2: result = kalman.classifyOn(durationMs); break;
                 case TIMING_LOG:
-                case TIMING_LOG_ROBUST: result = logTiming.classifyOn(durationMs); break;
+                case TIMING_LOG_ROBUST:
+                case TIMING_LOG_GUARDED: result = logTiming.classifyOn(durationMs); break;
                 default:             result = kalman.classifyOn(durationMs); break;
             }
             // Track element durations for gap sigma estimation
@@ -666,7 +693,8 @@ namespace cw {
                 case TIMING_KALMAN:
                 case TIMING_KALMAN_V2: return kalman.getWPM();
                 case TIMING_LOG:
-                case TIMING_LOG_ROBUST: return logTiming.getWPM();
+                case TIMING_LOG_ROBUST:
+                case TIMING_LOG_GUARDED: return logTiming.getWPM();
             }
             return 0;
         }
@@ -679,7 +707,8 @@ namespace cw {
                 case TIMING_KALMAN:
                 case TIMING_KALMAN_V2: return kalman.getDitDuration();
                 case TIMING_LOG:
-                case TIMING_LOG_ROBUST: return logTiming.getDitDuration();
+                case TIMING_LOG_ROBUST:
+                case TIMING_LOG_GUARDED: return logTiming.getDitDuration();
             }
             return 80.0f;
         }
@@ -692,7 +721,8 @@ namespace cw {
                 case TIMING_KALMAN:
                 case TIMING_KALMAN_V2: return kalman.isLocked();
                 case TIMING_LOG:
-                case TIMING_LOG_ROBUST: return logTiming.isLocked();
+                case TIMING_LOG_ROBUST:
+                case TIMING_LOG_GUARDED: return logTiming.isLocked();
             }
             return false;
         }

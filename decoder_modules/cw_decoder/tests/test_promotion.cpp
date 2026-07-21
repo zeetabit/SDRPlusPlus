@@ -143,9 +143,11 @@ TEST_CASE("Promotion: paired adjudication vs legacy", "[cw][.][promotion]") {
         baselines.push_back(runCell("legacy", pr.name, pr.message, pr.params, PSEEDS));
     }
 
-    adjudicate("legacy+edge",    baselines);
-    adjudicate("legacy+mf",      baselines);
-    adjudicate("legacy+edge+mf", baselines);
+    adjudicate("legacy+edge",       baselines);
+    adjudicate("legacy+mf",         baselines);
+    adjudicate("legacy+edge+mf",    baselines);
+    adjudicate("legacy+logguard",   baselines);
+    adjudicate("legacy+edge+logguard", baselines);
     const Verdict edgeLog = adjudicate("legacy+edge+log", baselines);
 
     // ── Instrument self-checks ────────────────────────────────

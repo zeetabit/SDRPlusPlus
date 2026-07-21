@@ -72,6 +72,16 @@ namespace cw {
             {"legacy+logrobust", "Log timing + Huberised update (outliers teach R, not x)",
              []{ return detail::makeStaged(TIMING_LOG_ROBUST); }},
 
+            // ── Guarded log timing (docs §20.7). The +log runaway is a spike
+            //    flood pulling dit down until minElementMs collapses; robust
+            //    only downweights x and its full-R learning saturates the gate.
+            //    Guarded freezes x beyond 3 sigma so a spike cannot move it. ──
+            {"legacy+logguard", "Log timing + hard x-freeze for outliers (§20.7)",
+             []{ return detail::makeStaged(TIMING_LOG_GUARDED); }},
+
+            {"legacy+edge+logguard", "Edge correction + guarded log timing",
+             []{ return detail::makeStaged(TIMING_LOG_GUARDED, 100.0f, 100.0f, MF_RESET, EDGE_COMPENSATE); }},
+
             // ── Matched-filter resize transient (docs §12). Zeroing the ring
             //    buffer on a window change injects a dropout mid-element; at
             //    25 WPM this produced 14 spurious transitions on a *noiseless*

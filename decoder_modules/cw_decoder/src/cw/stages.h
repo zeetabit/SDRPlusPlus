@@ -124,6 +124,7 @@ namespace cw {
                 case TIMING_KALMAN_V2: return "kalman2";
                 case TIMING_LOG:        return "log";
                 case TIMING_LOG_ROBUST: return "logrobust";
+                case TIMING_LOG_GUARDED: return "logguard";
             }
             return "unknown";
         }
