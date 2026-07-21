@@ -257,3 +257,35 @@ TEST_CASE("Noise-aware BPF vs legacy across calibrated SNR (dB)", "[cw][.][bpf-s
     CHECK(regress == 0);
     CHECK(wins > 0);
 }
+
+// The RUNTIME rule (docs §30): legacy+bpfauto is a real registry core that
+// retunes its BPF at timing lock from getDitDuration + getSNR — no ground truth.
+// Measures how close the runtime approximation lands to the §29 ceiling (which
+// used true dit + true noiseAmp), and whether the retune transient regresses
+// anything. This is the promotion question for the shippable core.
+TEST_CASE("Runtime WPM-locked BPF (legacy+bpfauto) vs legacy", "[cw][.][bpf-runtime]") {
+    const auto profiles = standardProfiles();
+    printf("\n=== legacy+bpfauto (runtime, no ground truth) vs legacy (paired, n=%d) ===\n", PSEEDS);
+    printf("%-15s %8s %8s %9s %8s  %s\n", "profile", "legacy", "bpfauto", "delta", "t", "verdict");
+
+    int better = 0, worse = 0, harmful = 0;
+    for (const auto& pr : profiles) {
+        auto base = runCell("legacy",         pr.name, pr.message, pr.params, PSEEDS);
+        auto rt   = runCell("legacy+bpfauto", pr.name, pr.message, pr.params, PSEEDS);
+        auto d = comparePaired(base.cerSamples, rt.cerSamples);
+        const bool harm = d.harmful(NON_INFERIORITY_TOL);
+        printf("%-15s %8.4f %8.4f %+9.4f %8.2f  %s%s\n",
+               pr.name, base.cerMean, rt.cerMean, d.meanDelta, d.t,
+               d.verdict(), harm ? " HARM" : "");
+        if (d.significant() && d.meanDelta < 0) { better++; }
+        if (d.significant() && d.meanDelta > 0) { worse++; }
+        if (harm) { harmful++; }
+    }
+    printf("\n  %d significant better, %d significant worse, %d harmful\n", better, worse, harmful);
+    printf("  verdict: %s\n",
+           (harmful == 0 && better > 0) ? "PROMOTABLE — runtime rule matches the ceiling cleanly"
+                                        : "inspect HARM/worse rows — retune transient or SNR miscalibration");
+    // The runtime rule must keep the big heavy-noise wins and add no regression.
+    CHECK(worse == 0);
+    CHECK(better > 0);
+}

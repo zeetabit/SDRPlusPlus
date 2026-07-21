@@ -19,13 +19,14 @@ namespace cw {
                 float bpfCutoff = 100.0f, float bpfTrans = 100.0f,
                 MatchedFilterResize mfResize = MF_RESET,
                 EdgeBias edgeBias = EDGE_RAW,
-                PeakTracker peak = PEAK_INSTANT_ATTACK) {
+                PeakTracker peak = PEAK_INSTANT_ATTACK,
+                bool adaptiveBpf = false) {
             return std::make_unique<StagedCore>(
                 std::make_unique<EnvelopeFrontEnd>(bpfCutoff, bpfTrans),
                 std::make_unique<SchmittDetector>(edgeBias, peak),
                 std::make_unique<AdaptiveTimingStage>(timing),
                 std::make_unique<BeamSymbolDecoder>(),
-                mfResize);
+                mfResize, 1.0f, adaptiveBpf);
         }
 
         // Likelihood-ratio detector (docs §24). Its own factory: the CUSUM
@@ -133,6 +134,17 @@ namespace cw {
             //    runaway there. Measured, not promoted — the attempted §25 fix. ──
             {"legacy+lr+log+adapt", "Speed-adaptive LR bound (§26)",
              []{ return detail::makeLR(TIMING_LOG, false, 0.5f, 3.0f, -3.0f, 1.0f, true); }},
+
+            // ── WPM-locked, noise-aware pre-detection BPF (docs §29–31). At
+            //    timing lock the BPF is retuned to a bandwidth matched to the
+            //    locked WPM (ENBW ≈ 2/T_dit) but only as far as the detector's
+            //    SNR warrants — wide at high SNR (jitter-limited signals keep
+            //    their edges), narrow at low SNR (noise rejection). The ground-
+            //    truth ceiling: 6 significant wins, 0 regressions (§29), noise3.0
+            //    0.82 → 0.07; this core is the runtime approximation. ──
+            {"legacy+bpfauto", "Legacy pipeline, WPM-locked noise-aware BPF (§30)",
+             []{ return detail::makeStaged(TIMING_KALMAN, 100.0f, 100.0f, MF_RESET,
+                                           EDGE_RAW, PEAK_INSTANT_ATTACK, true); }},
 
             // ── Matched-filter resize transient (docs §12). Zeroing the ring
             //    buffer on a window change injects a dropout mid-element; at

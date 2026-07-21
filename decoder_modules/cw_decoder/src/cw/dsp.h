@@ -125,6 +125,23 @@ namespace cw {
             xlPhase = {1.0f, 0.0f};
         }
 
+        // Rebuild the pre-detection BPF at runtime (docs §30, WPM-locked
+        // bandwidth). Mirrors the BPF half of init(): new taps, new history
+        // buffer sized to the new tap count. The buffer is cleared, so this
+        // injects one filter-length transient — acceptable because the WPM lock
+        // that triggers it happens once, seconds into the stream, after the
+        // pre-lock events are already captured. Only the BPF changes; the xlator,
+        // decimator and smoothing LPF keep their state.
+        void setBandwidth(float bpfCutoff, float bpfTrans) {
+            if (bpfTaps.taps) { dsp::taps::free(bpfTaps); }
+            if (bpfBuffer) { dsp::buffer::free(bpfBuffer); }
+            bpfTaps = dsp::taps::lowPass(bpfCutoff, bpfTrans, _internalRate);
+            bpfBufSize = bpfTaps.size - 1;
+            bpfBuffer = dsp::buffer::alloc<dsp::complex_t>(bpfBufSize + 65536);
+            dsp::buffer::clear(bpfBuffer, bpfBufSize);
+            bpfBufStart = &bpfBuffer[bpfBufSize];
+        }
+
         float getToneFreq() const { return _toneFreq; }
 
     private:

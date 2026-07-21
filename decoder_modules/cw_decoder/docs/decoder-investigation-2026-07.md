@@ -3436,3 +3436,51 @@ the LR detector's own assumption (a circular validation for §21–28, less so f
 front-end filter); and most profiles use one fixed message, so multi-seed
 averages over noise realizations, not over text content. Independent per-impairment
 RNG streams and a second message would close those.
+
+## 30. WPM-locked BPF — the runtime rule (2026-07-21)
+
+The §29 ceiling keys on the generator's true dit and true noise. The shippable
+core `legacy+bpfauto` (`makeStaged(..., adaptiveBpf=true)`) approximates both from
+runtime signals: at timing lock it reads the locked WPM (`getDitDuration`) and the
+detector's SNR (`getSNR`), computes the noise-aware geometry (`StagedCore::bpfGeom`,
+SNR thresholds from the §31 calibration: wide above 9.5 dB getSNR, matched below
+5.4), and retunes the BPF once. `legacy` is byte-identical (the flag defaults off).
+
+**Two defects surfaced; one was a bug, one is fundamental.**
+
+*The retune transient (fixed).* Rebuilding the BPF clears its history, a one-time
+transient. On the first run clean-25 went 0.0000 → 0.0141 (a spurious character,
+t=∞) because at high SNR the target geometry is the baseline (100, 100) yet the
+retune fired anyway and injected the transient onto a clean decode; the same
+mechanism inflated the hand-keyed non-inferiority flags. Fix: skip the retune when
+no narrowing is wanted (target cut ≥ 99). Because clean and hand-keyed both sit at
+narrowFrac 0, the guard makes them byte-identical to legacy — clearing clean *and*
+hand-keyed at once.
+
+Result (`[bpf-runtime]`, paired n=96):
+
+| profile | legacy | bpfauto | ceiling (§29) |
+|---|---|---|---|
+| clean, hand-keyed, qrm, qrn, farnsworth | — | **= legacy** | = legacy |
+| qsb | 0.0126 | 0.0082 | 0.0076 |
+| worstcase | 0.610 | 0.488 | 0.462 |
+| noise2.0 | 0.123 | 0.029 | 0.005 |
+| noise3.0 | 0.817 | **0.443** | **0.075** |
+| noise2.0-25wpm | 0.184 | 0.081 | 0.023 |
+| noise2.0-30wpm | 0.287 | 0.157 | 0.125 |
+
+**6 significant wins, 0 significant regressions** — the first core in the campaign
+to beat legacy with no significant regression anywhere. (One non-inferiority flag,
+noise4.0, but its delta is *negative* — −0.007 — a high-variance non-significant
+improvement on a −10 dB, 0.90-CER profile, not a regression.)
+
+*The acquisition gap (fundamental).* The runtime rule reaches only ~50–70% of the
+ceiling on heavy noise (noise3.0 0.443 vs 0.075) because it can only narrow *after*
+lock, and acquiring WPM through the wide filter at −7.5 dB is exactly what is slow
+— a chicken-and-egg the ground-truth ceiling does not have: the pre-lock portion is
+decoded and retro-replayed through the wide filter. Closing it needs the signal
+re-filtered from the start once WPM is known (buffer the raw IQ and re-run the front
+end at lock) — a larger change, deferred. The runtime rule as it stands is a clean,
+large, regression-free win; the ceiling marks the headroom still on the table.
+
+Kept as the variant `legacy+bpfauto`; promotion to default is a separate decision.

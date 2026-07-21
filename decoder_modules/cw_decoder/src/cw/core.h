@@ -88,6 +88,10 @@ namespace cw {
         // Returns the number of envelope samples written to `out`.
         virtual int process(int count, const dsp::complex_t* in, float* out) = 0;
         virtual const char* name() const = 0;
+        // Optional: retune pre-detection bandwidth at runtime (docs §30). No-op
+        // for front ends without a settable filter, so a fixed-geometry core is
+        // unaffected.
+        virtual void setBandwidth(float cutoff, float trans) { (void)cutoff; (void)trans; }
     };
 
     // Stage 2: envelope → key up/down events.

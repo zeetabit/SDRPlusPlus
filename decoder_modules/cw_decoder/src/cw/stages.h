@@ -31,6 +31,7 @@ namespace cw {
         int process(int count, const dsp::complex_t* in, float* out) override {
             return dsp.process(count, in, out);
         }
+        void setBandwidth(float cutoff, float trans) override { dsp.setBandwidth(cutoff, trans); }
         const char* name() const override { return "envelope"; }
 
     private:

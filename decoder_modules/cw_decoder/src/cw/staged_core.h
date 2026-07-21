@@ -39,10 +39,28 @@ namespace cw {
                    std::unique_ptr<ITiming> tim,
                    std::unique_ptr<ISymbolDecoder> sym,
                    MatchedFilterResize mfResize = MF_RESET,
-                   float minElemScale = 1.0f)
+                   float minElemScale = 1.0f,
+                   bool adaptiveBpf = false)
             : frontEnd(std::move(fe)), detector(std::move(det)),
               timing(std::move(tim)), symbols(std::move(sym)),
-              mfResizePolicy(mfResize), minElementScale(minElemScale) {}
+              mfResizePolicy(mfResize), minElementScale(minElemScale),
+              adaptiveBpf(adaptiveBpf) {}
+
+        // Runtime noise-aware BPF geometry (docs §29–31), from the locked WPM
+        // (dit, ms) and the detector's SNR (dB). Matched-to-WPM narrowing
+        // (ENBW ≈ 2/T_dit, via the §4.1 cut↔ENBW fit) is a floor reached only at
+        // low SNR; at high SNR the geometry widens to the legacy (100, 100) so a
+        // jitter-limited signal is not over-narrowed and smeared (§29). SNR
+        // thresholds are the wide-filter getSNR at the ceiling's noise crossover
+        // (noiseAmp 0.5 → 9.5 dB wide, 1.5 → 5.4 dB narrow; §31 table).
+        static std::pair<float, float> bpfGeom(float ditMs, float snrDb) {
+            const float matched = std::min(std::max((2000.0f / ditMs + 2.0f) / 1.65f, 20.0f), 40.0f);
+            constexpr float SNR_HI = 9.5f, SNR_LO = 5.4f;
+            const float nf = std::min(std::max((SNR_HI - snrDb) / (SNR_HI - SNR_LO), 0.0f), 1.0f);
+            const float cut   = 100.0f * (1.0f - nf) + matched * nf;
+            const float trans = 100.0f * (1.0f - nf) + (matched + 10.0f) * nf;
+            return {cut, trans};
+        }
 
         int id = 0;
         bool debugLog = false;
@@ -167,6 +185,25 @@ namespace cw {
                 if (timing->isLocked()) {
                     if (debugLog) fprintf(stderr, "[CW ch%d] TIMING LOCKED dit=%.1f wpm=%.1f\n", id, timing->getDitDuration(), timing->getWPM());
                     timingWasLocked = true;
+                    // WPM-locked, noise-aware BPF (docs §30). One-time at lock:
+                    // dit and SNR are now known, and the pre-lock events are
+                    // already captured, so the retune's transient falls in a
+                    // window that retroDecode replaces.
+                    if (adaptiveBpf && !bpfRetuned) {
+                        auto g = bpfGeom(timing->getDitDuration(), _snr);
+                        // Skip the retune when the target is the baseline width:
+                        // rebuilding the filter clears its history and injects a
+                        // transient, so at high SNR (no narrowing wanted) a retune
+                        // to (100, 100) would spuriously corrupt an otherwise clean
+                        // decode. Only pay the transient when narrowing actually buys
+                        // noise rejection.
+                        if (g.first < 99.0f) {
+                            frontEnd->setBandwidth(g.first, g.second);
+                            if (debugLog) fprintf(stderr, "[CW ch%d] BPF RETUNE cut=%.1f trans=%.1f snr=%.1f\n",
+                                                  id, g.first, g.second, _snr);
+                        }
+                        bpfRetuned = true;
+                    }
                     retroDecode(sink);
                 } else if (lastKeyUp >= 0 && !detector->isKeyDown() && !preLockEvents.empty()) {
                     float nowMs = (float)totalSamples / _internalRate * 1000.0f;
@@ -231,6 +268,7 @@ namespace cw {
             timingFrozen = false;
             frozenDitEst = 0;
             diagCount = 0;
+            bpfRetuned = false;
         }
 
         CoreStats stats() const override {
@@ -380,6 +418,8 @@ namespace cw {
         int mfCurrentW = 0;
         MatchedFilterResize mfResizePolicy = MF_RESET;
         float minElementScale = 1.0f;
+        bool adaptiveBpf = false;
+        bool bpfRetuned = false;
 
         struct SavedEvent { bool keyDown; float timeMs; };
         std::vector<SavedEvent> preLockEvents;
