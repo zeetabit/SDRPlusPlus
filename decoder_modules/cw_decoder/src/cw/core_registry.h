@@ -193,11 +193,12 @@ namespace cw {
         return reg;
     }
 
-    // Promoted 2026-07-21 (docs §21). legacy+lr+log is the first core to clear
-    // the paired n=96 gate with no significant regression: 9 significant wins
-    // (worstcase 0.61 -> 0.42, hand-keyed ~0.16 -> ~0.03, the log runaway
-    // solved), clean and Farnsworth identical to legacy, against two
-    // non-significant sub-character costs (qsb +0.002, noise4.0 +0.011 where
-    // legacy already scores 0.90). `legacy` is retained above for comparison.
-    inline constexpr const char* DEFAULT_CORE = "legacy+lr+log";
+    // legacy+lr+log was promoted 2026-07-21 (§21) then REVERTED 2026-07-21 (§25):
+    // closing the gate's noise-axis coverage hole (all its noise profiles were
+    // 15 WPM) exposed large regressions at fast CW under noise — 25 WPM / noise
+    // 2.0 +0.198 (t=18), 30 WPM +0.332 (t=33), from the LR detector's fixed
+    // evidence lag being too large a fraction of a short fast element. The
+    // detector's big wins (hand-keyed, worstcase, the runaway fix) stand, so it
+    // is kept as a variant while a speed-adaptive fix is developed (§26).
+    inline constexpr const char* DEFAULT_CORE = "legacy";
 }

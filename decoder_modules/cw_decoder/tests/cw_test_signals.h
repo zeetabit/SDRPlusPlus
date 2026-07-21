@@ -533,6 +533,13 @@ namespace cw_test {
             v.push_back({amp == 2.0f ? "noise2.0" : (amp == 3.0f ? "noise3.0" : "noise4.0"),
                          MSG_FULL(), p});
         }
+        // Fast CW under noise: the noise axis above is all 15 WPM, which hid a
+        // detector regression at speed (§25). Both dit and noise vary here.
+        for (float dit : {48.0f, 40.0f}) {   // 25, 30 WPM
+            SignalParams p = profileClean(dit);
+            p.noiseAmp = 2.0f;
+            v.push_back({dit == 48.0f ? "noise2.0-25wpm" : "noise2.0-30wpm", MSG_FULL(), p});
+        }
         return v;
     }
 

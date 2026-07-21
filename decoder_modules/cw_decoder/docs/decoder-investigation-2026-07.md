@@ -3112,3 +3112,44 @@ both span the SNR range, the same wall the earlier SNR-gating attempt hit.
 All magnitudes are sub-character. The filter is a justified, understood tradeoff;
 `legacy+lr+log+nofilt` preserves the measured negative result. §17.3.4 is closed
 as confirmed-but-not-actionable.
+
+## 25. The fast-CW × noise regression, and the promotion revert (2026-07-21)
+
+Investigating the §20.3 "25 WPM × noise 2.0 anomaly" under the new default
+dissolved the anomaly and exposed something larger. A fine speed sweep at noise
+2.0 showed no narrow spike at 25 WPM — instead `legacy+lr+log` degrades
+monotonically with speed and is **worse than legacy across the fast range**:
+
+| noise 2.0 | legacy | lr+log |
+|---|---|---|
+| 15 WPM (the gate) | 0.083 | 0.029 (better) |
+| 20 WPM | 0.129 | 0.148 |
+| 25 WPM | 0.191 | 0.379 |
+| 30 WPM | 0.267 | 0.618 |
+
+**The promotion gate had a noise-axis coverage hole: every noise profile in it
+was 15 WPM.** Re-adjudicated with `noise2.0-25wpm` and `noise2.0-30wpm` added,
+`legacy+lr+log` is 9 better / **2 worse** — noise2.0-25wpm +0.198 (t=18.2),
+noise2.0-30wpm +0.332 (t=32.6). Large, significant, not the sub-character costs
+the original gate implied.
+
+**Mechanism: the LR detector, not log timing.** `legacy+log` (Schmitt+log) has
+ins 0.056 at 25 WPM / noise 2.0 — identical to legacy; `legacy+lr` (LR+Kalman)
+jumps to ins 0.186. The regression is insertion, and it comes from the detector.
+The CUSUM's evidence requirement is fixed in normalized-evidence units, so its
+detection lag is a fixed ~12 ms — 15% of a 15 WPM dit but 30% of a 30 WPM dit.
+At speed the smearing lets noise re-trigger spurious elements in the short fast
+gaps. No CUSUM bound fixes it: raising it trades insertion for deletion (bound 8:
+del 0.34), both bad. The detector's spike defense is calibrated in absolute time,
+but fast CW lives at a different timescale — the same "fixed constant vs variable
+element size" mismatch as the min-element filter (§24), now in the detector.
+
+**Reverted (user decision).** With full coverage the promotion is a tradeoff, not
+a clean win: comparable magnitudes on both sides. The wins (hand-keyed all
+speeds, worstcase 0.61→0.42, 15 WPM under noise, the runaway fix) are in usable
+regimes; the losses are fast CW at ~0 dB SNR where both decoders already fail
+(30 WPM / noise 2.0: legacy 0.29, lr+log 0.62). `DEFAULT_CORE` is restored to
+`legacy` and the §21.4 gate ratchets rolled back; `legacy+lr+log` stays a
+registry variant. The fast+noise profiles are kept in `standardProfiles` (the
+coverage that exposed this), so any re-promotion must clear them. A speed-adaptive
+detector fix follows (§26).
