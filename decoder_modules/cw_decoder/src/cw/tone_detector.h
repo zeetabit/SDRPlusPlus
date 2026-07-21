@@ -509,6 +509,22 @@ namespace cw {
         void setSoft(bool s) { soft = s; }
         void setAdaptive(bool a) { adaptive = a; }
 
+        // External speed signal (docs §27, hypothesis check). §26 proved the
+        // in-detector speed estimate is corrupted at heavy noise: it is built
+        // from the detector's own key-down durations, which the spurious short
+        // elements dominate. This bypasses that estimate entirely with a KNOWN
+        // dit — from the timing stage, an operator WPM knob, or (in the test) the
+        // generator's ground truth. Same scaling law as setAdaptive, uncorrupted
+        // input: scale = ditMs / 80 ms (the 15 WPM reference where the fixed
+        // bound was tuned), clamped [0.4, 1.2]. When set (>0) it overrides the
+        // self-estimate, so `adaptive` need not be on. This validates whether a
+        // correct speed signal is sufficient before paying for the timing↔
+        // detector coupling that would deliver one in production.
+        void setExternalDitMs(float ms) {
+            externalDitMs = ms;
+            externalScale = ms > 0.0f ? std::min(std::max(ms / 80.0f, 0.4f), 1.2f) : 1.0f;
+        }
+
         std::vector<KeyEvent> process(const float* envelope, int count) {
             std::vector<KeyEvent> events;
             for (int i = 0; i < count; i++) {
@@ -561,8 +577,13 @@ namespace cw {
                 // are a sporadic low tail a median ignores, where a mean would be
                 // dragged down, shrinking the bound and reviving the runaway
                 // (§26). Fast dits are a consistent stream the median tracks.
-                const float bHi = boundHi * (adaptive ? adaptScale : 1.0f);
-                const float bLo = boundLo * (adaptive ? adaptScale : 1.0f);
+                // A known dit (setExternalDitMs) overrides the self-estimate:
+                // the §26 estimate is corrupt at heavy noise, a ground-truth or
+                // externally-supplied dit is not.
+                const float scale = (externalDitMs > 0.0f) ? externalScale
+                                                           : (adaptive ? adaptScale : 1.0f);
+                const float bHi = boundHi * scale;
+                const float bLo = boundLo * scale;
 
                 S += u - theta;
                 if (S > bHi) { S = bHi; }
@@ -574,7 +595,7 @@ namespace cw {
                     events.push_back({true, i});
                 } else if (currentState && S <= bLo) {
                     currentState = false;
-                    if (adaptive && elemUCount > 0) {
+                    if (adaptive && externalDitMs <= 0.0f && elemUCount > 0) {
                         onWin[onPos] = (float)elemUCount;
                         onPos = (onPos + 1) % ON_WIN;
                         if (onCount < ON_WIN) { onCount++; }
@@ -665,6 +686,10 @@ namespace cw {
         int onPos = 0;
         int onCount = 0;
         float adaptScale = 1.0f;
+        // External speed override (docs §27). Config, not run state: set once
+        // after init(), so reset() deliberately leaves it — like theta/bounds.
+        float externalDitMs = 0.0f;
+        float externalScale = 1.0f;
 
         int noiseSubsample = 8;
         int noiseWinSize = 250;

@@ -118,6 +118,7 @@ namespace cw {
             det.setBounds(_boundHi, _boundLo);
             det.setSoft(_soft);
             det.setAdaptive(_adaptive);
+            det.setExternalDitMs(_externalDitMs);
         }
         void reset() override { det.reset(); }
         std::vector<KeyEvent> process(const float* env, int count) override {
@@ -128,10 +129,16 @@ namespace cw {
         void preseed(float level, int count) override { det.preseed(level, count); }
         const char* name() const override { return "lr"; }
 
+        // Stored, not forwarded live: init() runs after construction and would
+        // otherwise overwrite it with the default (docs §27). Set by the test
+        // factory from the generator's ground-truth dit.
+        void setExternalDitMs(float ms) { _externalDitMs = ms; }
+
     private:
         LRDetector det;
         float _theta, _boundHi, _boundLo;
         bool _soft, _adaptive;
+        float _externalDitMs = 0.0f;
     };
 
     // ── Stage 3: timing ─────────────────────────────────────────

@@ -3198,3 +3198,56 @@ outside the detector — the timing stage's dit estimate, or an operator WPM
 setting — which is an architectural change (detector↔timing coupling) not
 pursued here. The LR detector stands as a variant with a known fast+heavy-noise
 weakness; `legacy` remains the default.
+
+## 27. External-speed hypothesis check — necessary, not sufficient (2026-07-21)
+
+§26 failed and could not tell *why*: is the in-detector speed *estimate* the
+problem (corrupt at heavy noise), or is bound-scaling *itself* the problem
+(broken even with a correct speed)? Before paying for the detector↔timing
+coupling that would deliver a production speed signal, this isolates the
+variable: feed the LR detector the generator's ground-truth dit
+(`setExternalDitMs`, docs) instead of the self-estimate — same scaling law
+(`scale = clamp(ditMs / 80 ms, 0.4, 1.2)`, 80 ms = the 15 WPM tuning point),
+uncorrupted input. `test_lr_wpm.cpp`, `[lr-wpm]`, paired n=96, per-signal factory
+so each profile's true speed reaches its own detector. This is a **hypothesis
+check, not a shipping path**: no real decoder knows the true WPM.
+
+The result splits the §26 question cleanly in two.
+
+**Q1 — does a correct speed signal avoid §26's slow-noise breakage? Yes, by
+construction.** At 15 WPM `scale ≡ 1.0`, so truth-WPM is byte-identical to base
+`legacy+lr+log` on every 15 WPM profile (`nDiffer == 0`, asserted). noise3.0
+stays 0.706, worstcase 0.418 — both better than legacy. §26's catastrophe was
+*entirely* the corrupt estimate perturbing the slow cases; bound-scaling never
+touches them. The estimate was the problem, not the scaling.
+
+**Q2 — with a perfect speed signal, does fast CW return to legacy parity? No —
+a residual fast + *heavy*-noise gap survives.**
+
+| profile | legacy | base lr+log | truth-WPM | truth vs legacy |
+|---|---|---|---|---|
+| handkeyed-30 | 0.142 | 0.043 | 0.025 | −0.117 (better) |
+| handkeyed-40 | 0.187 | 0.168 | 0.042 | −0.144 (better) |
+| noise2.0-25wpm | 0.184 | 0.383 | **0.244** | **+0.059 (t=7.3, worse)** |
+| noise2.0-30wpm | 0.287 | 0.619 | **0.391** | **+0.105 (t=14, worse)** |
+
+The truth signal recovers ~70% of each fast+noise regression (base-LR 0.383 →
+0.244, 0.619 → 0.391) and pushes clean/hand-keyed fast CW *past* legacy, but the
+two fast + heavy-noise profiles stay significantly worse than legacy. The
+mechanism is a genuine tradeoff a single scalar cannot win: shrinking the bound
+for speed shortens the lag (the intended win) but also lowers the evidence margin
+over noise, so at heavy noise the shortened bound admits more spikes. Fast+light
+noise (handkeyed, noiseAmp 0.3) has margin to spare and wins outright; fast+heavy
+noise (noiseAmp 2.0) does not.
+
+**Conclusion: the external-speed thesis is necessary but not sufficient.** A
+correct speed signal removes the §26 failure mode and would make the LR detector
+beat legacy on every realistic hand-keyed profile — but it does **not** unblock
+promotion-to-default, because noise2.0-25/30wpm remain harmful even in the
+best case a production speed source could ever provide. Building the
+detector↔timing coupling *for promotion's sake* is therefore not justified: the
+gate would still block. The value of an external speed signal is real but narrower
+than promotion — it is a hand-keyed-accuracy lever, not a fast+heavy-noise fix.
+`legacy` remains the default; the `setExternalDitMs` knob is kept as the
+instrument that measured this, defaulting off (0 → no override, base LR
+unchanged).
