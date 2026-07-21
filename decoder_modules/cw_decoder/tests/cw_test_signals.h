@@ -472,6 +472,70 @@ namespace cw_test {
         return p;
     }
 
+    // ── Factorial profiles ──
+    //
+    // The named profiles above vary several parameters at once, which makes
+    // them useful as scenarios and useless for attribution. Measured 2026-07-20:
+    // the noise* set is 15 WPM / jitter 0 / bias 0 while the handkeyed* set is
+    // noiseAmp 0.3 / jitter 0.15 / bias 0.1, so comparing the two families
+    // attributes to "noise" a difference that also spans speed, jitter and
+    // weight bias. This varies exactly what it names.
+
+    inline SignalParams profileFactorial(float ditMs, float noiseAmp,
+                                         float jitterPct = 0.0f,
+                                         float weightBias = 0.0f) {
+        SignalParams p;
+        p.ditMs = ditMs;
+        p.noiseAmp = noiseAmp;
+        p.jitterPct = jitterPct;
+        p.weightBias = weightBias;
+        return p;
+    }
+
+    // ── Canonical profile set ──
+    //
+    // Five test files each carried their own hardcoded list with divergent
+    // membership and divergent naming, which is how hand-keyed coverage came to
+    // stop at 25 WPM in every one of them. Adopted by test_matrix.cpp and
+    // test_promotion.cpp — the sweeps that decide promotions. The other lists
+    // still differ deliberately (oracle omits qrm; gap-noise carries no
+    // message) and are left alone.
+    //
+    // handkeyed-30/35/40 were added after 40 WPM proved to be where candidates
+    // diverge most: 0.17 CER between legacy+edge+log and legacy+mf, invisible
+    // to every sweep that stopped at 25.
+
+    struct TestProfile {
+        const char* name;
+        const char* message;
+        SignalParams params;
+    };
+
+    inline std::vector<TestProfile> standardProfiles() {
+        std::vector<TestProfile> v = {
+            {"clean-15",     MSG_FULL(), profileClean(80.0f)},
+            {"clean-25",     MSG_FULL(), profileClean(48.0f)},
+            {"handkeyed-15", MSG_FULL(), profileHandKeyed(80.0f)},
+            {"handkeyed-20", MSG_FULL(), profileHandKeyed(60.0f)},
+            {"handkeyed-25", MSG_FULL(), profileHandKeyed(48.0f)},
+            {"handkeyed-30", MSG_FULL(), profileHandKeyed(40.0f)},
+            {"handkeyed-35", MSG_FULL(), profileHandKeyed(34.3f)},
+            {"handkeyed-40", MSG_FULL(), profileHandKeyed(30.0f)},
+            {"qsb",          MSG_FULL(), profileQSB(80.0f)},
+            {"qrm",          MSG_FULL(), profileQRM(80.0f)},
+            {"qrn",          MSG_FULL(), profileQRN(80.0f)},
+            {"farnsworth20", MSG_FULL(), profileFarnsworth(80.0f, 2.0f)},
+            {"worstcase",    MSG_FULL(), profileWorstCase(80.0f)},
+        };
+        for (float amp : {2.0f, 3.0f, 4.0f}) {
+            SignalParams p = profileClean(80.0f);
+            p.noiseAmp = amp;
+            v.push_back({amp == 2.0f ? "noise2.0" : (amp == 3.0f ? "noise3.0" : "noise4.0"),
+                         MSG_FULL(), p});
+        }
+        return v;
+    }
+
     // ── Decode helpers (full IQ path, no mocks) ──
 
     inline std::string decode(const std::string& message, const SignalParams& params) {

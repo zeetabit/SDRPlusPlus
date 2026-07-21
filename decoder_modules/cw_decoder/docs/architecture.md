@@ -725,7 +725,10 @@ cd decoder_modules/cw_decoder/tests/build && cmake .. && make -j8
 ./cw_decoder_tests "[gap-noise]"     -s   # gap classification under noise, detector-derived (§17)
 ./cw_decoder_tests "[recording]"     -s   # ARRL W1AW real audio vs published text (§18)
 ./cw_decoder_tests "[recording-matrix]" -s # all 21 registry cores vs real audio (§19)
-                                          # needs tests/fetch_recordings.sh first; fails without it
+./cw_decoder_tests "[recording-noise]" -s # candidates vs legacy on real audio + AWGN (§20.5)
+                                          # both need tests/fetch_recordings.sh first; fail without it
+./cw_decoder_tests "[promotion]"     -s   # paired n=96 candidate adjudication (§20.4)
+./cw_decoder_tests "[factorial]"     -s   # orthogonal speed x noise, legacy+edge+log (§20.3)
 ```
 
 The matrix and oracle sweeps are tagged `[.]` so Catch2 hides them from the
@@ -798,6 +801,11 @@ Learned the hard way; each one has an incident behind it.
 | A fix that fires by **sub-threshold margin is a coincidence, not a mechanism** | The Farnsworth bootstrap triggered on a 468.0 ms gap against a 467.5 ms gate — 0.5 ms. A slightly different `dit` estimate and it silently stops working. |
 | "Replay with better parameters" must restore **all** learned state | `retroDecode` carefully restored the element model from `lockedDit` and dropped the gap model, so every replay re-entered a cold gap window — the exact condition it existed to repair. |
 | When a check no longer holds because a fix was **not** shipped, assert the **known defect magnitude** rather than deleting it | `[farnsworth-probe]` asserts `errs <= 1` at ratio ≥ 2.0, so the check fails on both a regression and a silent fix. Deleting it would have lost the ratchet. |
+| A comparison needs a **variance estimate** before it can support a verdict | Every better/worse tally in Phases 12–24 compared two 24-seed means with a 1e-6 epsilon. n=24 gave the wrong sign in both directions (§20.1); the epsilon counted one character across the seed set as a regression. Same seed list both cores → paired per-seed test; decisions at n=96. |
+| **Significance is not equivalence** — "not significant" is absence of evidence of harm, not evidence of absence | `legacy+mf` read "0 better, 1 worse, 15 ns" and was called *no measurable effect*; a non-inferiority bound showed 10 of 16 profiles were underpowered, not equivalent (§20.2). Promotion requires the upper 95% bound under a sub-character tolerance, not merely a failed regression test. |
+| A statistic's **degenerate input** is where it lies most confidently | `comparePaired` returned `t=0` (→ `ns`) on zero-variance deterministic profiles, silently discarding regressions reproduced on 96/96 seeds. Maximal certainty read as minimal. The canary that caught it must exercise a deterministic profile that actually differs (§20.2). |
+| Vary **one thing** to attribute to one thing | The `noise*` and `handkeyed*` profile families differ in four parameters at once, so no `noise*`-vs-`handkeyed*` comparison could attribute anything to noise. An orthogonal factorial (`profileFactorial`) turned "bimodal signature" into a mechanism: noise robustness traded for timing robustness (§20.3). |
+| **Parallel test output must be a function of the loop index, never of scheduling** | Seed results are written to a pre-sized slot `[i]`, never appended, so `CW_TEST_THREADS=1` and the default run are byte-identical (§20.6). The determinism diff is the gate that proves no hidden global state exists in the decode path. |
 
 **CER is not bounded by 1.0.** It is edits ÷ reference length and insertions are
 unbounded, so a decoder emitting garbage scores above 1 — `snr-noise4.0` reaches

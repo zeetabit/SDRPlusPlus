@@ -6,6 +6,7 @@
 #include <cmath>
 #include <string>
 #include <sstream>
+#include <limits>
 
 // Multi-seed benchmark statistics.
 //
@@ -89,6 +90,20 @@ namespace cw_test {
         // |t| >= 2 is roughly the 95% two-sided threshold for these seed counts.
         bool significant() const { return nSeeds > 1 && std::fabs(t) >= 2.0f; }
 
+        // Upper 95% bound on the regression. Significance alone cannot gate a
+        // promotion: "not significant" is absence of evidence of harm, not
+        // evidence of absence, and a real regression on a high-variance profile
+        // reads ns. Promotion requires this bound to sit under a tolerance —
+        // the candidate must demonstrate it is not harmful, not merely fail to
+        // be caught.
+        float worstCaseDelta() const { return meanDelta + 2.0f * stderrDelta; }
+
+        // tol is in CER. One character of MSG_FULL is 1/71 = 0.0141, so a
+        // tolerance below that is sub-character.
+        bool harmful(float tol) const {
+            return nSeeds < 2 || worstCaseDelta() > tol;
+        }
+
         const char* verdict() const {
             if (!significant()) { return "ns"; }
             return meanDelta < 0 ? "BETTER" : "WORSE";
@@ -116,7 +131,18 @@ namespace cw_test {
         }
         const float sd = (float)std::sqrt(var / (d.nSeeds - 1));
         d.stderrDelta = sd / std::sqrt((float)d.nSeeds);
-        d.t = (d.stderrDelta > 1e-9f) ? d.meanDelta / d.stderrDelta : 0.0f;
+
+        if (d.stderrDelta > 1e-9f) {
+            d.t = d.meanDelta / d.stderrDelta;
+        }
+        else if (std::fabs(d.meanDelta) > 1e-9f) {
+            // Zero variance with a nonzero difference: a deterministic profile
+            // (noiseAmp and jitterPct both 0) generates the identical signal
+            // every seed, so the difference reproduced on all of them. That is
+            // maximal certainty, not zero — returning t=0 here silently
+            // discarded regressions on every noiseless profile.
+            d.t = std::numeric_limits<float>::infinity() * (d.meanDelta > 0 ? 1.0f : -1.0f);
+        }
         return d;
     }
 

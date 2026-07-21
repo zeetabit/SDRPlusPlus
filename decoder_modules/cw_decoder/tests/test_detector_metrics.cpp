@@ -523,15 +523,24 @@ TEST_CASE("dual-window: short length and persistence", "[cw][.][dual-refine]") {
 
     std::vector<std::vector<float>> grid;
     std::vector<float> base;
+    // Per-seed CERs kept alongside the means: a verdict needs the paired
+    // differences, not two aggregates.
+    std::vector<std::vector<float>> baseSamples;
+    std::vector<std::vector<std::vector<float>>> gridSamples;
     for (const auto& p : detectorProfiles()) {
-        float lg = runCell("legacy", p.name, p.message, p.params, SEEDS).cerMean;
+        auto lgCell = runCell("legacy", p.name, p.message, p.params, SEEDS);
+        float lg = lgCell.cerMean;
         base.push_back(lg);
+        baseSamples.push_back(lgCell.cerSamples);
         printf("%-18s %8.4f", p.name, lg);
         std::vector<float> row;
+        std::vector<std::vector<float>> rowSamples;
         for (int c = 0; c < NC; c++) {
-            float v = runCellWith(dualCore(cfgs[c]), "dual",
-                                  p.name, p.message, p.params, SEEDS).cerMean;
+            auto cell = runCellWith(dualCore(cfgs[c]), "dual",
+                                    p.name, p.message, p.params, SEEDS);
+            float v = cell.cerMean;
             row.push_back(v);
+            rowSamples.push_back(cell.cerSamples);
             printf(" %7.4f", v);
             INFO("profile " << p.name << " cfg=" << cfgs[c].shortMs
                             << "/" << cfgs[c].persist);
@@ -543,23 +552,28 @@ TEST_CASE("dual-window: short length and persistence", "[cw][.][dual-refine]") {
         CHECK(std::isfinite(lg));
         printf("\n");
         grid.push_back(row);
+        gridSamples.push_back(rowSamples);
     }
 
-    // Promotion is no-worse-on-every-profile. Report the count directly so the
-    // table does not have to be eyeballed.
+    // Promotion is no-worse-on-every-profile, where "worse" means a
+    // significant paired regression. Counting mean differences against a 1e-6
+    // float epsilon, as this did, made a one-character shift across the whole
+    // seed set a regression and a genuine one indistinguishable from it.
     printf("\n%-18s", "worse than legacy:");
     for (int c = 0; c < NC; c++) {
         int worse = 0;
-        for (size_t r = 0; r < grid.size(); r++) {
-            if (grid[r][c] > base[r] + 1e-6f) { worse++; }
+        for (size_t r = 0; r < gridSamples.size(); r++) {
+            auto d = comparePaired(baseSamples[r], gridSamples[r][c]);
+            if (d.significant() && d.meanDelta > 0) { worse++; }
         }
         printf(" %7d", worse);
     }
     printf("\n%-18s", "better:");
     for (int c = 0; c < NC; c++) {
         int better = 0;
-        for (size_t r = 0; r < grid.size(); r++) {
-            if (grid[r][c] < base[r] - 1e-6f) { better++; }
+        for (size_t r = 0; r < gridSamples.size(); r++) {
+            auto d = comparePaired(baseSamples[r], gridSamples[r][c]);
+            if (d.significant() && d.meanDelta < 0) { better++; }
         }
         printf(" %7d", better);
     }
@@ -610,8 +624,10 @@ TEST_CASE("transition-gated peak: stretch and CER", "[cw][.][peak-gate]") {
         auto cPeak   = runCell("legacy+peak",     p.name, p.message, p.params, SEEDS);
         auto cGate   = runCell("legacy+peakgate", p.name, p.message, p.params, SEEDS);
 
-        if (cGate.cerMean > cLegacy.cerMean + 1e-6f) { worse++; }
-        if (cGate.cerMean < cLegacy.cerMean - 1e-6f) { better++; }
+        // Significant paired regression, not any difference of means: the
+        // epsilon this replaced counted one character across 24 seeds.
+        auto dGate = comparePaired(cLegacy.cerSamples, cGate.cerSamples);
+        if (dGate.significant()) { (dGate.meanDelta > 0 ? worse : better)++; }
 
         printf("%-18s %8.2f %8.2f %8.2f %8.4f %8.4f %8.4f  %5.3f/%-5.3f  %5.3f/%-5.3f\n",
                p.name, sLegacy.onStretchPct, sPeak.onStretchPct, sGate.onStretchPct,
@@ -785,17 +801,21 @@ TEST_CASE("dynamic-range guard: constant sweep", "[cw][.][guard-sweep]") {
 
     const int defaultIdxCheck = 3;   // guards[3] == 1.8f, the shipping default
     std::vector<std::vector<float>> cer;
+    std::vector<std::vector<std::vector<float>>> cerSamples;   // profile x guard x seed
     for (const auto& p : detectorProfiles()) {
         printf("%-18s", p.name);
         std::vector<float> row;
+        std::vector<std::vector<float>> rowSamples;
         for (int g = 0; g < NG; g++) {
-            float v = runCellWith(guardCore(guards[g]), "guard",
-                                  p.name, p.message, p.params, CER_SEEDS).cerMean;
-            row.push_back(v);
-            printf(" %7.4f", v);
+            auto cell = runCellWith(guardCore(guards[g]), "guard",
+                                    p.name, p.message, p.params, CER_SEEDS);
+            row.push_back(cell.cerMean);
+            rowSamples.push_back(cell.cerSamples);
+            printf(" %7.4f", cell.cerMean);
         }
         printf("\n");
         cer.push_back(row);
+        cerSamples.push_back(rowSamples);
 
         // The whole sweep is meaningless if overriding the constant to its own
         // default is not a no-op: it would mean setGuardThreshold changed the
@@ -810,14 +830,18 @@ TEST_CASE("dynamic-range guard: constant sweep", "[cw][.][guard-sweep]") {
     const int defaultIdx = 3;
     printf("\n%-18s", "vs g=1.8:");
     for (int g = 0; g < NG; g++) {
-        int better = 0, worse = 0;
-        for (size_t r = 0; r < cer.size(); r++) {
-            if (cer[r][g] < cer[r][defaultIdx] - 1e-6f) { better++; }
-            if (cer[r][g] > cer[r][defaultIdx] + 1e-6f) { worse++; }
+        int better = 0, worse = 0, harmful = 0;
+        for (size_t r = 0; r < cerSamples.size(); r++) {
+            auto d = comparePaired(cerSamples[r][defaultIdx], cerSamples[r][g]);
+            if (d.significant()) { (d.meanDelta > 0 ? worse : better)++; }
+            // Non-inferiority: ns is absence of evidence of harm, not evidence
+            // of absence. A constant is only safe if its worst plausible
+            // regression stays under a sub-character tolerance.
+            if (d.harmful(0.005f)) { harmful++; }
         }
-        printf(" %3d/%-3d", better, worse);
+        printf(" %2d/%-2d/%-2d", better, worse, harmful);
     }
-    printf("   (better/worse)\n");
+    printf("   (better/worse/harmful)\n");
 
     printf("\n== blind during key-ON (%%), %d seeds ==\n", BLIND_SEEDS);
     printf("%-18s", "profile");

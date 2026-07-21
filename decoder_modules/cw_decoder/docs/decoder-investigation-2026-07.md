@@ -125,17 +125,30 @@ signature of the matched-filter mechanism**. Nothing is promotable: every
 candidate regresses on at least one synthetic profile, and the best core on real
 audio (`legacy+edge+log`, mean 0.0013) more than doubles CER on heavy noise.
 
-**The binding constraint is now measurement coverage, not ideas.** All five real
-recordings are high-SNR (19-76 dB); every variant that wins there loses under
-noise; and that deciding regime is arbitrated entirely by synthetic profiles of
-unvalidated fidelity (§15).
+**Phase 25 repaired the comparison method itself (§20), and it was the binding
+constraint — not measurement coverage.** Every better/worse tally in Phases
+12–24 was read off mean CER across 24 seeds with a 1e-6 float epsilon. Measured:
+n=24 gives the wrong verdict in both directions (a noise3.0 regression read
+t=1.91 at 24 seeds and t=5.43 at 96; two hand-keyed improvements read t=−0.47
+and −1.09 at 24 and −3.29 and −3.63 at 96), and the epsilon counts one character
+across the whole seed set as a regression. The fix — paired per-seed testing,
+n=96 for decisions, a non-inferiority bound, three new fast-hand-keyed profiles,
+and an orthogonal speed×noise factorial — is now in the harness. Adding noise to
+the clean ARRL audio (§20.5) showed the §19 tradeoff reproduces on real keying,
+so noisy off-air recordings were demoted from first: they validate, they do not
+resolve. No decoder changed; nothing became promotable.
 
 **Candidates now, in dependency order:**
 
-1. **Noisy real recordings** (§19.4) — promoted to first. Off-air W1AW carries
-   real propagation *and* published ground truth, with receiver distance as an
-   SNR ladder over identical text. Without it, no candidate from §19 can be
-   accepted or rejected on evidence.
+1. **The runaway-insertion mode — diagnosed (§20.7).** `legacy+edge+log` reaches
+   CER 1.79 at 15 WPM / noise 3.0 (t=18) and 1.21 on real audio + noise, emitting
+   2.6× the reference as a flood of the shortest letters. Cause: `log` timing
+   under-estimates dit by 44% under noise (opposite sign to legacy's +37%
+   overestimate, which §20.7 independently reproduces), admitting noise as
+   elements. `log`'s jitter win and its noise catastrophe are the same
+   tail-insensitivity property, so it is not tunable into a free win here. Next
+   would be testing a tail-robust `log` variant — an experiment, no longer a
+   diagnosis.
 2. **Why is dit +38.9% at noise 3.0?** (§17.3.2) The largest unexplained number
    in these docs, and it sits upstream of the gap classifier — gap centres derive
    from `dit`, so nothing in gap classification can be fixed while its input is
@@ -147,14 +160,13 @@ unvalidated fidelity (§15).
    `farns2.0-n1.5` rather than the clean profile. ⊘ If the §18.6.1 inference
    holds, the ARRL 5 and 10 WPM sessions are also real Farnsworth material with
    published text — but that inference is unverified.
-5. **Noisy real recordings.** W1AW transmits these same texts on HF (3.5815 /
-   7.0475 / 14.0475 / 21.0675 / 28.0675 MHz), so an off-air capture would carry
-   real propagation *and* published ground truth, with receiver distance acting
-   as an SNR ladder over identical text. 📎 `kiwirecorder.py`
+5. **Noisy off-air recordings — demoted.** W1AW transmits these same texts on HF
+   (3.5815 / 7.0475 / 14.0475 / 21.0675 / 28.0675 MHz), so an off-air capture
+   would carry real propagation *and* published ground truth. 📎 `kiwirecorder.py`
    (github.com/jks-prv/kiwiclient) records audio and IQ WAV from public
-   KiwiSDRs; not yet attempted here. A cheaper intermediate, also untried:
-   apply the existing synthetic impairments to the clean ARRL audio, which
-   would separate keying realism from channel realism and test §15 directly.
+   KiwiSDRs; not attempted. This would *validate* §15, not resolve any tradeoff
+   (§20.5) — the cheaper intermediate it once proposed, adding synthetic noise
+   to the clean ARRL audio, is now done and showed the tradeoff is real.
 
 **A note on where this leaves the work.** Phases 15–19 closed the detector line
 without promoting anything: every candidate defect in it is either measured and
@@ -2517,6 +2529,13 @@ legacy.
 
 3. **No candidate is promotable.** Against the 24-seed synthetic matrix:
 
+   > ⚠ **These better/worse counts are unreliable — §20 supersedes them.** They
+   > were read off mean differences with a 1e-6 float epsilon, which counts one
+   > character across 24 seeds as a regression, and n=24 gives the wrong verdict
+   > in both directions. Under a paired n=96 test (§20.4) the same three cores
+   > read differently; the conclusion "nothing is promotable" survives, the
+   > tallies do not.
+
    | core | better | worse | notable regression |
    |---|---|---|---|
    | legacy+mf | 5 | 3 | worstcase 0.6244 → 0.6450 |
@@ -2545,9 +2564,18 @@ legacy.
 
 Every real recording available is high-SNR, and every candidate that wins there
 loses under noise. **The regime that decides promotion is currently arbitrated
-entirely by synthetic profiles whose fidelity is unvalidated (§15).** That makes
-noisy real recordings the highest-value missing measurement in this project — not
-a nice-to-have.
+entirely by synthetic profiles whose fidelity is unvalidated (§15).**
+
+⚠ **This section originally called noisy real recordings "the highest-value
+missing measurement — not a nice-to-have." That was wrong, and §20.5 measured
+why.** More data would *validate* the synthetic profiles; it would not *resolve*
+the tradeoff, because the candidates disagree with each other in the noise
+regime — the one the recordings would confirm — not in the high-SNR regime they
+would add. §20.5 took the cheaper route the candidate list already noted
+(add synthetic noise to the clean ARRL audio) and found the tradeoff reproduces
+on real keying: `legacy+edge` regresses at t=4.33, `legacy+edge+log` emits
+CER > 1.0. The recordings were not the binding constraint. The comparison
+method was (§20).
 
 📎 W1AW transmits these same texts on HF (3.5815 / 7.0475 / 14.0475 / 21.0675 /
 28.0675 MHz), so an off-air capture would carry real propagation *and* published
@@ -2567,3 +2595,235 @@ from public KiwiSDRs. Not attempted.
   the same station at one tone frequency. Speed varies; nothing else does.
 - ⊘ Reported SNR comes from the decoder's own estimator, not an independent
   measurement.
+
+## 20. The comparison method was the defect (Phase 25, 2026-07-20)
+
+Phases 12–24 produced twelve registry variants and a better/worse tally for each
+against a synthetic profile matrix. Every one of those tallies was read off mean
+CER over 24 seeds compared with a 1e-6 float epsilon. This phase measured that
+method against itself and found it could not support the conclusions drawn from
+it. No decoder code changed; the harness did.
+
+### 20.1 n=24 gives the wrong verdict, in both directions
+
+Re-running the §19 candidates at n=96 flips verdicts that n=24 reported with
+confidence — not toward "more significant", but to the opposite sign of decision:
+
+| profile | n=24 | n=96 | resolved |
+|---|---|---|---|
+| noise3.0, `+edge` | +0.105, t=1.91 → ns | +0.157, **t=5.43** | real regression |
+| handkeyed-15, `+edge` | −0.038, t=−1.09 → ns | −0.061, **t=−3.63** | real improvement |
+| handkeyed-25, `+edge` | −0.011, t=−0.47 → ns | −0.039, **t=−3.29** | real improvement |
+| noise2.0, `+edge` | +0.043, t=1.62 | +0.009, t=0.66 | spurious |
+
+The baselines are unstable at n=24 as well: `legacy` on noise2.0 reads 0.0827 at
+24 seeds and 0.1227 at 96 — a 48% shift in the *reference* number. Any threshold
+pinned to a synthetic n=24 mean is pinned to a seed artifact. (The real-recording
+ratchets in §18 are unaffected: those decode fixed audio and are deterministic.)
+
+### 20.2 Paired testing and non-inferiority
+
+Both cores run the identical seed list, so per-seed difficulty is a shared term
+that cancels in the difference. `comparePaired` (`cw_bench_stats.h`) reports the
+mean per-seed delta, its standard error, `t`, and `nDiffer`. The `nDiffer`
+column is the tell: the `qrn` result that blocked `legacy+edge` in §19 was **3
+differing seeds in 96** — a profile that barely exercised the code path being
+compared was supplying a promotion-blocking verdict.
+
+Two corrections to the decision rule followed:
+
+- **Zero-variance is decisive, not insignificant.** A deterministic profile
+  (`noiseAmp` and `jitterPct` both 0) generates the identical signal every seed,
+  so a real difference reproduces on all of them with zero variance. The first
+  implementation returned `t=0` there and labelled it `ns`, silently discarding
+  regressions on every noiseless profile — `legacy+peakdual16` made
+  `farnsworth20` three times worse (0.0141 → 0.0423) on 96/96 seeds and read
+  `ns`. Zero variance with a nonzero delta now returns `t=±∞`.
+
+- **Significance is not equivalence.** `|t| < 2` is absence of evidence of harm,
+  not evidence of absence: a small real regression on a high-variance profile
+  reads `ns` and would pass. Promotion now requires the upper 95% bound on the
+  regression (`meanDelta + 2·stderr`) to sit under a sub-character tolerance
+  (0.005 CER; one character of MSG_FULL is 0.0141). The candidate must
+  demonstrate it is safe, not merely fail to be caught.
+
+This inverted one earlier reading. Under significance-only, `legacy+mf` was
+"0 better, 1 worse, 15 ns" — read at the time as *no measurable effect*. Under
+non-inferiority, **10 of its 16 profiles are HARM**: `handkeyed-40` has delta
++0.0496 with stderr 0.0253, an upper bound of +0.1002. The `ns` verdicts were
+low statistical power, not equivalence. "We measured no effect" is not "we
+measured that there is no effect."
+
+### 20.3 Speed and noise are confounded, and separable
+
+The named profiles vary several parameters at once: the `noise*` set is 15 WPM /
+jitter 0 / bias 0, while the `handkeyed*` set is `noiseAmp` 0.3 / jitter 0.15 /
+bias 0.1. Attributing a `noise*`-vs-`handkeyed*` difference to "noise" also
+attributes it to speed, jitter and weight bias. Coverage compounded the problem:
+every one of the five hardcoded profile lists stopped at 25 WPM.
+
+A speed×noise factorial with jitter held (`profileFactorial`, `[factorial]`)
+separates them. `legacy+edge+log` vs `legacy`, n=48, paired `t` (`*` = |t|≥2):
+
+**jitter 0.00 / bias 0.00**
+
+| speed | noise 0.0 | 1.0 | 2.0 | 3.0 |
+|---|---|---|---|---|
+| 15 WPM | +0.00 | −1.00 | −3.66* | **+12.48*** |
+| 25 WPM | +0.00 | +1.66 | +8.69* | **+14.75*** |
+| 35 WPM | +0.00 | −7.06* | −2.33* | +3.42* |
+| 40 WPM | +0.00 | −7.02* | −1.87 | +2.82* |
+
+**jitter 0.15 / bias 0.10**
+
+| speed | noise 0.0 | 1.0 | 2.0 | 3.0 |
+|---|---|---|---|---|
+| 15 WPM | −6.58* | −4.86* | −2.59* | **+11.27*** |
+| 25 WPM | −4.79* | −2.82* | +6.00* | **+18.38*** |
+| 35 WPM | −8.39* | −5.75* | −3.64* | +5.63* |
+| 40 WPM | −5.78* | −6.68* | −5.19* | +2.91* |
+
+Three readings the confounded profiles could not support:
+
+1. **At noise 0.0 / jitter 0, every cell is +0.00.** Legacy decodes perfectly at
+   40 WPM; speed alone breaks nothing. An earlier probe's "legacy 0.0290 at 35
+   WPM" was `noiseAmp` 0.3 doing the work, not speed.
+2. **At noise 0.0 / jitter 0.15, `+log` wins at all four speeds** (t −6.58 to
+   −8.39). With noise removed entirely the benefit remains and is large — so it
+   is a timing/jitter benefit, independent of noise.
+3. **At noise 3.0, `+log` loses at every speed and both jitter levels** — a pure
+   noise effect, independent of jitter.
+
+Together: **`legacy+edge+log` trades noise robustness for timing robustness.**
+Two orthogonal axes, opposite signs, both large. That is a mechanism statement,
+not a tally, and the old profile set was structurally incapable of producing it.
+
+⊘ **Open:** the `25 WPM × noise 2.0` cell is anomalous — worse (t +8.69, +6.00)
+while 15, 35 and 40 WPM at the same noise are better or ns, at both jitter
+levels. Not a clean threshold in either variable, unexplained.
+
+✗ **Refuted in passing:** the claim (asserted earlier this session as physics)
+that fixed `noiseAmp` is harsher at high speed because per-element energy falls.
+Reported SNR at noise 3.0 *rises* with speed — 1.3 at 15 WPM to 3.1 at 40 WPM.
+A plausible mechanism stated without measurement, contradicted by measurement.
+
+### 20.4 Re-adjudicating the §19 candidates
+
+Paired, n=96, non-inferiority tolerance 0.005 CER, over the standard profile set
+including handkeyed-30/35/40 (`[promotion]`). "harmful" = upper 95% bound exceeds
+tolerance; promotion needs zero harmful and at least one significant improvement.
+
+| candidate | better | worse | ns | harmful | worst regression |
+|---|---|---|---|---|---|
+| legacy+edge | 6 | 1 | 9 | 3 | noise3.0 +0.157 (t=5.43) |
+| legacy+mf | 0 | 1 | 15 | 10 | qsb +0.002 (t=2.61); 10 underpowered |
+| legacy+edge+mf | 6 | 1 | 9 | 3 | noise3.0 +0.065 (t=2.82) |
+| legacy+edge+log | 9 | 2 | 5 | 2 | noise3.0 +0.971 (t=18.06) |
+| legacy (self) | 0 | 0 | 16 | 0 | — |
+
+**Nothing is promotable** — the same conclusion as §19, now on defensible
+evidence rather than an epsilon count. `legacy+edge+log` is the closest: only 2
+harmful profiles, both its known catastrophic noise failures, everything else
+clears non-inferiority. `legacy` against itself reads 0 harmful, confirming the
+rule is not vacuously strict.
+
+The instrument self-checks matter here because three sweeps in this suite have
+shipped non-failing assertions before (§13.11): `legacy` vs `legacy` must read
+`ns` with `nDiffer=0` on every profile, and `legacy+edge+log` — measured, not
+assumed, to fail — must register a significant regression. Both would fail if the
+harness were inert.
+
+### 20.5 The tradeoff reproduces on real keying
+
+The §19.4 claim that noisy real recordings were the highest-value missing
+measurement was wrong. The candidates disagree with each other under *noise* —
+the regime the recordings would confirm — not at high SNR, the regime they would
+add. The cheaper test the §19 candidate list already proposed settles it: add
+the generator's own AWGN to the clean ARRL audio, peak-normalized so `noiseAmp`
+means the same scale it does synthetically (`[recording-noise]`).
+
+`w1aw_20wpm` (real keying, CER 0.0000 clean), paired vs legacy, n=24:
+
+| noiseAmp | legacy | +edge | +edge+log | +edge+mf |
+|---|---|---|---|---|
+| 0.0 | 0.0000 | ns | ns | ns |
+| 1.0 | 0.1209 | **+0.0245 WORSE** (t=4.33) | −0.0049 ns | **+0.0128 WORSE** (t=2.71) |
+| 2.0 | 0.9847 | ns | **+0.2231 WORSE** (t=3.60), CER 1.21 | ns |
+| 3.0 | 0.9958 | ns | ns | ns |
+
+The real-audio matrix (§19.2) ranked `+edge` and `+edge+log` *above* legacy.
+Adding noise inverts it: `+edge` becomes a significant regression on real keying,
+and `+edge+log` reproduces its runaway insertion — **CER 1.21 > 1.0**, emitting
+more than the reference contains. The synthetic factorial predicted this; it now
+holds on a real transmission, not only against the generator's Rician noise. The
+§19 tradeoff is real, not a synthetic artifact.
+
+⚠ **Narrow informative band.** Peak-normalized keyed CW has a steep noise cliff —
+legacy is 0.12 at noiseAmp 1.0 but 0.98 at 2.0. So noiseAmp 1.0 is the one point
+carrying signal; 2.0 and 3.0 are past the cliff where every core reads ~1.0 and
+deltas are meaningless (except `+edge+log`'s garbage spike, which is the
+finding). The peak-to-average ratio of keyed CW is the cause.
+
+### 20.6 The harness now runs in parallel
+
+Seeds are independent decodes over independent `Channel` instances, and the
+decode path holds no mutable global state — `Channel` owns no `ToneScanner`, so
+no FFTW planner (not thread-safe) is reachable, and every `static` under
+`src/cw/` is `static constexpr` or a function-local `static const` table
+(`cw_parallel.h`). Parallelizing the seed loops in `decodeAndScoreMulti` and
+`runCellWith` cut `[matrix-timing]` from 13.92 s to 2.03 s (6.9×) and the default
+suite from 11.26 s to 1.85 s (6.1×) on 14 cores.
+
+Determinism is the gate, not a nicety: results are written to a slot indexed by
+seed, never appended, so `CW_TEST_THREADS=1` and the default run produce
+byte-identical output — verified across all 53 matrix rows and against the
+pre-change serial baseline. Every metric except `rt(x)` is thread-count
+invariant by construction; `rt(x)` becomes contended throughput under
+concurrency and is documented as not comparable across thread counts.
+
+### 20.7 The runaway-insertion mechanism (diagnosed)
+
+The CER > 1.0 mode of §20.3/§20.5 is `log`-driven noise-as-elements, and its
+dit-error sign is **opposite** to what an earlier draft of this section guessed.
+
+**It is insertion, not fragmentation.** At 15 WPM / noise 3.0, `legacy+edge+log`
+emits 185 characters against a 71-character reference (2.6×), overwhelmingly the
+five shortest letters (E T I A N). Legacy stays at ~76 (≈ reference) and fails by
+substitution/deletion. Error mix confirms it: legacy ins 0.097 / del 0.269;
+`+edge+log` ins **1.281** / del 0.009. `log` alone flips the sign (ins 0.521);
+`edge` amplifies super-additively (1.281 ≫ the sum of parts).
+
+**The driver is dit UNDER-estimation, not the §17.3.2 overestimate.** Sampling
+the live dit estimate at 15 WPM (true dit 80 ms), 16 seeds:
+
+| core | noise 0.0 | 1.0 | 2.0 | 3.0 | frac under at 3.0 |
+|---|---|---|---|---|---|
+| legacy | 86.7 | 82.6 | 83.9 | **109.8** | 0.33 |
+| legacy+log | 84.7 | 81.8 | 78.8 | **61.1** | 0.85 |
+| legacy+edge+log | 80.2 | 75.0 | 69.5 | **44.9** | 0.98 |
+
+Legacy's 109.8 ms is **+37.3%**, independently reproducing §17.3.2's +38.9% dit
+overestimate from a different path — but it is a *legacy* property. `+edge+log`
+goes the other way, −44%, believing dit is too small for essentially the entire
+decode (frac under 0.98).
+
+**Mechanism — the estimator's coordinates set the sign of the same fault.** A
+linear timing estimator (legacy) is pulled *up* by the long-duration tail (dahs,
+noise-merged elements): dit inflates, elements look short, gaps merge, output
+deletes and stays conservative. Log-duration timing compresses that tail, so the
+many *short* noise excursions dominate and pull dit *down*: the element threshold
+shrinks, every noise blip is admitted as an element, and output inserts. Same
+noise, opposite bias, opposite catastrophe.
+
+**Consequence for `log`.** Its clean-signal timing win (§20.3: helps jitter at
+every speed) and its noise catastrophe are the *same* property — insensitivity to
+the long-duration tail helps when jitter stretches elements and destroys it when
+noise fragments them. It is not tunable into a free win at this formulation.
+⊘ Whether a tail-robust variant (e.g. down-weighting sub-threshold-duration
+events before the log transform) breaks the coupling is unmeasured.
+
+- ⊘ The `25 WPM × noise 2.0` anomaly (§20.3).
+- **Debt, not done:** four of the five hardcoded profile lists still carry their
+  own membership and naming. Only `test_matrix.cpp` and `test_promotion.cpp`
+  adopted `standardProfiles()`; unifying the rest would renumber tables these
+  docs cite and was deferred.

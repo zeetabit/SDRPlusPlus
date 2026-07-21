@@ -1,10 +1,13 @@
 #include <catch.hpp>
 #include <cw/channel.h>
 #include "cw_test_signals.h"
+#include "cw_bench_stats.h"
+#include "cw_parallel.h"
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -351,4 +354,120 @@ TEST_CASE("Recording: core sweep on real audio", "[cw][.][recording-matrix]") {
     CHECK(cores == (int)cw::coreRegistry().size());
     CHECK(legacyMean == Approx(0.0044f).margin(0.0005f));
     CHECK(peakdual16Mean > legacyMean * 10.0f);
+}
+
+// ============================================================
+// Noise-augmented real audio (docs §20)
+//
+// Every pinned session is 19-76 dB SNR, and every candidate core that wins on
+// real audio loses under synthetic noise (§19). So the one regime that decides
+// which core to promote — real keying under heavy noise — has never been
+// measured: the recordings supply the keying, the synthetic profiles supply
+// the noise, and nothing supplies both. This adds controlled AWGN to the real
+// recordings and adjudicates the same way as test_promotion.cpp.
+// ============================================================
+
+namespace {
+
+    // The wanted tone's peak amplitude sets what a given noiseAmp means. A WAV
+    // is scaled arbitrarily while the synthetic generator keys at amplitude
+    // 1.0, so without this a noiseAmp of 2.0 is a different SNR on every
+    // recording and not comparable to the synthetic axis. Peak-normalizing to
+    // 1.0 makes the two noise scales the same scale.
+    void normalizeToPeak(std::vector<dsp::complex_t>& iq) {
+        float peak = 0.0f;
+        for (const auto& s : iq) {
+            const float mag = std::sqrt(s.re * s.re + s.im * s.im);
+            if (mag > peak) { peak = mag; }
+        }
+        if (peak <= 0.0f) { return; }
+        const float g = 1.0f / peak;
+        for (auto& s : iq) { s.re *= g; s.im *= g; }
+    }
+
+    // Same additive complex-Gaussian model the generator uses
+    // (cw_test_signals.h): re += amp*N(0,1), im += amp*N(0,1).
+    std::vector<dsp::complex_t> withNoise(const std::vector<dsp::complex_t>& iq,
+                                          float amp, unsigned seed) {
+        std::vector<dsp::complex_t> out = iq;
+        if (amp <= 0.0f) { return out; }
+        std::mt19937 rng(seed);
+        std::normal_distribution<float> n(0.0f, 1.0f);
+        for (auto& s : out) {
+            s.re += amp * n(rng);
+            s.im += amp * n(rng);
+        }
+        return out;
+    }
+
+    float decodeNoisyCER(const std::vector<dsp::complex_t>& iq,
+                         const std::string& reference,
+                         const std::string& coreName, float toneFreq) {
+        cw::Channel ch;
+        ch.init(0, toneFreq, coreName);
+        for (int off = 0; off < (int)iq.size(); off += 512) {
+            int n = std::min(512, (int)iq.size() - off);
+            ch.process(n, &iq[off]);
+        }
+        return score(reference, ch.text.getText()).cer;
+    }
+
+    // Per-core CER over nSeeds independent noise realizations of one session.
+    std::vector<float> coreCERsOverSeeds(const LoadedSession& s, float amp,
+                                         const std::string& coreName,
+                                         float toneFreq, int nSeeds) {
+        std::vector<float> cers(nSeeds);
+        parallelFor(nSeeds, [&](int i) {
+            const auto noisy = withNoise(s.iq, amp, 4242u + (unsigned)i * 7919u);
+            cers[i] = decodeNoisyCER(noisy, s.reference, coreName, toneFreq);
+        });
+        return cers;
+    }
+}
+
+TEST_CASE("Recording: candidates under added noise", "[cw][.][recording-noise]") {
+    constexpr float TONE = 750.0f;
+    constexpr int SEEDS = 24;
+    constexpr float TOL = 0.005f;
+    const float noises[] = {0.0f, 1.0f, 2.0f, 3.0f};
+
+    // 20 WPM is the cleanest session (CER 0.0000) and the most punctuation-rich
+    // real text, so added noise is the only degradation and the reference is
+    // the hardest available. One session keeps a full core x noise x seed sweep
+    // affordable; the finding is the noise response, not cross-session spread.
+    LoadedSession session = loadSession("w1aw_20wpm");
+    normalizeToPeak(session.iq);
+
+    const char* candidates[] = {"legacy+edge", "legacy+edge+log", "legacy+edge+mf"};
+
+    for (float amp : noises) {
+        auto baseCERs = coreCERsOverSeeds(session, amp, "legacy", TONE, SEEDS);
+        const auto baseStats = summarize(baseCERs, 0.0f);
+
+        printf("\n=== w1aw_20wpm + noiseAmp %.1f (paired, n=%d) ===\n", amp, SEEDS);
+        printf("legacy CER %.4f (sd %.4f)\n", baseStats.mean, baseStats.stddev);
+        printf("%-18s %9s %10s %10s %7s %10s  %s\n",
+               "candidate", "cand", "delta", "stderr", "t", "worstcase", "verdict");
+
+        for (const char* cand : candidates) {
+            auto candCERs = coreCERsOverSeeds(session, amp, cand, TONE, SEEDS);
+            auto d = comparePaired(baseCERs, candCERs);
+            const auto cs = summarize(candCERs, 0.0f);
+            const bool harm = d.harmful(TOL);
+            printf("%-18s %9.4f %+10.4f %10.4f %7.2f %+10.4f  %s%s\n",
+                   cand, cs.mean, d.meanDelta, d.stderrDelta, d.t,
+                   d.worstCaseDelta(), d.verdict(), harm ? " HARM" : "");
+
+            INFO("noiseAmp " << amp << " candidate " << cand);
+            CHECK(d.nSeeds == SEEDS);
+        }
+    }
+
+    // Instrument self-checks: the noise axis must actually degrade, or the test
+    // proves nothing. Clean is exact; heavy noise must move legacy off zero.
+    auto clean = coreCERsOverSeeds(session, 0.0f, "legacy", TONE, SEEDS);
+    auto heavy = coreCERsOverSeeds(session, 3.0f, "legacy", TONE, SEEDS);
+    CHECK(summarize(clean, 0.0f).mean == Approx(0.0f).margin(1e-6));
+    CHECK(summarize(heavy, 0.0f).mean > 0.05f);
+    printf("\n");
 }

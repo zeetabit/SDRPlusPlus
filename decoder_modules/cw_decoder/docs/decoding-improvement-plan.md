@@ -708,38 +708,26 @@ profiles better, 1 worse, all gates pass, `qrm` 0.0100 → **0.0035**. Details: 
 
 ### Phase 25: Measurement repair (2026-07-20 — method, no decoder change)
 
-**Paired testing.** Every core runs the identical seed list, so seed difficulty
-is a shared term that cancels in the per-seed difference. `comparePaired` in
-`cw_bench_stats.h` reports mean delta, its standard error, `t`, and `nDiffer`.
-Under it, `legacy+edge` is 3 better / 0 worse / 9 ns (was "7 better / 3 worse"),
-and `legacy+mf` is significant on nothing at all. `nDiffer` is the tell: the
-`qrn` regression that blocked `+edge` was 3 differing seeds in 96.
+Full write-up, tables, and the re-adjudication: **`decoder-investigation-2026-07.md`
+§20.** In brief:
 
-**n=24 is too few** to adjudicate the effect sizes in question. Three verdicts
-flipped at n=96, in both directions, and the baselines themselves moved.
+- **Paired per-seed testing** (`comparePaired`, `cw_bench_stats.h`) replaces the
+  1e-6 mean-difference epsilon at every promotion-counting site. Zero-variance
+  deterministic profiles are decisive (`t=±∞`), not `ns`.
+- **n=96 for decisions** (`[promotion]`), n=24 kept for the survey matrix. Three
+  §19 verdicts flipped at n=96, in both directions.
+- **Non-inferiority gate:** promotion requires the upper 95% bound on any
+  regression under 0.005 CER — significance alone is absence of evidence, not
+  evidence of absence. This overturned "`legacy+mf` has no measurable effect":
+  10 of 16 profiles are underpowered, not equivalent.
+- **Orthogonal speed×noise factorial** (`profileFactorial`, `[factorial]`) plus
+  `handkeyed-30/35/40`: `legacy+edge+log` trades noise robustness for timing
+  robustness — two orthogonal axes, opposite signs.
+- **Noise-augmented real audio** (`[recording-noise]`): the §19 tradeoff
+  reproduces on real keying; `+edge` regresses at t=4.33, `+edge+log` emits
+  CER > 1.0.
+- **Parallel harness** (`cw_parallel.h`): 6× faster, byte-identical output.
 
-**The profile families confound four variables.** `noise*` is 15 WPM, jitter 0,
-bias 0; `handkeyed*` is `noiseAmp` 0.3, jitter 0.15, bias 0.1. A speed×noise
-factorial at each jitter level separates them — `legacy+edge+log` vs `legacy`,
-n=48, `t`:
-
-| | noise 0.3 | 1.0 | 2.0 | 3.0 |
-|---|---|---|---|---|
-| 15 WPM | −1.00 | −1.00 | **−3.66** | **+12.48** |
-| 25 WPM | 0.00 | +1.66 | **+8.69** | **+14.75** |
-| 35 WPM | **−11.32** | **−7.06** | **−2.33** | **+3.42** |
-| 40 WPM | **−7.45** | **−7.02** | −1.87 | **+2.82** |
-
-Jitter is not the driver — the pattern holds at both levels. Noise is, but the
-magnitude is concentrated at slow speed: at `noise 3.0` the delta is +0.9352 at
-15 WPM and +0.0335 at 40 WPM. The `25 WPM × noise 2.0` cell is anomalous
-(worse, while 15/35/40 at the same noise are better or ns) and unexplained.
-
-✗ **Refuted in passing:** "fixed `noiseAmp` is harsher at high speed because
-per-element energy falls." Reported SNR at `noise 3.0` *rises* with speed —
-1.3 at 15 WPM to 3.1 at 40 WPM. Asserted as physics, contradicted by
-measurement.
-
-⊘ **Open:** the real-audio matrix is n=1 per cell and ranks its top three cores
-by roughly one character in total; the runaway-insertion mode (CER > 1.0) has a
-signature but no diagnosis; the `25 WPM × noise 2.0` pocket is unexplained.
+Still nothing promotable — the §19 conclusion, now on defensible evidence.
+Open: the runaway-insertion mode (CER > 1.0) and the `25 WPM × noise 2.0`
+anomaly.
