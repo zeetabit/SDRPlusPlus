@@ -3891,3 +3891,54 @@ timing/detector/front-end fixes (LR §25, bpfauto §35–37, and now every dit-e
 fix) fail at exactly that regime. The wall is a property of the signal at −10 dB,
 not of any stage. `legacy+ditguard` kept as a measured negative; `legacy` remains
 the default.
+
+## 40. +kalman2 recheck at paired n=96 — the noise-4.0 block was a red herring; the real block is fast CW (2026-07-21)
+
+**Question.** §38b/§39 concluded kalman2 (V2 confidence gate) is the symmetric dit
+fix, "blocked only by noise-4.0" per the n=24 survey. §35 showed bpfauto's block was
+a variance/tail miss, not a mean regression. Does the same hold for kalman2 — is
+noise-4.0 load-bearing or underpowered?
+
+**Method.** The identical paired n=96 gate the promotion test uses (`comparePaired`,
+non-inferiority tol 0.005), `legacy+kalman2` vs `legacy` across all `standardProfiles()`
+— which, unlike the n=24 survey, breaks out fast-CW-under-noise.
+
+| profile | legacy | kalman2 | delta | t | verdict |
+|---|---|---|---|---|---|
+| handkeyed-15 | 0.1631 | 0.0308 | −0.1323 | −6.88 | BETTER |
+| handkeyed-20 | 0.1850 | 0.0480 | −0.1370 | −5.47 | BETTER |
+| handkeyed-25 | 0.1536 | 0.1235 | −0.0301 | −1.65 | ns HARM |
+| **handkeyed-30** | 0.1417 | 0.1681 | +0.0264 | **2.57** | **WORSE** HARM |
+| handkeyed-40 | 0.1866 | 0.1141 | −0.0725 | −6.11 | BETTER |
+| qsb | 0.0126 | 0.0081 | −0.0045 | −3.47 | BETTER |
+| worstcase | 0.6096 | 0.3721 | −0.2375 | −17.30 | BETTER |
+| noise2.0 | 0.1227 | 0.0383 | −0.0844 | −8.25 | BETTER |
+| noise3.0 | 0.8173 | 0.6978 | −0.1196 | −5.67 | BETTER |
+| **noise4.0** | 0.9108 | 0.9376 | +0.0268 | **1.21** | **ns** HARM |
+| noise2.0-25wpm | 0.1843 | 0.1356 | −0.0487 | −7.63 | BETTER |
+| **noise2.0-30wpm** | 0.2868 | 0.3184 | +0.0315 | **4.79** | **WORSE** HARM |
+
+(clean/qrm/qrn/farnsworth20/handkeyed-35 all ns.) **8 better, 2 worse, 8 ns, 5 harmful → blocked.**
+
+**Two findings, both correcting the prior map:**
+
+1. **noise-4.0 is NOT load-bearing.** t=1.21, ns — not a significant paired
+   regression. The n=24 survey's 0.903→0.989 was a variance artifact (48-seed §39
+   read 0.980, 96-seed reads 0.938; the profile is variance-sensitive at −10 dB).
+   It fails only the non-inferiority *bound* (worstcase delta +0.071 > tol), i.e.
+   "not shown safe," not "shown worse." The hypothesis that motivated this recheck
+   is confirmed.
+
+2. **The real block is fast CW, which the n=24 survey hid.** `noise2.0-30wpm`
+   regresses at **t=4.79** and `handkeyed-30` at **t=2.57** — significant paired
+   WORSE. These profiles do not exist in the survey table, so "blocked only by
+   noise-4.0" was an artifact of coverage, not a property of kalman2. The gate does
+   its job: it surfaces a real regression the survey could not.
+
+**Mechanism — kalman2 and LR+log fail on the same axis.** Fast CW under noise is
+exactly what reverted LR+log (§25). Both fixes gate learning/decisions under noise;
+gating costs the most where elements carry the least absolute timing margin, so
+both trade slow/moderate robustness for a fast-CW regression. kalman2 is therefore
+**not** the campaign's strongest promotion candidate held back by an intractable
+wall — it is a slow-vs-fast tradeoff of the same family already mapped and rejected
+for the LR detector. No decoder change; recheck only. `legacy` remains the default.
