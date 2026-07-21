@@ -443,6 +443,10 @@ namespace cw {
         // only below this WPM keeps the runaway fix where the runaway lives (slow)
         // and reverts to V1's always-learn where it hurts (fast). 0 = always gate.
         void setSpeedGateWpm(float wpm) { speedGateWpm = wpm; }
+        // §51 SNR-graded V1/V2 (selector only). Reverts to V1 at good SNR where
+        // V2's cold-start sensitivity regresses light-noise machine signals (§50).
+        void setSnrGraded(bool g) { snrGraded = g; }
+        void setKalmanSnr(float s) { _snrForGate = s; }
 
         TimingEvent classifyOn(float durationMs) {
             TimingEvent evt;
@@ -540,7 +544,16 @@ namespace cw {
                 if (switchInV2 && switchWpm > speedGateWpm + switchHyst)      { switchInV2 = false; }
                 else if (!switchInV2 && switchWpm < speedGateWpm - switchHyst) { switchInV2 = true; }
             }
-            const bool effV2 = (variant == KALMAN_V2) && (speedGateWpm <= 0.0f || switchInV2);
+            // §51: when SNR-graded (selector only), also revert to V1 at GOOD SNR.
+            // V2's cold-start dah-absorption sensitivity regresses light-noise
+            // machine signals (contest: leading C→F, §50); V1 handles them. V2's
+            // advantage is only heavy noise, so V2 only below the SNR threshold.
+            // This is a per-element update-rule change over ONE ditEst, so it adds
+            // no dit-discontinuity (unlike the log/kalman switch). Not applied to
+            // standalone kalman2s (its high-SNR hand-keyed win needs V2).
+            const bool snrLowEnough = !snrGraded || _snrForGate < SNR_V2_THRESH;
+            const bool effV2 = (variant == KALMAN_V2)
+                            && (speedGateWpm <= 0.0f || switchInV2) && snrLowEnough;
             bool learn = !effV2 || (confPre >= learnThreshold);
 
             if (ditLik >= dahLik) {
@@ -641,6 +654,9 @@ namespace cw {
         bool guardDah = false;                          // §39 asymmetric dah-guard
         float guardDahFactor = 1.5f;                    // DIT updates above this*ditEst are dah-absorption
         float speedGateWpm = 0.0f;                      // §41: gate confidence only below this WPM (0 = always)
+        bool  snrGraded = false;                        // §51 selector: revert to V1 at good SNR
+        float _snrForGate = 20.0f;                      // §51 current getSNR (pushed each block)
+        static constexpr float SNR_V2_THRESH = 6.5f;    // §51 V2 only below this getSNR (mean: contest 7.85 -> V1, moderate 5.43 / noise2.0 4.49 -> V2)
 
         float seedBuf[8] = {};
         float ditEst = 80.0f;
@@ -673,12 +689,13 @@ namespace cw {
             kalman.setVariant((strategy == TIMING_KALMAN_V2 || v2s) ? KALMAN_V2 : KALMAN_V1);
             kalman.setGuardDah(strategy == TIMING_KALMAN_GUARD);
             kalman.setSpeedGateWpm(v2s ? defaultSpeedGateWpm : 0.0f);
+            kalman.setSnrGraded(strategy == TIMING_SELECT);   // §51: SNR-graded V1/V2 in the selector only
             logTiming.setRobust(strategy == TIMING_LOG_ROBUST);
             logTiming.setGuarded(strategy == TIMING_LOG_GUARDED);
             reset();
         }
 
-        void setSnr(float s) { _snr = s; }
+        void setSnr(float s) { _snr = s; kalman.setKalmanSnr(s); }
 
         TimingEvent classifyOn(float durationMs) {
             // §48: SELECT feeds BOTH models (keeping the idle one warm) and routes

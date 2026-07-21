@@ -26,14 +26,19 @@
 > is a **single noise realization on `seed = 42`**. See the Benchmark Results
 > section.
 >
-> ### Work completed since (all in the registry; the one promotion was reverted — §25)
+> ### Work completed since (the campaign's first standing promotion landed — §51)
 >
-> **Current default: `legacy` (Schmitt + Kalman).** `legacy+lr+log` was promoted
-> on 2026-07-21 (§21) and **reverted the same day (§25)** when the gate's noise
-> axis was widened past 15 WPM: it regresses badly at fast CW under noise. §26–28
-> then mapped that boundary from every angle and found it not closable by any
-> bound rule. The campaign still has **zero standing promotions**; `legacy` is
-> unchanged. See the LR rows below and the Approaches Matrix #24.
+> **Current default: `legacy+select` (regime timing selector), promoted 2026-07-22
+> (§48–51).** It routes each signal to log (jittered good-SNR hand-keyed), a V2/V1
+> kalman (heavy/light noise, SNR-graded), gated on jitter + getSNR with a re-armable
+> dit-drift latch for operator changes. Paired n=384: 13 better, 0 significant worse
+> — log's hand-keyed win + kalman2s's noise robustness (worstcase 0.60→0.37) + V1's
+> light-noise/QRM robustness. Promotion required resolving two blockers the gate
+> missed (§50–51): a fake moderate-noise ratchet (an n=24 lucky-legacy artifact) and
+> a real contest regression (V2 cold-start under QRM, fixed by SNR-grading). An
+> earlier promotion, `legacy+lr+log` (§21), was reverted the same day (§25) for a
+> fast-CW×noise regression. `legacy` remains a byte-identical variant. See the
+> Approaches Matrix #24, #39.
 >
 > | stage | outcome |
 > |---|---|

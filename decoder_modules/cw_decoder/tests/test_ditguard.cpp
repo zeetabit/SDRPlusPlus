@@ -4,6 +4,7 @@
 #include "cw_bench_stats.h"
 #include "cw_oracle.h"
 #include "cw_snr.h"
+#include "cw_detector_score.h"
 
 using namespace cw_test;
 
@@ -249,6 +250,201 @@ TEST_CASE("select adapts to operator change (§48)", "[cw][.][select-opchange]")
     printf("mean CER (concatenation) = %.4f;  2nd-operator recovered = %d/%d\n",
            cerSum / SEEDS, good, total);
     CHECK(good > total / 2);   // re-arm must let the majority recover the 2nd operator
+}
+
+// §50 — WHY does kalman2s/log make a one-char error on moderate-noise that legacy
+// (V1) does not? Find the failing seed(s) and dump legacy vs kalman2s vs log decodes.
+TEST_CASE("moderate-noise one-char error diagnosis (§50)", "[cw][.][onechar]") {
+    const std::string ref = normalize(generateMessage(MSG_FULL(), profileModerateNoise(80.0f)).sourceText);
+    printf("\n=== §50 moderate-noise per-seed decode (ref len %zu) ===\n", ref.size());
+    printf("ref: %s\n", ref.c_str());
+    for (int i = 0; i < 24; i++) {
+        SignalParams p = profileModerateNoise(80.0f);
+        p.seed = 1000 + (unsigned)i * 7919u;
+        auto decleg = normalize(decode(MSG_FULL(), p));   // default = legacy
+        std::string dk, dl;
+        for (const char* core : {"legacy+kalman2s", "legacy+log"}) {
+            auto sig = generateMessage(MSG_FULL(), p);
+            cw::Channel ch; ch.initWithCore(0, p.toneFreq, cw::findCore(core)->make(), "d");
+            for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+                int n = std::min(512, (int)sig.samples.size() - off);
+                ch.process(n, &sig.samples[off]);
+            }
+            (std::string(core).find("kalman2s") != std::string::npos ? dk : dl) = normalize(ch.text.getText());
+        }
+        const bool legOk = decleg == ref, kOk = dk == ref, lOk = dl == ref;
+        if (!kOk || !lOk || !legOk) {
+            printf("seed %d (i=%d): leg=%s k2s=%s log=%s\n", p.seed, i,
+                   legOk?"OK":"ERR", kOk?"OK":"ERR", lOk?"OK":"ERR");
+            if (!kOk) { printf("   k2s: %s\n", dk.c_str()); }
+            if (!legOk) { printf("   leg: %s\n", decleg.c_str()); }
+        }
+    }
+}
+
+// §51 — robust thresholds for the 4 gates being recalibrated from single-seed/n=24
+// artifacts. Reports the SHIPPING decoder (default=select) mean + 2*stderr, the
+// multiseed test's stated convention, at a robust n.
+TEST_CASE("recalibration thresholds (§51)", "[cw][.][recal]") {
+    struct G { const char* label; const char* msg; SignalParams p; int n; };
+    const G gates[] = {
+        {"bench145 modCQ",   MSG_CQ(),      profileModerateNoise(80.0f), 96},
+        {"bench163 hk25CQ",  MSG_CQ(),      profileHandKeyed(48.0f),     96},
+        {"bench497 hk20",    "CQ DE W1AW",  profileHandKeyed(60.0f),     96},
+        {"multiseed modFULL",MSG_FULL(),    profileModerateNoise(80.0f), 96},
+        {"matrix hk10",      "CQ DE W1AW",  profileHandKeyed(120.0f),    96},
+        {"matrix hk15",      "CQ DE W1AW",  profileHandKeyed(80.0f),     96},
+        {"matrix hk20",      "CQ DE W1AW",  profileHandKeyed(60.0f),     96},
+        {"matrix hk25",      "CQ DE W1AW",  profileHandKeyed(48.0f),     96},
+    };
+    printf("\n=== §51 select mean + 2*stderr (n=96) for recalibration ===\n");
+    printf("%-20s %8s %8s %10s\n", "gate", "mean", "2stderr", "mean+2se");
+    for (const auto& g : gates) {
+        auto s = decodeAndScoreMulti(g.msg, g.p, g.n);
+        printf("%-20s %8.4f %8.4f %10.4f\n", g.label, s.mean, 2.0f*s.stderrMean, s.mean + 2.0f*s.stderrMean);
+    }
+}
+
+// §51 — do the getSNR values separate contest (light noise -> V1) from moderate
+// (heavy -> V2)? The SNR-graded routing fix depends on a clean threshold.
+TEST_CASE("getSNR per profile (§51)", "[cw][.][snr-sep]") {
+    struct P { const char* name; SignalParams p; };
+    const P profs[] = {
+        {"clean",        profileClean(80.0f)},
+        {"contest",      profileContest(60.0f)},
+        {"moderate-1.5", profileModerateNoise(80.0f)},
+        {"noise2.0",     [] { auto p = profileClean(80.0f); p.noiseAmp = 2.0f; return p; }()},
+        {"noise3.0",     [] { auto p = profileClean(80.0f); p.noiseAmp = 3.0f; return p; }()},
+        {"handkeyed-20", profileHandKeyed(60.0f)},
+    };
+    printf("\n=== §51 mean getSNR (post-lock) per profile, 24 seeds ===\n");
+    printf("%-14s %8s\n", "profile", "getSNR");
+    for (const auto& pr : profs) {
+        float snrSum = 0; int cnt = 0;
+        for (int i = 0; i < 24; i++) {
+            SignalParams p = pr.p; p.seed = 1000 + (unsigned)i * 7919u;
+            auto sig = generateMessage(MSG_FULL(), p);
+            cw::Channel ch; ch.init(0, p.toneFreq);
+            float blkSum = 0; int blkN = 0;
+            for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+                int n = std::min(512, (int)sig.samples.size() - off);
+                ch.process(n, &sig.samples[off]);
+                if (ch.snr > 0) { blkSum += ch.snr; blkN++; }
+            }
+            if (blkN) { snrSum += blkSum / blkN; cnt++; }
+        }
+        printf("%-14s %8.2f\n", pr.name, snrSum / cnt);
+    }
+}
+
+// §50 — WHY does V2 handle contest worse than V1? Dump per-seed legacy vs kalman2s
+// decodes, find the error pattern (QRM + jitter 0.10 + light noise 0.8, 20 WPM).
+TEST_CASE("contest V2 error diagnosis (§50)", "[cw][.][contest-err]") {
+    const std::string ref = normalize(generateMessage(MSG_MIXED(), profileContest(60.0f)).sourceText);
+    printf("\n=== §50 contest per-seed decode (ref: %s) ===\n", ref.c_str());
+    int legErrs = 0, k2sErrs = 0;
+    for (int i = 0; i < 48; i++) {
+        SignalParams p = profileContest(60.0f);
+        p.seed = 1000 + (unsigned)i * 7919u;
+        auto sig = generateMessage(MSG_MIXED(), p);
+        auto dec = [&](const char* core) {
+            cw::Channel ch; ch.initWithCore(0, p.toneFreq, cw::findCore(core)->make(), "d");
+            for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+                int n = std::min(512, (int)sig.samples.size() - off);
+                ch.process(n, &sig.samples[off]);
+            }
+            return normalize(ch.text.getText());
+        };
+        auto dl = dec("legacy"), dk = dec("legacy+kalman2s");
+        if (dl != ref) { legErrs++; }
+        if (dk != ref) {
+            k2sErrs++;
+            if (dl == ref) {   // V2 errs where V1 is clean — the diagnostic case
+                printf("seed %d: V1 OK, V2 ERR\n  ref: %s\n  V2:  %s\n", p.seed, ref.c_str(), dk.c_str());
+            }
+        }
+    }
+    printf("legacy errs=%d/48, kalman2s errs=%d/48\n", legErrs, k2sErrs);
+}
+
+// §50 — is the moderate-noise 0.0 ratchet a small-n artifact? Measure legacy's
+// OWN moderate-noise CER at increasing n. If it rises above 0, the ratchet that
+// blocks select is based on a lucky n=24 subset, not a robust legacy property.
+TEST_CASE("moderate-noise ratchet is n-dependent (§50)", "[cw][.][ratchet-n]") {
+    printf("\n=== §50 legacy & kalman2s on profileModerateNoise vs n ===\n");
+    printf("%6s %10s %10s\n", "n", "legacy", "kalman2s");
+    for (int n : {24, 48, 96, 192}) {
+        auto l = decodeAndScoreMulti(MSG_FULL(), profileModerateNoise(80.0f), n).mean;
+        auto k = runCell("legacy+kalman2s", "m", MSG_FULL(), profileModerateNoise(80.0f), n).cerMean;
+        printf("%6d %10.4f %10.4f  %s\n", n, l, k, l > 0.0f ? "<- legacy FAILS its own 0.0 ratchet" : "");
+    }
+    printf("\n=== contest ratchet (0.008): legacy vs kalman2s vs select ===\n");
+    printf("%6s %10s %10s %10s\n", "n", "legacy", "kalman2s", "select");
+    for (int n : {24, 96, 192}) {
+        auto l = runCell("legacy",          "c", MSG_MIXED(), profileContest(60.0f), n).cerMean;
+        auto k = runCell("legacy+kalman2s", "c", MSG_MIXED(), profileContest(60.0f), n).cerMean;
+        auto s = runCell("legacy+select",   "c", MSG_MIXED(), profileContest(60.0f), n).cerMean;
+        printf("%6d %10.4f %10.4f %10.4f\n", n, l, k, s);
+    }
+}
+
+// §50 — V1 vs V2 noise crossover: V2's advantage is only at heavy noise, so
+// routing light-noise machine signals to V1 could pass the moderate/contest
+// ratchets while keeping V2's heavy-noise wins (the fix hypothesis).
+TEST_CASE("V1 vs V2 noise crossover (§50)", "[cw][.][v1v2-cross]") {
+    constexpr int SEEDS = 48;
+    printf("\n=== §50 legacy(V1) vs kalman2s(V2) vs noise (MSG_FULL, n=%d) ===\n", SEEDS);
+    printf("%-10s %8s %8s %8s\n", "noiseAmp", "V1", "V2", "winner");
+    for (float amp : {0.8f, 1.0f, 1.5f, 1.8f, 2.0f, 2.5f, 3.0f}) {
+        SignalParams p = profileClean(80.0f); p.noiseAmp = amp;
+        auto v1 = runCell("legacy",          "n", MSG_FULL(), p, SEEDS).cerMean;
+        auto v2 = runCell("legacy+kalman2s", "n", MSG_FULL(), p, SEEDS).cerMean;
+        printf("%-10.1f %8.4f %8.4f %8s\n", amp, v1, v2, v1 <= v2 ? "V1" : "V2");
+    }
+}
+
+// §50 — mechanism: at the dropped word gap, what are the V1 vs V2 dit estimates
+// and gap centres? Replay the real detector's events through both timings.
+TEST_CASE("word-gap drop mechanism (§50)", "[cw][.][onechar-mech]") {
+    SignalParams p = profileModerateNoise(80.0f);
+    p.seed = 48514;   // §50 failing seed
+    auto sig = generateMessage(MSG_FULL(), p);
+    auto rec = std::make_unique<RecordingDetector>(std::make_unique<cw::SchmittDetector>());
+    auto* probe = rec.get();
+    cw::Channel ch;
+    ch.initWithCore(0, p.toneFreq, std::make_unique<cw::StagedCore>(
+        std::make_unique<cw::EnvelopeFrontEnd>(), std::move(rec),
+        std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),
+        std::make_unique<cw::BeamSymbolDecoder>()), "d");
+    for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+        int n = std::min(512, (int)sig.samples.size() - off);
+        ch.process(n, &sig.samples[off]);
+    }
+    // Replay detector durations through V1 and V2, print the long (char/word) gaps.
+    cw::AdaptiveTiming v1, v2;
+    v1.init(1000.0f, cw::TIMING_KALMAN); v2.init(1000.0f, cw::TIMING_KALMAN_V2);
+    printf("\n=== §50 seed %d: char/word gaps, V1 vs V2 (dit-derived centres) ===\n", p.seed);
+    printf("%6s  %6s %5s %-6s  %6s %5s %-6s\n", "gapMs", "ditV1", "×dit", "clsV1", "ditV2", "×dit", "clsV2");
+    long long lastDown = -1, lastUp = -1;
+    auto gname = [](cw::Gap g){ return g==cw::WORD_GAP?"WORD":g==cw::CHAR_GAP?"CHAR":"elem"; };
+    for (const auto& e : probe->events()) {
+        if (e.keyDown) {
+            if (lastUp >= 0) {
+                float ms = (float)(e.sample - lastUp);
+                float d1 = v1.getDitDuration(), d2 = v2.getDitDuration();
+                auto g1 = v1.classifyOff(ms), g2 = v2.classifyOff(ms);
+                if (ms > 1.8f * d1) {   // long gaps only
+                    printf("%6.0f  %6.1f %5.1f %-6s  %6.1f %5.1f %-6s%s\n", ms,
+                           d1, ms/d1, gname(g1.gap), d2, ms/d2, gname(g2.gap),
+                           g1.gap != g2.gap ? "  <-- DIFFER" : "");
+                }
+            }
+            lastDown = e.sample;
+        } else {
+            if (lastDown >= 0) { float on=(float)(e.sample-lastDown); if(on>=5) { v1.classifyOn(on); v2.classifyOn(on);} }
+            lastUp = e.sample;
+        }
+    }
 }
 
 // §48 — verify legacy+select routes correctly: it should track log on good-SNR

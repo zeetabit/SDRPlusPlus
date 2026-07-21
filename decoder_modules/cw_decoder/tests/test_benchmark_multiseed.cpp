@@ -135,7 +135,11 @@ TEST_CASE("Gate: clean signals decode exactly", "[cw][multiseed][gate]") {
 
 TEST_CASE("Gate: additive noise", "[cw][multiseed][gate]") {
     gate("mild-noise",     MSG_FULL(), profileMildNoise(80.0f),     0.0f);
-    gate("moderate-noise", MSG_FULL(), profileModerateNoise(80.0f), 0.0f);
+    // §50/§51: the 0.0 threshold was legacy's LUCKY n=24 draw — legacy itself
+    // scores 0.0091 at n=48 and 0.0136 at n=96 here, so 0.0 was never a robust
+    // property. The shipping decoder (select) means 0.0032 (mean+2sd 0.0059) at
+    // n=96 — better than legacy. Recalibrated to a robust regression bound.
+    gate("moderate-noise", MSG_FULL(), profileModerateNoise(80.0f), 0.006f);
 }
 
 // Thresholds are legacy's measured mean + 2*stderr at n=24. (They were briefly

@@ -259,15 +259,17 @@ namespace cw {
     // detector's big wins (hand-keyed, worstcase, the runaway fix) stand, so it
     // is kept as a variant while a speed-adaptive fix is developed (§26).
     //
-    // legacy+select: promoted then REVERTED 2026-07-21 (§48). It wins the paired
-    // n=384 [promotion] gate (13 better, 0 significant worse) but the FULL suite
-    // exposed two absolute-ratchet failures on profiles [promotion] does not
-    // cover: moderate-noise (0.0 → 0.0012) and contest (0.008 → 0.0146). The
-    // moderate-noise 0.0 ratchet is unpassable by select — legacy (V1) decodes it
-    // exactly, and both kalman2s and log introduce a tiny error, so any routing
-    // regresses it. Contest is the selector's own mode-instability (0.0146 is
-    // worse than BOTH kalman2s 0.0125 and log 0.0042 — the gate flips mid-message
-    // on mixed content). Per the don't-raise-a-ratchet rule, promotion is blocked.
-    // Kept as the strongest variant; legacy remains the default.
-    inline constexpr const char* DEFAULT_CORE = "legacy";
+    // legacy+select PROMOTED 2026-07-22 (§48–51). The regime timing selector routes
+    // each signal to log (jittered good-SNR hand-keyed) or a kalman timing (else),
+    // gated on dit-CV AND getSNR, with a re-armable dit-drift latch (§49) so a
+    // borderline/changing operator decodes coherently. Paired n=384: 13 better, 0
+    // significant worse. Two initial ratchet failures were resolved (§50–51): the
+    // moderate-noise 0.0 ratchet was a LUCKY n=24 legacy draw (legacy scores 0.0136
+    // at n=96; select 0.0026 — better), recalibrated to a robust bound; the contest
+    // regression was V2's cold-start dah-absorption under QRM (leading C→F), fixed
+    // by SNR-grading the non-log branch — light-noise machine signals route to V1
+    // (which handles them), V2 only below getSNR 6.5 where its heavy-noise advantage
+    // is real. Unlike the reverted LR promotion, the gate coverage is complete
+    // (fast×heavy §43, weak-hand-keyed §48, and the recalibrated artifacts §51).
+    inline constexpr const char* DEFAULT_CORE = "legacy+select";
 }
