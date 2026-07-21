@@ -38,10 +38,11 @@ namespace cw {
                    std::unique_ptr<IDetector> det,
                    std::unique_ptr<ITiming> tim,
                    std::unique_ptr<ISymbolDecoder> sym,
-                   MatchedFilterResize mfResize = MF_RESET)
+                   MatchedFilterResize mfResize = MF_RESET,
+                   float minElemScale = 1.0f)
             : frontEnd(std::move(fe)), detector(std::move(det)),
               timing(std::move(tim)), symbols(std::move(sym)),
-              mfResizePolicy(mfResize) {}
+              mfResizePolicy(mfResize), minElementScale(minElemScale) {}
 
         int id = 0;
         bool debugLog = false;
@@ -269,8 +270,14 @@ namespace cw {
 
         float minElementMs() const {
             if (!timing->isLocked()) return 5.0f;
+            // The filter rejects short elements to drop noise spikes, but on
+            // hand-keyed signals real short dits are exactly what it rejects, so
+            // it also biases the dit estimate up (§17.3.4). minElementScale
+            // relaxes it: 0 leaves only the 5 ms floor, 1.0 is the historical
+            // 0.3/0.15 factor. The LR detector already rejects spikes by
+            // duration, so under it the filter may be redundant (§24).
             float factor = (_snr > 6.0f) ? 0.3f : 0.15f;
-            return std::max(5.0f, timing->getDitDuration() * factor);
+            return std::max(5.0f, timing->getDitDuration() * factor * minElementScale);
         }
 
         int computeFilterWindow() {
@@ -372,6 +379,7 @@ namespace cw {
         float mfRingSum = 0;
         int mfCurrentW = 0;
         MatchedFilterResize mfResizePolicy = MF_RESET;
+        float minElementScale = 1.0f;
 
         struct SavedEvent { bool keyDown; float timeMs; };
         std::vector<SavedEvent> preLockEvents;

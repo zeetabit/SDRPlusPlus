@@ -33,12 +33,14 @@ namespace cw {
         // headline test (does a better detector rescue log?) is one line.
         inline std::unique_ptr<IDecodeCore> makeLR(
                 TimingStrategy timing, bool soft = false,
-                float theta = 0.5f, float boundHi = 3.0f, float boundLo = -3.0f) {
+                float theta = 0.5f, float boundHi = 3.0f, float boundLo = -3.0f,
+                float minElemScale = 1.0f) {
             return std::make_unique<StagedCore>(
                 std::make_unique<EnvelopeFrontEnd>(),
                 std::make_unique<LikelihoodRatioDetector>(theta, boundHi, boundLo, soft),
                 std::make_unique<AdaptiveTimingStage>(timing),
-                std::make_unique<BeamSymbolDecoder>());
+                std::make_unique<BeamSymbolDecoder>(),
+                MF_RESET, minElemScale);
         }
 
         // Dual-window peak reference has its own factory: the parameters are
@@ -115,6 +117,14 @@ namespace cw {
 
             {"legacy+lr+soft+log", "Soft LR detector + log-duration timing",
              []{ return detail::makeLR(TIMING_LOG, true); }},
+
+            // ── Min-element filter disabled (docs §24). Confirms §17.3.4: the
+            //    filter biases fast hand-keyed (handkeyed-40 better without it)
+            //    but is not redundant under the LR detector — it still catches
+            //    short evidence-passing spikes, so worstcase/noise3.0 regress.
+            //    A bounded tradeoff, not removable. Measured, not promoted. ──
+            {"legacy+lr+log+nofilt", "Default chain, min-element filter off (§24)",
+             []{ return detail::makeLR(TIMING_LOG, false, 0.5f, 3.0f, -3.0f, 0.0f); }},
 
             // ── Matched-filter resize transient (docs §12). Zeroing the ring
             //    buffer on a window change injects a dropout mid-element; at

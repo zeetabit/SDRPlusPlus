@@ -156,9 +156,12 @@ resolve. No decoder changed; nothing became promotable.
    events that were the only bias log suffered. Gap classification improved with
    it (12.4% → 10.0%), which is why §21's noise3.0 win exists. A new, smaller
    residual remains (element-gap splitting at −18% dit), recorded not chased.
-3. **The min-element filter's bias on hand-keyed** (§17.3.4) — a measured,
-   isolated, unexplained defect: enabling the decoder's own filter moves dit
-   +5.9% → +11.3%. Small, self-contained, and testable now.
+3. ✓ **The min-element filter's bias on hand-keyed — CLOSED (§24).** Confirmed
+   under the new default (relaxing the filter helps handkeyed-40, t=−2.17), but
+   the filter is not removable: it still catches short evidence-passing spikes,
+   so disabling it regresses worstcase and noise3.0. A bounded, sub-character
+   tradeoff — the same duration-ambiguity wall as §20.8, now at the filter.
+   Confirmed-but-not-actionable.
 4. **#29 in log-duration space** — §17.3.7 means it must be scored against
    `farns2.0-n1.5` rather than the clean profile. ⊘ If the §18.6.1 inference
    holds, the ARRL 5 and 10 WPM sessions are also real Farnsworth material with
@@ -3070,3 +3073,42 @@ rather than the old character-merging one. It is net-better and downstream of an
 already-good decode, so it is recorded, not chased. The §17.3.2 item is closed:
 the number is explained (a Schmitt+Kalman property) and the shipping decoder does
 not carry it.
+
+## 24. The min-element filter bias is real but the filter is not removable (2026-07-21)
+
+§17.3.4 measured that enabling the decoder's short-element filter
+(`staged_core.h`, `minElementMs`) moves the hand-keyed dit error +5.9% → +11.3%:
+the filter drops short elements to reject noise spikes, but on hand-keyed signals
+real short dits are exactly what it rejects, so it biases the surviving mean up.
+That was on Schmitt + Kalman. The filter is in the shared pipeline, so it applies
+to the LR+log default too — and the LR detector already rejects spikes by
+evidence duration (§21), so the filter might now be redundant cost.
+
+`minElementMs` was made configurable (`minElementScale`, default 1.0). Sweeping
+it on the default's chain, paired n=96 vs the shipping default:
+
+| profile | scale 0.0 (off) vs 1.0 | verdict |
+|---|---|---|
+| handkeyed-40 | −0.0104 (t=−2.17) | BETTER |
+| worstcase | +0.0066 (t=+2.94) | WORSE |
+| noise3.0 | +0.0098 (t=+2.34) | WORSE |
+| everything else | ~0 | ns |
+
+**Confirmed and bounded, but not removable.** §17.3.4's bias is real under the
+new default — relaxing the filter improves fast hand-keyed. But the filter is
+**not redundant**: it still helps worstcase and noise3.0, so disabling it is a
+net regression and fails the gate.
+
+The two spike defenses are complementary, not overlapping. The LR detector
+rejects *brief* excursions (too little evidence duration to cross the CUSUM); the
+min-element filter rejects *short-but-sustained* ones (enough evidence to cross,
+still shorter than a real element). On hand-keyed the second over-rejects real
+short dits; on noise it catches real spikes — the same duration signal with
+opposite meaning, the identical spike/interference ambiguity §20.8 met, now at
+the filter. Scale 0.0 and 0.5 give near-identical results (the effect is binary,
+not graded), and no SNR or speed threshold separates worstcase from hand-keyed —
+both span the SNR range, the same wall the earlier SNR-gating attempt hit.
+
+All magnitudes are sub-character. The filter is a justified, understood tradeoff;
+`legacy+lr+log+nofilt` preserves the measured negative result. §17.3.4 is closed
+as confirmed-but-not-actionable.
