@@ -3375,8 +3375,64 @@ once noise is heavy.
 *true* dit and *true* noiseAmp. A shipping decoder must approximate both — WPM
 from the timing lock (`getDitDuration`), noise from the detector's SNR
 (`getSNR`) — and retune the BPF once at lock without a filter-transition glitch
-(cf. the §12 MF-resize transient). Two coverage gaps to close there: the current
-profiles all sit at the blend extremes (noiseAmp ≤ 0.5 or ≥ 1.5), so the partial
-zone (moderate SNR) is untested; and the ground-truth→SNR mapping is
-un-measured. The ceiling says the target is worth building; the runtime rule is
-§30.
+(cf. the §12 MF-resize transient). The ceiling says the target is worth building;
+the runtime rule is future work. But before promoting on these numbers at all,
+the noise axis itself had to be put in physical units — §31.
+
+## 31. Calibrated SNR — the benchmark's noise axis in dB (2026-07-21)
+
+Prompted by a methodology question before promoting the BPF: is the noise axis
+compliant with signal-processing benchmark practice? It was not. Every profile
+was parametrized by raw `noiseAmp`, which is not a physical quantity — it depends
+on signal amplitude, sample rate, and measurement bandwidth, so "noise3.0" could
+not be reproduced by another lab or placed on any external CER-vs-SNR curve
+(AG1LE, PA3FWM). The statistics were sound (paired, n=96, non-inferiority); the
+*units* were not.
+
+**Calibration** (`cw_snr.h`, `[snr]` always-on). The generator's model:
+signal power `S = A²` at key-down; complex AWGN added to I and Q each
+`~noiseAmp·N(0,1)`, so noise power `2·noiseAmp²` white over the full rate ⇒
+`N0 = 2·noiseAmp²/f_s` and `SNR(B) = A²·f_s/(2·noiseAmp²·B)`. This is the
+**input** (pre-detection) SNR — a property of the signal, invertible, and
+reported in a stated reference bandwidth (2500 Hz SSB, 500 Hz CW). The standard
+profiles translate to:
+
+| noiseAmp | SNR/2500 Hz | SNR/500 Hz | detector getSNR (post-BPF) |
+|---|---|---|---|
+| 0.3 (hand-keyed) | +12.5 | +19.5 | +11.4 |
+| 1.0 | +2.0 | +9.0 | +6.9 |
+| 2.0 (noise2.0) | −4.0 | +3.0 | +4.5 |
+| 3.0 (noise3.0) | −7.5 | −0.5 | +3.2 |
+| 4.0 (noise4.0) | −10.0 | −3.0 | +2.3 |
+
+Two things this makes visible. First, **input SNR and the detector's `getSNR`
+diverge and even cross** — at noiseAmp 3.0 the input is −7.5 dB but getSNR reads
++3.2 dB, because the wide BPF already rejects most out-of-band noise. So neither
+`noiseAmp` nor `getSNR` is a valid benchmark unit; only the analytical input SNR
+is. Second, **every profile sits above PA3FWM's ≈−18 dB by-ear copy floor**, so
+legacy's 0.82 CER at noise3.0 (−7.5 dB) is nowhere near a physical limit — the
+headroom the campaign kept finding is real, and now quantified.
+
+**The §29 result in physical units** (`[bpf-snr-sweep]`, 15 WPM, paired n=96):
+
+| SNR/2500 Hz | legacy | noise-aware BPF | delta | t |
+|---|---|---|---|---|
+| +12 … +3 | ~0.001 | ~0.002 | ns | — |
+| −3 | 0.117 | 0.003 | −0.114 | −8.3 |
+| −6 | 0.397 | 0.017 | −0.381 | −24 |
+| −9 | 0.878 | 0.266 | −0.612 | −37 |
+
+Exactly the signature of a front-end SNR gain: no effect where SNR is ample,
+growing benefit as it falls, **0 regressions across the calibrated axis**. This
+sweep also exercises the blend zone (partial narrowing at 0…+3 dB, noiseAmp
+0.9–1.3) that the discrete profiles skipped — safe there too. The BPF win is now
+stated where the literature states it: at −6 dB SNR/2500 Hz, CER 0.40 → 0.017.
+
+**Scope, stated honestly.** This fixes the *unit* problem — the largest
+benchmark-rigor gap and a prerequisite for a credible promotion. Two lower-order
+gaps remain, both lower urgency because the paired design absorbs most of their
+risk: the noise model is complex-Gaussian, so the envelope is exactly Rician —
+the LR detector's own assumption (a circular validation for §21–28, less so for a
+front-end filter); and most profiles use one fixed message, so multi-seed
+averages over noise realizations, not over text content. Independent per-impairment
+RNG streams and a second message would close those.

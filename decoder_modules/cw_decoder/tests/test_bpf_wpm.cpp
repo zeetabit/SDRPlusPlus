@@ -1,5 +1,6 @@
 #include <catch.hpp>
 #include "cw_matrix.h"
+#include "cw_snr.h"
 #include <cw/staged_core.h>
 #include <cw/stages.h>
 #include <cstdio>
@@ -221,4 +222,38 @@ TEST_CASE("Noise-aware WPM-matched BPF vs legacy — the promotion question", "[
     // The whole point of the noise-aware rule: keep §29's biggest wins while
     // clearing the hand-keyed harm. Assert the wins survive and nothing is worse.
     CHECK(worse == 0);
+}
+
+// The §29 result in physical units (docs §31): noise-aware BPF vs legacy across a
+// calibrated INPUT-SNR sweep (dB in 2500 Hz), 15 WPM. Raw noiseAmp is not a
+// reportable SNR; this states the win where the external literature does. The
+// noiseAmp for each dB comes from the calibration, so the axis is reproducible.
+TEST_CASE("Noise-aware BPF vs legacy across calibrated SNR (dB)", "[cw][.][bpf-snr-sweep]") {
+    // dB in 2500 Hz. +inf = clean. PA3FWM puts by-ear copy near -18 dB, so this
+    // range spans comfortable to hard, all above the human floor.
+    const std::vector<float> snrsDb = {12.0f, 6.0f, 3.0f, 0.0f, -3.0f, -6.0f, -9.0f};
+
+    printf("\n=== legacy vs noise-aware WPM-matched BPF, 15 WPM, calibrated input "
+           "SNR (paired, n=%d) ===\n", PSEEDS);
+    printf("%10s %10s %8s %8s %9s %8s  %s\n",
+           "SNR/2500", "noiseAmp", "legacy", "aware", "delta", "t", "verdict");
+
+    int wins = 0, regress = 0;
+    for (float db : snrsDb) {
+        SignalParams p = profileAtSnr(80.0f, db, REF_BW_SSB);
+        auto base  = runCell("legacy", "snr", MSG_FULL(), p, PSEEDS);
+        auto aware = runCellWith(noiseAwareFactory(p.noiseAmp), "legacy+bpfaware",
+                                 "snr", MSG_FULL(), p, PSEEDS);
+        auto d = comparePaired(base.cerSamples, aware.cerSamples);
+        printf("%+9.1f  %9.3f %8.4f %8.4f %+9.4f %8.2f  %s\n",
+               db, p.noiseAmp, base.cerMean, aware.cerMean, d.meanDelta, d.t, d.verdict());
+        if (d.significant() && d.meanDelta < 0) { wins++; }
+        if (d.significant() && d.meanDelta > 0) { regress++; }
+    }
+
+    printf("\n  %d significant wins, %d regressions across the SNR sweep\n", wins, regress);
+    // The BPF is a front-end SNR gain, so its benefit must grow as SNR falls and
+    // never invert: wins at low SNR, no regression anywhere on the calibrated axis.
+    CHECK(regress == 0);
+    CHECK(wins > 0);
 }
