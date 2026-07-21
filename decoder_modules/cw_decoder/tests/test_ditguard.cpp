@@ -212,6 +212,45 @@ TEST_CASE("select ratchet attribution (§48)", "[cw][.][select-ratchet]") {
     }
 }
 
+// §48 — the operator-change validation the re-armable latch exists for. Two
+// operators back-to-back (different WPM => dit drifts >25%): select must re-arm at
+// the boundary and adapt, not stay frozen on the first operator. Decode the
+// concatenation and check both halves decode — vs the failure mode where a frozen
+// mode garbles the second operator.
+TEST_CASE("select adapts to operator change (§48)", "[cw][.][select-opchange]") {
+    constexpr int SEEDS = 48;
+    // Op A: hand-keyed 15 WPM (jittered -> log). Op B: machine 30 WPM (precise -> kalman2s).
+    int good = 0, total = 0;
+    float cerSum = 0;
+    for (int s = 0; s < SEEDS; s++) {
+        SignalParams a = profileHandKeyed(80.0f); a.seed = 1000 + s * 7919u;
+        SignalParams b = profileClean(40.0f);     b.seed = 7000 + s * 7919u; b.noiseAmp = 0.5f;
+        auto sa = generateMessage("CQ CQ DE W1AW", a);
+        auto sb = generateMessage("TEST DE K2ORS", b);
+        std::vector<dsp::complex_t> iq = sa.samples;
+        iq.insert(iq.end(), sb.samples.begin(), sb.samples.end());
+        std::string ref = normalize(sa.sourceText) + " " + normalize(sb.sourceText);
+
+        cw::Channel ch;
+        ch.initWithCore(0, a.toneFreq,
+            cw::findCore("legacy+select")->make(), "opchange");
+        for (int off = 0; off < (int)iq.size(); off += 512) {
+            int n = std::min(512, (int)iq.size() - off);
+            ch.process(n, &iq[off]);
+        }
+        auto sc = score(ref, ch.text.getText());
+        cerSum += sc.cer;
+        // "second operator decoded" heuristic: the tail callsign K2ORS present
+        if (ch.text.getText().find("K2") != std::string::npos ||
+            ch.text.getText().find("ORS") != std::string::npos) { good++; }
+        total++;
+    }
+    printf("\n=== §48 operator-change: 15wpm hand -> 30wpm machine, %d seeds ===\n", SEEDS);
+    printf("mean CER (concatenation) = %.4f;  2nd-operator recovered = %d/%d\n",
+           cerSum / SEEDS, good, total);
+    CHECK(good > total / 2);   // re-arm must let the majority recover the 2nd operator
+}
+
 // §48 — verify legacy+select routes correctly: it should track log on good-SNR
 // hand-keyed (where log wins) and kalman2s on noise (never log's catastrophic
 // noise CER) and on weak hand-keyed (§46b). n=96 (routing is a large effect).

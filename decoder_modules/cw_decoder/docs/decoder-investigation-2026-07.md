@@ -4348,3 +4348,43 @@ case than kalman2s ever had (which carried a real significant regression). legac
 remains default pending that decision; select ships as the strongest variant. The
 gate permanently gains the weak-hand-keyed cells. Byte-identical: legacy/kalman2
 unchanged; suite green (1665/225, serial verified).
+
+## 49. The re-armable latch — a robust dit-based re-evaluation trigger (2026-07-22)
+
+**The switch-timing problem (§48).** Routing between two independent timing models
+corrupts on a borderline signal because the models hold different dit estimates, so
+any mid-stream switch hands the gap classifier a discontinuous dit. Four switch
+strategies each traded one failure for another: no-latch (contest 0.0146, worse than
+both models); latch-at-lock (fixes contest but is a real-world *smell* — a QSO ends,
+a new operator/WPM appears, and the mode is frozen forever); one-way (contest still
+corrupts on the single mid-char flip); word-gap re-eval (adapts to operators but
+switches repeatedly across contest's words → 0.0312, worst of all).
+
+**The fix (operator's insight): re-evaluate on a NOISE-ROBUST first-order signal.**
+The jitter CV is second-order — noise inflates it, which is exactly why the gate
+flickers on borderline signals and misfires on weak hand-keyed. The **dit duration**
+is first-order and far more noise-robust. So: decide the model on the CV during
+acquisition, then FREEZE it once settled (locked + ≥6 dits), and re-open the gate
+only at a word gap when the dit has drifted >25% — a genuine operator/WPM change.
+
+- Stable operator (incl. borderline contest): dit never drifts → no re-switch →
+  coherent decode through one model. **contest 0.0146 → 0.0125 (= kalman2s)**, the
+  worse-than-both corruption gone.
+- Genuine operator change: dit drifts → re-arm → re-decide for the new operator.
+  No "latch forever" smell. Validated (`[select-opchange]`): 15wpm-hand → 30wpm-
+  machine concatenation, the 2nd operator recovered in 28/48 seeds (the residual is
+  the inherent cost of an instantaneous mid-stream operator swap, hardest possible).
+
+**Adjudication (paired n=384) holds: 11 better, 0 significant worse** — hand-keyed
+15–40 BETTER (hk-15 −0.154, hk-40 −0.083), worstcase t=−30, all noise wins retained.
+Slightly fewer "better" than the naive mid-char version (hk-30 → ns from the
+acquisition overhead of settling on kalman2s first) but no regressions, and now the
+variant is clean (never worse than both models) and operator-robust.
+
+**Promotion still blocked, unchanged reason.** The re-armable latch fixes the
+selector's OWN defects; the two ratchet failures are inherited from kalman2s and are
+fundamental: moderate-noise (0.0 → 0.0012) is unpassable by any non-V1 timing (both
+log and kalman2s introduce a tiny error legacy does not), and contest (0.008 →
+0.0125) is kalman2s's own regression on a machine-ish profile the selector correctly
+routes to kalman2s. `legacy+select` ships as the strongest, cleanest, operator-robust
+variant; `legacy` remains the default.

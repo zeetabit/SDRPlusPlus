@@ -688,6 +688,8 @@ namespace cw {
                 TimingEvent lEvt = logTiming.classifyOn(durationMs);
                 elementDurations.push_back(durationMs);
                 if ((int)elementDurations.size() > 30) elementDurations.erase(elementDurations.begin());
+                // Decide/settle the mode until frozen; after that it re-opens only
+                // at a word gap on a robust dit-drift trigger (reEvalSelectGate).
                 updateSelectGate();
                 return selectUseLog ? lEvt : kEvt;
             }
@@ -716,19 +718,41 @@ namespace cw {
         // classifyOff/getDitDuration read the selected model's dit, so a SELECT
         // signal decodes coherently through one model at a time.
     private:
+        // §48: decide the model on the jitter CV (a second-order statistic) but
+        // FREEZE it once settled, and re-open it only when a robust first-order
+        // parameter — the dit duration — drifts (new operator / WPM change), tested
+        // at a word gap. The CV is what noise corrupts, so switching on it flickers
+        // on borderline signals and corrupts the decode via dit-discontinuity; the
+        // dit is far more noise-robust, so it makes a clean re-evaluation trigger.
+        // Result: a stable operator (incl. borderline contest) never re-switches
+        // (coherent decode), while a genuine change still re-evaluates (no "latch
+        // forever" smell). Runs per-element until settled, then only on re-arm.
         void updateSelectGate() {
+            if (selectFrozen) { return; }
             const float dit = kalman.getDitDuration();
             if (dit < 1.0f) { return; }
             float sum = 0, sumSq = 0; int n = 0;
             for (float d : elementDurations) {
                 if (d > 0.5f * dit && d < 1.5f * dit) { sum += d; sumSq += d * d; n++; }
             }
-            if (n < 6) { return; }                    // too few dits to judge jitter
+            if (n < 6) { return; }                    // too few dits for a stable jitter CV
             const float mean = sum / n;
             const float var  = std::max(0.0f, sumSq / n - mean * mean);
             const float cv   = mean > 1.0f ? sqrtf(var) / mean : 0.0f;
             if (!selectUseLog && cv > SELECT_CV_HI && _snr > SELECT_SNR_HI) { selectUseLog = true; }
             else if (selectUseLog && (cv < SELECT_CV_LO || _snr < SELECT_SNR_LO)) { selectUseLog = false; }
+            if (kalman.isLocked()) { selectFrozen = true; selectFrozenDit = dit; }
+        }
+
+        // §48: at a word gap, re-open the frozen gate iff the operator's dit has
+        // drifted materially (>25%) — a new operator or a non-automatic keyer.
+        void reEvalSelectGate() {
+            if (!selectFrozen) { return; }
+            const float dit = kalman.getDitDuration();
+            if (selectFrozenDit > 1.0f &&
+                std::fabs(dit - selectFrozenDit) / selectFrozenDit > 0.25f) {
+                selectFrozen = false;   // re-arm; classifyOn re-decides and re-settles
+            }
         }
     public:
 
@@ -801,6 +825,10 @@ namespace cw {
             else {
                 evt.gap = WORD_GAP;
                 evt.confidence = postWord;
+                // §48: a word gap is the only place the frozen mode may re-open,
+                // and only if the dit has drifted (operator change) — never a
+                // mid-character switch on a stable signal.
+                if (_strategy == TIMING_SELECT) { reEvalSelectGate(); }
             }
 
             return evt;
@@ -866,6 +894,8 @@ namespace cw {
             elementDurations.clear();
             gapDurations.clear();
             selectUseLog = false;   // §48: start on kalman2s until a jittered good-SNR run is seen
+            selectFrozen = false;
+            selectFrozenDit = 0.0f;
         }
 
         TimingStrategy getStrategy() const { return _strategy; }
@@ -1057,7 +1087,9 @@ namespace cw {
         // kalman2s otherwise. Both conditions are required: a weak hand-keyed
         // signal is jittered but log loses it (§46b), so low SNR forces kalman2s.
         float _snr = 20.0f;                   // pushed each block by StagedCore::setSnr
-        bool  selectUseLog = false;           // latched gate (hysteresis)
+        bool  selectUseLog = false;           // §48: log/kalman2s choice
+        bool  selectFrozen = false;           // §48: mode settled; re-opens only on dit drift
+        float selectFrozenDit = 0.0f;         // §48: dit at freeze — the operator-change reference
         static constexpr float SELECT_CV_HI  = 0.12f;  // dit-CV enter-log (hand-keyed jitter ~0.15)
         static constexpr float SELECT_CV_LO  = 0.09f;  // dit-CV leave-log (machine at good SNR ~0.05-0.08)
         static constexpr float SELECT_SNR_HI = 8.0f;   // getSNR enter-log (hand-keyed ~11+, noise2.0 ~4.5)
