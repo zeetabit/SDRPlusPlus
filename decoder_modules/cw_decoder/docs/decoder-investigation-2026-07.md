@@ -3585,6 +3585,55 @@ resolved. It is not a significant regression.
 **State:** `legacy+bpfauto` is now a strong, real-audio-validated candidate — 6
 significant wins, 0 significant regressions, works on real keying at moderate
 noise, degrades safely at extreme noise. The lone non-inferiority flag is *ns* at
-a −10 dB total-failure SNR. `legacy` remains default pending the promotion
-decision; the acquisition gap (narrowing only post-lock limits the heavy-noise
-win vs the fixed-narrow ceiling) remains the one avenue for more.
+a −10 dB total-failure SNR.
+
+## 34. The acquisition gap is blocked by the garbage floor (2026-07-21)
+
+The one remaining avenue for more: bpfauto narrows only *after* timing lock, so at
+heavy noise (lock late, 10 s+) the acquisition window is decoded wide — the fixed
+narrow filter `bpf20` reaches 0.52 at real noiseAmp 2.0 where bpfauto reaches only
+0.97. Tried firing the retune as soon as `inputSnr` converges (~2 s), before lock,
+using a mid-range default WPM.
+
+Refuted. It changed nothing at noiseAmp 2.0 and slightly perturbed lighter-noise
+synthetic (6 → 5 wins). The reason is decisive: at the heavy-noise SNRs where the
+acquisition gap matters, the `getSNR` garbage-floor guard (< 3.5) *already blocks
+narrowing* — noiseAmp 2.0 reads getSNR 2.3. Narrowing earlier cannot help where
+narrowing is forbidden. The binding constraint is the garbage floor, not the
+acquisition timing, and the floor cannot be relaxed because getSNR does not
+separate "narrow helps" at noiseAmp 2.0 (2.3) from "narrow hurts" at 3.0 (2.4) —
+the same 0.5 dB wall as §33. Reverted.
+
+Closing the acquisition gap would need the raw IQ re-filtered from the start once
+WPM is known — architecturally hard (the front end is not re-runnable on buffered
+input: the xlator phase and filter state have advanced). Not pursued. bpfauto is
+at the limit of what bandwidth/trigger tuning reaches.
+
+## 35. Promotion attempt — a real single-seed variance blocker (2026-07-21)
+
+Setting `DEFAULT_CORE = legacy+bpfauto` fails 7 always-on single-seed gates, the
+worst being `worstcase` on MSG_CQ / seed 42 at CER 0.957 where legacy passes under
+0.6. This is not a threshold that needs re-ratcheting — it is a real failure mode
+the profile-averaged gates hid, exactly the class that reverted the LR detector
+(§25). Characterized (`[bpf-tail]`, worstcase n=96):
+
+| | mean | p95 | max | per-seed vs legacy |
+|---|---|---|---|---|
+| legacy | 0.610 | 0.761 | 0.887 | — |
+| bpfauto | 0.460 | 0.676 | 0.831 | **better on 75, worse on 16** |
+
+So bpfauto is better on the whole — mean, p95 *and* max all improve on the long
+message — yet it is worse on 16 of 96 seeds. The narrowing adds variance: during a
+QSB dip the getSNR/inputSnr readings and the one-shot retune can land wrong, and on
+a short message (MSG_CQ, 23 chars) there is not enough data to recover from it. For
+a shipped default, decoding *worse than the current decoder* on ~1 in 6 realizations
+of a realistic hard signal — occasionally much worse on short overs — is a genuine
+regression, even with a better mean.
+
+Converting the single-seed gates to multiseed would make the promotion pass, but
+that is loosening a check that is catching something real, not an artifact. The
+disciplined outcome: **not promoted.** `legacy+bpfauto` stays a strong,
+real-audio-validated variant (§29–33) with a documented variance tradeoff; whether
+its better-mean-worse-tail profile is worth shipping as the default is a judgment
+call for the maintainer, not a gate the campaign can pass on its own terms.
+`legacy` remains the default.

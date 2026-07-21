@@ -223,6 +223,12 @@ namespace cw {
             // the lock instant the wide noise window is still filling and reads a
             // huge transient (§33), so gating on lock alone never narrows on real
             // audio — the readiness gate is what makes the trigger fire.
+            //
+            // Firing earlier (at inputSnr-ready, before lock) to close the
+            // acquisition gap was tried and refuted (§34): the getSNR garbage-floor
+            // guard already blocks narrowing at the heavy-noise SNRs where the gap
+            // matters (noiseAmp 2.0, getSNR 2.3 < 3.5), so earlier narrowing has
+            // nothing to act on there and only perturbs the lighter-noise decodes.
             if (adaptiveBpf && !bpfRetuned && timingWasLocked && frontEnd->inputSnrReady()) {
                 auto g = bpfGeom(timing->getDitDuration(), frontEnd->getInputSnrDb(), _snr);
                 // Skip a no-op retune: rebuilding the filter clears its history

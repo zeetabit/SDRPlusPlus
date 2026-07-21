@@ -289,3 +289,25 @@ TEST_CASE("Runtime WPM-locked BPF (legacy+bpfauto) vs legacy", "[cw][.][bpf-runt
     CHECK(worse == 0);
     CHECK(better > 0);
 }
+
+// Characterize the worstcase (QSB) variance that the single-seed gate caught: is
+// bpfauto's bad tail seed-42-specific, or a real variance regression? (§34)
+TEST_CASE("bpfauto worstcase tail vs legacy", "[cw][.][bpf-tail]") {
+    auto base = runCell("legacy",         "worstcase", MSG_FULL(), profileWorstCase(80.0f), 96);
+    auto bpf  = runCell("legacy+bpfauto", "worstcase", MSG_FULL(), profileWorstCase(80.0f), 96);
+    int worse = 0, better = 0; float maxB = 0, maxL = 0;
+    for (size_t i = 0; i < base.cerSamples.size(); i++) {
+        if (bpf.cerSamples[i] > base.cerSamples[i] + 0.02f) worse++;
+        if (bpf.cerSamples[i] < base.cerSamples[i] - 0.02f) better++;
+        maxB = std::max(maxB, bpf.cerSamples[i]);
+        maxL = std::max(maxL, base.cerSamples[i]);
+    }
+    printf("\n=== worstcase, n=96: legacy mean %.3f p95 %.3f max %.3f | bpfauto mean %.3f p95 %.3f max %.3f ===\n",
+           base.cerMean, base.cerP95, maxL, bpf.cerMean, bpf.cerP95, maxB);
+    printf("  per-seed: bpfauto better on %d, worse on %d (|delta|>0.02)\n", better, worse);
+    // The §35 finding: bpfauto is better on the whole (mean, p95, max) yet worse
+    // on a real minority of seeds — the variance the single-seed MSG_CQ gate
+    // caught. Both halves asserted so the tradeoff cannot be silently forgotten.
+    CHECK(bpf.cerMean < base.cerMean);   // better on average
+    CHECK(worse >= 5);                   // but a real worse-tail, not an artifact
+}
