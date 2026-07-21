@@ -108,7 +108,8 @@ namespace {
     // the detector's per-event SNR is not observable from here, so this is the
     // permissive end of the decoder's real filter, not an exact replica.
     GapNoiseStats probeNoisyGaps(const char* message, SignalParams params, int seeds,
-                                 bool minElem) {
+                                 bool minElem, bool useLR = false,
+                                 cw::TimingStrategy strat = cw::TIMING_KALMAN) {
         GapNoiseStats out;
         out.seeds = seeds;
 
@@ -116,14 +117,16 @@ namespace {
             params.seed = 1000 + (unsigned)s * 7919u;
             auto sig = generateMessage(message, params);
 
-            auto rec = std::make_unique<RecordingDetector>(
-                std::make_unique<cw::SchmittDetector>());
+            std::unique_ptr<cw::IDetector> inner = useLR
+                ? std::unique_ptr<cw::IDetector>(std::make_unique<cw::LikelihoodRatioDetector>())
+                : std::unique_ptr<cw::IDetector>(std::make_unique<cw::SchmittDetector>());
+            auto rec = std::make_unique<RecordingDetector>(std::move(inner));
             auto* probe = rec.get();
 
             cw::Channel ch;
             ch.initWithCore(0, params.toneFreq, std::make_unique<cw::StagedCore>(
                 std::make_unique<cw::EnvelopeFrontEnd>(), std::move(rec),
-                std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),
+                std::make_unique<cw::AdaptiveTimingStage>(strat),
                 std::make_unique<cw::BeamSymbolDecoder>()), "gap-noise-probe");
 
             for (int off = 0; off < (int)sig.samples.size(); off += 512) {
@@ -141,7 +144,7 @@ namespace {
             // decoder's own instance cannot be read per-gap without changing
             // the pipeline, and this must observe the same sequence it sees.
             cw::AdaptiveTiming timing;
-            timing.init(RATE, cw::TIMING_KALMAN);
+            timing.init(RATE, strat);
 
             long long lastDown = -1, lastUp = -1;
             for (const auto& e : probe->events()) {
@@ -262,4 +265,42 @@ TEST_CASE("gap classification under noise", "[cw][.][gap-noise]") {
     // On a clean signal a structurally intact gap must never be misread: the
     // durations are exact and the estimator converges to them (§16.1).
     CHECK(classErrors(clean) <= SEEDS);
+}
+
+// §17.3.2 traced the noise-3.0 gap misclassification to a +38.9% dit
+// OVERestimate under Schmitt+Kalman: gap centres are dit-derived, so an
+// inflated dit drags char gaps into the element cluster. The promoted default
+// is LR detector + log timing (§21). This measures whether that chain shares
+// the bias — i.e. whether §17.3.2 still applies to the shipping decoder.
+TEST_CASE("gap classification: default chain vs legacy (§23)", "[cw][.][gap-noise-lr]") {
+    constexpr int SEEDS = 8;
+    SignalParams n3 = profileClean(80.0f); n3.noiseAmp = 3.0f;
+
+    struct Chain { const char* name; bool lr; cw::TimingStrategy strat; };
+    const Chain chains[] = {
+        {"Schmitt+Kalman (legacy)", false, cw::TIMING_KALMAN},
+        {"LR+log (default)",        true,  cw::TIMING_LOG},
+    };
+
+    printf("\n=== noise-3.0 gap classification by chain (%d seeds) ===\n", SEEDS);
+    printf("%-26s %8s %8s %10s  %s\n",
+           "chain", "damaged", "clsErr%", "ditErr%", "confusion truth->cls");
+
+    float legacyDitErr = 0, defaultDitErr = 0;
+    int legacyClsErr = 0, defaultClsErr = 0;
+    for (const auto& c : chains) {
+        GapNoiseStats g = probeNoisyGaps(MSG_FULL(), n3, SEEDS, true, c.lr, c.strat);
+        printf("%-26s %7.1f%% %7.1f%% %+10.1f  E>C%3d C>E%3d W>C%2d\n",
+               c.name, damagePct(g), classErrPct(g), g.ditErrPct,
+               g.confusion[0][1], g.confusion[1][0], g.confusion[2][1]);
+        if (c.lr) { defaultDitErr = g.ditErrPct; defaultClsErr = classErrors(g); }
+        else      { legacyDitErr  = g.ditErrPct; legacyClsErr  = classErrors(g); }
+    }
+    printf("\n");
+
+    // The point of §23: the default's dit bias is far smaller than legacy's
+    // +38.9%, and its gap misclassification is no worse. This is why the LR+log
+    // promotion wins noise3.0 (§21) — the gap centres are no longer corrupted.
+    CHECK(std::fabs(defaultDitErr) < std::fabs(legacyDitErr));
+    CHECK(defaultClsErr <= legacyClsErr);
 }

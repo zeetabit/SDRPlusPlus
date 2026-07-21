@@ -150,10 +150,12 @@ resolve. No decoder changed; nothing became promotable.
    It turns the +0.97 (t=18) noise3.0 catastrophe into −0.11 (a win), with 9
    significant improvements and zero significant regressions, and is now the
    production **DEFAULT_CORE** — the campaign's first promotion.
-2. **Why is dit +38.9% at noise 3.0?** (§17.3.2) The largest unexplained number
-   in these docs, and it sits upstream of the gap classifier — gap centres derive
-   from `dit`, so nothing in gap classification can be fixed while its input is
-   39% wrong. ⊘ Not yet traced to CER.
+2. ✓ **Why is dit +38.9% at noise 3.0? — CLOSED (§23).** It was a Schmitt+Kalman
+   property. The promoted LR+log default holds dit within 5% of truth there
+   (vs +37% for legacy), because the LR detector removes the short spurious
+   events that were the only bias log suffered. Gap classification improved with
+   it (12.4% → 10.0%), which is why §21's noise3.0 win exists. A new, smaller
+   residual remains (element-gap splitting at −18% dit), recorded not chased.
 3. **The min-element filter's bias on hand-keyed** (§17.3.4) — a measured,
    isolated, unexplained defect: enabling the decoder's own filter moves dit
    +5.9% → +11.3%. Small, self-contained, and testable now.
@@ -3021,3 +3023,50 @@ so a larger interface change is unjustified. Soft evidence is a dead end at this
 formulation. The soft cores stay in the registry as the measured negative
 result; the default is unchanged (the `KeyEvent.confidence` multiply is 1.0 for
 every non-soft core, so `legacy+lr+log` is byte-identical).
+
+## 23. The +38.9% dit overestimate is resolved by the promotion (2026-07-21)
+
+§17.3.2 named a **+38.9% dit overestimate at noise 3.0** the largest unexplained
+number in these documents and the root of the gap misclassification in §17: gap
+centres are dit-derived (`boundary = dit·2`), so an inflated dit drags char and
+word gaps into shorter classes. That measurement was on Schmitt + Kalman — the
+old default. The shipping default is now LR detector + log timing (§21), and it
+does not share the bias.
+
+**Direct dit measurement, 15 WPM (true dit 80 ms), across the chain:**
+
+| chain | noise 1.0 | 2.0 | 3.0 |
+|---|---|---|---|
+| Schmitt+Kalman (legacy) | 82.6 (+3%) | 83.9 (+5%) | **109.8 (+37%)** |
+| LR+Kalman | 79.4 | 75.0 | 119.4 (+49%) |
+| Schmitt+log | 81.8 | 78.8 | 61.1 (−24%) |
+| **LR+log (default)** | 79.2 (−1%) | 74.8 (−6%) | **76.0 (−5%)** |
+
+The default's dit is within 5% of truth where legacy is +37%. It is **not simple
+cancellation**: the LR detector removes the short spurious events that dragged
+log's estimate down, so log rises from 61 (−24%) to 76 (−5%) — a correction. For
+Kalman, whose overestimate comes from long-tail/merged-element sensitivity rather
+than short spikes, the cleaner events do not help (110 → 119, worse). The LR
+detector cures exactly the one bias log suffers, and only that one.
+
+**Gap classification (`[gap-noise-lr]`, noise 3.0, detector-derived):**
+
+| chain | damaged | clsErr% | ditErr% | E>C | C>E | W>C |
+|---|---|---|---|---|---|---|
+| Schmitt+Kalman | 11.0% | 12.4% | +38.9% | 64 | 35 | 39 |
+| LR+log (default) | 9.5% | 10.0% | −18.0% | 92 | 1 | 17 |
+
+Better on every aggregate — and the confusion pattern **inverted with the dit
+sign**. Legacy's inflated dit dragged char/word gaps *down* into shorter classes
+(C>E 35, W>C 39, merging characters); the default's slight *under*-estimate
+pushes element gaps *up* into the char class (C>E collapses to 1, E>C rises to
+92, splitting characters). Same mechanism, opposite tilt, smaller magnitude. This
+is why the LR+log promotion wins noise3.0 (§21): the gap centres are no longer
+badly corrupted.
+
+⊘ **New residual, smaller than the old.** The default's −18% dit (this probe;
+−5% in the full decoder) leaves an element-gap-splitting tendency (E>C dominant)
+rather than the old character-merging one. It is net-better and downstream of an
+already-good decode, so it is recorded, not chased. The §17.3.2 item is closed:
+the number is explained (a Schmitt+Kalman property) and the shipping decoder does
+not carry it.
