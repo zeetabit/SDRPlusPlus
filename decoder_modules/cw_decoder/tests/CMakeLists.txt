@@ -29,6 +29,7 @@ add_executable(cw_decoder_tests
     test_matrix.cpp
     test_promotion.cpp
     test_lr_wpm.cpp
+    test_lr_snr.cpp
     test_oracle.cpp
     test_detector_metrics.cpp
     test_debug_decode.cpp

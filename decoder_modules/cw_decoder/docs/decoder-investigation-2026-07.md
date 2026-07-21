@@ -3251,3 +3251,52 @@ than promotion — it is a hand-keyed-accuracy lever, not a fast+heavy-noise fix
 `legacy` remains the default; the `setExternalDitMs` knob is kept as the
 instrument that measured this, defaulting off (0 → no override, base LR
 unchanged).
+
+## 28. Noise-side (SNR) bound scaling — wrong axis, refuted by the curve (2026-07-21)
+
+§27 left a fast + heavy-noise residual and proposed closing it from the noise
+side: grow the CUSUM bound when SNR is low (more noise → more evidence required
+→ fewer admitted spikes). Before writing any SNR law, the decisive question is
+whether the CER-vs-bound curve at the target profiles even has a minimum away
+from where speed-scaling already sits. `test_lr_snr.cpp`, `[lr-snr]`:
+`setExternalDitMs` sets the bound scale to `clamp(ditMs/80, 0.4, 1.2)`, so a fake
+dit sweeps the bound at a fixed real signal — a controlled bound-vs-CER curve.
+
+| profile (real speed) | scale 0.4 | 0.6 | 0.8 | 1.0 | 1.2 | legacy | curve |
+|---|---|---|---|---|---|---|---|
+| noise2.0-25wpm (fast+heavy) | 0.221 | 0.238 | 0.297 | 0.387 | 0.505 | 0.187 | ↑ small best |
+| noise2.0-30wpm (fast+heavy) | 0.355 | 0.434 | 0.500 | 0.615 | 0.740 | 0.279 | ↑ small best |
+| noise3.0 (slow+heavy) | 1.757 | 1.002 | 0.772 | 0.710 | 0.697 | 0.820 | ↓ large best |
+| handkeyed-40 (fast+light) | 0.043 | 0.049 | 0.069 | 0.151 | 0.363 | 0.177 | ↑ small best |
+
+**The two heavy-noise regimes want opposite bounds.** Fast+heavy is monotonic
+*increasing* — a small bound is always better, because at fast speed the CUSUM
+lag dominates and a larger bound only adds timing distortion. Slow+heavy is
+monotonic *decreasing* — a large bound is better, because at slow speed there is
+timing headroom and spike rejection dominates. (Asserted in the test as
+invariants, both directions.)
+
+**SNR cannot separate them.** Both regimes are low-SNR, so any rule keyed on SNR
+moves their bounds the *same* way — it would grow the bound for fast+heavy
+(making it worse, 0.238 → 0.387) while helping slow+heavy. The variable that
+actually separates "wants small" from "wants large" is **speed**, and speed-
+scaling (§27) already picks the correct direction in every quadrant:
+fast → small, slow → large. There is no quadrant where speed chooses the wrong
+bound and SNR would rescue it; SNR is redundant with speed here, and strictly
+worse because it is blind to the axis that matters.
+
+**And the residual is intrinsic.** Even at the floor scale 0.4 — the best any
+bound rule can do — fast+heavy stays above legacy (0.221 vs 0.187, 0.355 vs
+0.279; asserted). Schmitt simply handles fast + heavy noise better than the LR
+CUSUM at *any* bound. The fast+heavy gap is not a bound-tuning miss; it is a
+property of sequential evidence accumulation under a short element and a low
+margin, which no bound scalar removes.
+
+**Conclusion: bound-scaling is exhausted, on every axis.** Speed is the right
+axis and §27 already rides it to its limit; SNR is the wrong axis; and the
+remaining gap to legacy is intrinsic to the detector. The only bound-side lever
+left is lowering the speed clamp floor below 0.4 (fast+heavy is still improving
+at the floor), which is a marginal speed-side tweak, not a noise-side fix, and
+does not reach legacy. `legacy` remains the default. The LR detector stands as a
+variant that wins on hand-keyed and the runaway but loses on fast + heavy noise
+— a boundary now mapped from both the speed and the noise side.
