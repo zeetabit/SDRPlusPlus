@@ -3685,3 +3685,43 @@ which are artifacts the distribution refutes, and (b) the −10 dB garbage floor
 imperceptible but real. Whether to ship it as the default — converting the
 single-seed worstcase gates to multiseed (justified) and accepting −10 dB behavior
 as a wash — is the remaining maintainer call. `legacy` stays the default.
+
+## 37. Robustness safeties A / B / A+B — benchmarked and refuted (2026-07-21)
+
+Keeping the gates fixed (quality first), the way for bpfauto to earn promotion is
+to genuinely pass them. Two safeties, benchmarked as registry variants
+(`+a`, `+b`, `+ab`) against the exact failing gates (`[bpf-ab]`):
+
+- **A — revert-on-garbage.** After narrowing, watch the key-event rate vs the WPM
+  captured at narrow time; a ringing filter should flood, so revert to wide.
+- **B — re-evaluating decision.** Re-run the decision every 3 s on a converged
+  smoothed `getSNR` with hysteresis, so a bad one-shot call self-corrects.
+
+| core | noise4.0 (≤0.923) | wCQ@42 (<0.6) | wFULL@42 (<0.5) | noise3.0 | noise2.0 |
+|---|---|---|---|---|---|
+| legacy | 0.904 ✓ | 0.565 ✓ | 0.479 ✓ | 0.818 | 0.083 |
+| bpfauto | 0.945 ✗ | 0.652 ✗ | 0.507 ✗ | 0.568 | 0.018 |
+| +a | 0.945 ✗ | 0.652 ✗ | 0.507 ✗ | 0.568 | 0.018 |
+| +b | 1.049 ✗ | 0.565 ✓ | 0.592 ✗ | 0.670 | 0.036 |
+| +ab | 1.049 ✗ | 0.609 ✗ | 0.634 ✗ | 0.710 | 0.035 |
+
+**None clears the gates.** The per-seed trace of noise4.0 is decisive: the whole
+gate miss is *one seed* (seed 20) where a getSNR fluctuation pushes it over the
+3.5 floor, it narrows to 48 Hz, and CER goes 0.90 → 1.89. But the failure is
+**timing distortion, not a flood** — the key-event rate is 5.46/s vs an expected
+4.59/s (barely 1.2×), and `getWPM()` at narrow already reads 27.5 (true 15),
+because the marginal signal was producing spurious fast elements *before*
+narrowing. Both the rate and its WPM baseline are co-corrupted by the same
+pathology, so **A's rate test can never fire** (+a is byte-identical to bpfauto).
+The narrow filter then smears element edges into misclassifications — extra
+characters, but via distortion, not events. B is worse: re-evaluation narrows
+*more* seeds into the same distortion garbage (noise4.0 0.945 → 1.049) and shrinks
+the wins, buying only worstcase-CQ; A+B is worse still.
+
+**The finding: there is no reliable *runtime* signal that a narrow backfired**,
+because at −10 dB the estimators that would detect it (event rate, WPM, getSNR)
+are corrupted by the very pathology they'd need to measure — the §33 wall, now
+proven against a feedback safety, not just a feed-forward threshold. bpfauto's two
+gate misses are therefore not fixable by a garbage-revert or re-eval layer. The
+variants are kept as measured negative results; `legacy` remains the default and
+bpfauto the robust-at-usable-SNR variant it became in §36.

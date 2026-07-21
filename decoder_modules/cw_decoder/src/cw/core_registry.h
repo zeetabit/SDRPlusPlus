@@ -20,13 +20,15 @@ namespace cw {
                 MatchedFilterResize mfResize = MF_RESET,
                 EdgeBias edgeBias = EDGE_RAW,
                 PeakTracker peak = PEAK_INSTANT_ATTACK,
-                bool adaptiveBpf = false) {
+                bool adaptiveBpf = false,
+                bool bpfGarbageRevert = false,
+                bool bpfReeval = false) {
             return std::make_unique<StagedCore>(
                 std::make_unique<EnvelopeFrontEnd>(bpfCutoff, bpfTrans),
                 std::make_unique<SchmittDetector>(edgeBias, peak),
                 std::make_unique<AdaptiveTimingStage>(timing),
                 std::make_unique<BeamSymbolDecoder>(),
-                mfResize, 1.0f, adaptiveBpf);
+                mfResize, 1.0f, adaptiveBpf, bpfGarbageRevert, bpfReeval);
         }
 
         // Likelihood-ratio detector (docs §24). Its own factory: the CUSUM
@@ -145,6 +147,21 @@ namespace cw {
             {"legacy+bpfauto", "Legacy pipeline, WPM-locked noise-aware BPF (§30)",
              []{ return detail::makeStaged(TIMING_KALMAN, 100.0f, 100.0f, MF_RESET,
                                            EDGE_RAW, PEAK_INSTANT_ATTACK, true); }},
+
+            // ── Robustness variants of bpfauto (docs §37). The one-shot narrow
+            //    fails two gates: it rings noise into garbage at −10 dB and it
+            //    commits to one fade phase on QSB. A = revert-on-garbage (event
+            //    rate vs WPM), B = periodic re-evaluation on a converged smoothed
+            //    getSNR with hysteresis. Benchmarked A vs B vs A+B ([bpf-ab]). ──
+            {"legacy+bpfauto+a", "bpfauto + garbage-revert safety (§37 A)",
+             []{ return detail::makeStaged(TIMING_KALMAN, 100.0f, 100.0f, MF_RESET,
+                                           EDGE_RAW, PEAK_INSTANT_ATTACK, true, true, false); }},
+            {"legacy+bpfauto+b", "bpfauto + re-evaluating decision (§37 B)",
+             []{ return detail::makeStaged(TIMING_KALMAN, 100.0f, 100.0f, MF_RESET,
+                                           EDGE_RAW, PEAK_INSTANT_ATTACK, true, false, true); }},
+            {"legacy+bpfauto+ab", "bpfauto + garbage-revert + re-eval (§37 A+B)",
+             []{ return detail::makeStaged(TIMING_KALMAN, 100.0f, 100.0f, MF_RESET,
+                                           EDGE_RAW, PEAK_INSTANT_ATTACK, true, true, true); }},
 
             // ── Matched-filter resize transient (docs §12). Zeroing the ring
             //    buffer on a window change injects a dropout mid-element; at

@@ -367,3 +367,50 @@ TEST_CASE("bpfauto vs legacy on the single-seed benchmark profiles", "[cw][.][bp
     CHECK_FALSE(modRegress);
     CHECK(res["worst-FULL"].meanDelta < 0.0f);   // worstcase still better
 }
+
+// A vs B vs A+B decision table (§37). Compares the robustness variants against
+// the two gates bpfauto fails — noise4.0 (multiseed mean <= 0.923) and worstcase
+// single-seed (seed 42: MSG_CQ < 0.6, MSG_FULL < 0.5) — while checking the wins
+// (noise2/3.0) and the moderate-noise non-regression hold.
+TEST_CASE("A/B/A+B robustness decision table", "[cw][.][bpf-ab]") {
+    auto noisy = [](float amp){ auto p = profileClean(80.0f); p.noiseAmp = amp; return p; };
+    // Single-seed decode at seed 42 with a named core — matches the failing gates.
+    auto seed42 = [](const char* core, const char* msg, SignalParams p){
+        p.seed = 42;
+        auto sig = generateMessage(msg, p);
+        cw::Channel ch; ch.init(0, p.toneFreq, core);
+        for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+            int n = std::min(512, (int)sig.samples.size() - off);
+            ch.process(n, &sig.samples[off]);
+        }
+        return score(sig.sourceText, ch.text.getText()).cer;
+    };
+    const char* cores[] = {"legacy", "legacy+bpfauto", "legacy+bpfauto+a",
+                           "legacy+bpfauto+b", "legacy+bpfauto+ab"};
+
+    printf("\n=== A/B/A+B (gates: noise4.0<=0.923, wCQ@42<0.6, wFULL@42<0.5; wins: n3.0/n2.0 low) ===\n");
+    printf("%-20s %9s %8s %9s %9s %9s %9s\n",
+           "core", "noise4.0", "wCQ@42", "wFULL@42", "noise3.0", "noise2.0", "modCQ96");
+    std::map<std::string, float> n40, wcq, wful;
+    for (const char* c : cores) {
+        auto a40 = runCell(c, "x", MSG_FULL(), noisy(4.0f), 24);
+        float acq  = seed42(c, MSG_CQ(),  profileWorstCase(80.0f));
+        float aful = seed42(c, MSG_FULL(), profileWorstCase(80.0f));
+        auto n30 = runCell(c, "x", MSG_FULL(), noisy(3.0f), 24);
+        auto n20 = runCell(c, "x", MSG_FULL(), noisy(2.0f), 24);
+        auto mcq = runCell(c, "x", MSG_CQ(), profileModerateNoise(80.0f), 96);
+        printf("%-20s %9.4f %8.4f %9.4f %9.4f %9.4f %9.4f\n",
+               c, a40.cerMean, acq, aful, n30.cerMean, n20.cerMean, mcq.cerMean);
+        n40[c] = a40.cerMean; wcq[c] = acq; wful[c] = aful;
+    }
+    // §37 findings, asserted so they cannot silently rot:
+    // A is a no-op on the failing profiles — the noise4.0 garbage is timing
+    // distortion, not a key-down flood, so the rate detector never fires.
+    CHECK(n40["legacy+bpfauto+a"] == Approx(n40["legacy+bpfauto"]));
+    CHECK(wful["legacy+bpfauto+a"] == Approx(wful["legacy+bpfauto"]));
+    // None of A / B / A+B brings noise4.0 back under the 0.923 gate — B even
+    // worsens it by narrowing more seeds into distortion garbage.
+    CHECK(n40["legacy+bpfauto+a"]  > 0.923f);
+    CHECK(n40["legacy+bpfauto+b"]  > 0.923f);
+    CHECK(n40["legacy+bpfauto+ab"] > 0.923f);
+}

@@ -40,11 +40,14 @@ namespace cw {
                    std::unique_ptr<ISymbolDecoder> sym,
                    MatchedFilterResize mfResize = MF_RESET,
                    float minElemScale = 1.0f,
-                   bool adaptiveBpf = false)
+                   bool adaptiveBpf = false,
+                   bool bpfGarbageRevert = false,
+                   bool bpfReeval = false)
             : frontEnd(std::move(fe)), detector(std::move(det)),
               timing(std::move(tim)), symbols(std::move(sym)),
               mfResizePolicy(mfResize), minElementScale(minElemScale),
-              adaptiveBpf(adaptiveBpf) {}
+              adaptiveBpf(adaptiveBpf), bpfGarbageRevert(bpfGarbageRevert),
+              bpfReeval(bpfReeval) {}
 
         // Runtime noise-aware BPF geometry (docs §29–33), from the locked WPM
         // (dit, ms) and the INPUT-referred SNR (dB, pre-BPF; frontEnd
@@ -121,9 +124,25 @@ namespace cw {
 
             auto events = detector->process(mfBuf, envCount);
             _snr = detector->getSNR();
+            // B: smoothed getSNR, started only AFTER the estimate has converged.
+            // The §36 EMA failed because it averaged from t=0 through the
+            // acquisition transient; gating the start on inputSnrReady keeps it
+            // clean, so the re-evaluated decision reflects sustained conditions
+            // (QSB, drift) rather than a single fade phase.
+            if (bpfReeval && frontEnd->inputSnrReady()) {
+                if (!snrSmoothStarted) { _snrSmooth = _snr; snrSmoothStarted = true; }
+                else {
+                    const float a = 1.0f - expf(-(float)envCount / (2.0f * _internalRate));
+                    _snrSmooth += a * (_snr - _snrSmooth);
+                }
+            }
             float sqFactor = std::clamp((_snr - 3.0f) / 7.0f, 0.0f, 1.0f);
 
             for (auto& evt : events) {
+                // A: count key-downs for the garbage-rate detector. Counted before
+                // the squelch gate so a narrow filter's spurious flood is seen even
+                // when each event is low-confidence.
+                if (evt.keyDown) { bpfKeyDowns++; }
                 if (sqFactor <= 0.0f) { continue; }
 
                 // Unfreeze timing when a confident key-down arrives
@@ -240,17 +259,65 @@ namespace cw {
             // guard already blocks narrowing at the heavy-noise SNRs where the gap
             // matters (noiseAmp 2.0, getSNR 2.3 < 3.5), so earlier narrowing has
             // nothing to act on there and only perturbs the lighter-noise decodes.
-            if (adaptiveBpf && !bpfRetuned && timingWasLocked && frontEnd->inputSnrReady()) {
-                auto g = bpfGeom(timing->getDitDuration(), frontEnd->getInputSnrDb(), _snr);
-                // Skip a no-op retune: rebuilding the filter clears its history
-                // and injects a transient, so at high SNR (no narrowing wanted) a
-                // retune to (100, 100) would corrupt an otherwise clean decode.
-                if (g.first < 99.0f) {
-                    frontEnd->setBandwidth(g.first, g.second);
-                    if (debugLog) fprintf(stderr, "[CW ch%d] BPF RETUNE cut=%.1f trans=%.1f inputSnr=%.1f\n",
-                                          id, g.first, g.second, frontEnd->getInputSnrDb());
+            if (adaptiveBpf && timingWasLocked && frontEnd->inputSnrReady() && !bpfGaveUp) {
+                const bool firstEval = !bpfRetuned;
+                bool doEval = firstEval;
+                // B: re-evaluate periodically so the bandwidth tracks changing
+                // conditions (QSB fades, drift) and a bad one-shot call can
+                // self-correct, instead of committing forever at lock (§37).
+                if (bpfReeval && bpfRetuned) {
+                    const float since = (float)(totalSamples - lastEvalSample) / _internalRate;
+                    if (since >= 3.0f) { doEval = true; }
                 }
-                bpfRetuned = true;
+                if (doEval) {
+                    const float snrDec = (bpfReeval && snrSmoothStarted) ? _snrSmooth : _snr;
+                    auto g = bpfGeom(timing->getDitDuration(), frontEnd->getInputSnrDb(), snrDec);
+                    // Apply on the first eval, or when the target moves enough to be
+                    // worth the retune transient (hysteresis) — avoids hunting.
+                    if (firstEval || std::fabs(g.first - currentCut) > 15.0f) {
+                        if (g.first < 99.0f || currentCut < 99.0f) {
+                            frontEnd->setBandwidth(g.first, g.second);
+                            currentCut = g.first;
+                            bpfNarrowed = (g.first < 99.0f);
+                            if (bpfNarrowed) {
+                                narrowStartSample = totalSamples;
+                                keyDownsAtNarrow = bpfKeyDowns;
+                                // Capture the WPM at narrow time — BEFORE any
+                                // garbage flood inflates it — as the stable
+                                // baseline for the rate check (§37).
+                                wpmAtNarrow = std::max(timing->getWPM(), 5.0f);
+                            }
+                            if (debugLog) fprintf(stderr, "[CW ch%d] BPF RETUNE cut=%.1f snr=%.1f\n", id, g.first, snrDec);
+                        }
+                    }
+                    bpfRetuned = true;
+                    lastEvalSample = totalSamples;
+                }
+            }
+
+            // A: garbage detector. A narrow filter ringing on a signal too dead to
+            // recover emits far more key events than any real signal at the locked
+            // WPM. If the post-narrow event rate exceeds a multiple of the expected
+            // element rate, the narrowing backfired — revert to wide. Without B this
+            // is a one-shot give-up; with B, just widen and let the next re-eval
+            // decide again once conditions are re-read (§37).
+            if (adaptiveBpf && bpfGarbageRevert && bpfNarrowed) {
+                const float elapsed = (float)(totalSamples - narrowStartSample) / _internalRate;
+                if (elapsed > 1.5f) {
+                    const float rate = (float)(bpfKeyDowns - keyDownsAtNarrow) / elapsed;
+                    // Expected element rate from the WPM at narrow time (~WPM/6,
+                    // PARIS). Narrowing that HELPS produces fewer events (cleaner);
+                    // only a backfiring narrow floods above the baseline, so 2x is
+                    // a wide margin that clears real heavy-noise decodes (§37).
+                    const float expected = wpmAtNarrow / 6.0f;
+                    if (rate > 2.0f * expected) {
+                        frontEnd->setBandwidth(100.0f, 100.0f);
+                        currentCut = 100.0f;
+                        bpfNarrowed = false;
+                        if (!bpfReeval) { bpfGaveUp = true; }
+                        if (debugLog) fprintf(stderr, "[CW ch%d] BPF REVERT rate=%.1f exp=%.1f\n", id, rate, expected);
+                    }
+                }
             }
 
             if (timingWasLocked && lastKeyUp >= 0 && !detector->isKeyDown()) {
@@ -303,6 +370,16 @@ namespace cw {
             frozenDitEst = 0;
             diagCount = 0;
             bpfRetuned = false;
+            bpfNarrowed = false;
+            bpfGaveUp = false;
+            narrowStartSample = 0;
+            keyDownsAtNarrow = 0;
+            bpfKeyDowns = 0;
+            wpmAtNarrow = 0.0f;
+            currentCut = 100.0f;
+            _snrSmooth = 0;
+            snrSmoothStarted = false;
+            lastEvalSample = 0;
         }
 
         CoreStats stats() const override {
@@ -454,6 +531,19 @@ namespace cw {
         float minElementScale = 1.0f;
         bool adaptiveBpf = false;
         bool bpfRetuned = false;
+        // A (garbage-revert) and B (re-eval) state, docs §37.
+        bool bpfGarbageRevert = false;
+        bool bpfReeval = false;
+        bool bpfNarrowed = false;
+        bool bpfGaveUp = false;
+        long long narrowStartSample = 0;
+        long long keyDownsAtNarrow = 0;
+        long long bpfKeyDowns = 0;
+        float wpmAtNarrow = 0.0f;
+        float currentCut = 100.0f;
+        float _snrSmooth = 0.0f;
+        bool snrSmoothStarted = false;
+        long long lastEvalSample = 0;
 
         struct SavedEvent { bool keyDown; float timeMs; };
         std::vector<SavedEvent> preLockEvents;
