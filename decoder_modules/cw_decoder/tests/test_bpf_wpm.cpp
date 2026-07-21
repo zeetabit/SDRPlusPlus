@@ -311,3 +311,59 @@ TEST_CASE("bpfauto worstcase tail vs legacy", "[cw][.][bpf-tail]") {
     CHECK(bpf.cerMean < base.cerMean);   // better on average
     CHECK(worse >= 5);                   // but a real worse-tail, not an artifact
 }
+
+// Is the worstcase variance from bpfauto's ONE-SHOT decision (§36), or intrinsic
+// to a narrow filter on QSB? Compare the adaptive core against FIXED narrow
+// filters (same bandwidth every seed, from the start) on worstcase per-seed. If
+// the fixed filters have fewer worse-than-legacy seeds, the one-shot decision is
+// the variance source and the fix is to make the decision robust, not to abandon
+// narrowing.
+TEST_CASE("worstcase variance: adaptive one-shot vs fixed narrow", "[cw][.][bpf-var]") {
+    auto base = runCell("legacy", "worstcase", MSG_FULL(), profileWorstCase(80.0f), 96);
+    printf("\n=== worstcase per-seed vs legacy (mean %.3f), n=96 ===\n", base.cerMean);
+    printf("%-16s %8s %8s %8s %10s %10s\n", "core", "mean", "p95", "max", "better", "worse");
+    for (const char* c : {"legacy+bpfauto", "legacy+bpf20", "legacy+bpf30", "legacy+bpf40"}) {
+        auto r = runCell(c, "worstcase", MSG_FULL(), profileWorstCase(80.0f), 96);
+        int worse = 0, better = 0; float mx = 0;
+        for (size_t i = 0; i < base.cerSamples.size(); i++) {
+            if (r.cerSamples[i] > base.cerSamples[i] + 0.02f) worse++;
+            if (r.cerSamples[i] < base.cerSamples[i] - 0.02f) better++;
+            mx = std::max(mx, r.cerSamples[i]);
+        }
+        printf("%-16s %8.3f %8.3f %8.3f %10d %10d\n", c, r.cerMean, r.cerP95, mx, better, worse);
+    }
+    CHECK(true);
+}
+
+// Honest check before any promotion (§36): are bpfauto's single-seed benchmark
+// failures seed-42 artifacts, or real distributional regressions? The moderate/
+// mild-noise CQ gates matter most — they sit near the narrowing threshold where
+// bpfauto could turn a clean legacy decode into occasional errors.
+TEST_CASE("bpfauto vs legacy on the single-seed benchmark profiles", "[cw][.][bpf-bench]") {
+    struct Case { const char* name; const char* msg; SignalParams p; };
+    std::vector<Case> cases = {
+        {"mild-CQ",      MSG_CQ(),   profileMildNoise(80.0f)},
+        {"moderate-CQ",  MSG_CQ(),   profileModerateNoise(80.0f)},
+        {"worst-CQ",     MSG_CQ(),   profileWorstCase(80.0f)},
+        {"worst-FULL",   MSG_FULL(), profileWorstCase(80.0f)},
+        {"contest-QRN",  MSG_CONTEST(), [] { auto p = profileContest(60.0f); p.qrnRate=0.005f; p.qrnAmp=3.0f; return p; }()},
+    };
+    printf("\n=== bpfauto vs legacy, n=96 ===\n");
+    printf("%-14s %10s %10s %9s %8s  %s\n", "case", "legacy", "bpfauto", "delta", "t", "verdict");
+    std::map<std::string, PairedDelta> res;
+    for (auto& c : cases) {
+        auto b = runCell("legacy",         c.name, c.msg, c.p, 96);
+        auto a = runCell("legacy+bpfauto", c.name, c.msg, c.p, 96);
+        auto d = comparePaired(b.cerSamples, a.cerSamples);
+        printf("%-14s %10.4f %10.4f %+9.4f %8.2f  %s\n",
+               c.name, b.cerMean, a.cerMean, d.meanDelta, d.t, d.verdict());
+        res[c.name] = d;
+    }
+    // §36 robustness: the graded getSNR ramp removed the moderate-noise regression
+    // (was +0.038 t=2.77 with the near-binary inputSnr rule) — it is now
+    // non-significant — while worstcase stays a clear win (distribution dominates).
+    const auto& mod = res["moderate-CQ"];
+    const bool modRegress = mod.significant() && mod.meanDelta > 0.0f;
+    CHECK_FALSE(modRegress);
+    CHECK(res["worst-FULL"].meanDelta < 0.0f);   // worstcase still better
+}

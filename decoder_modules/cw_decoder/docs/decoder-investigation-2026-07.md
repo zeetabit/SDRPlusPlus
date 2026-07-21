@@ -3637,3 +3637,51 @@ real-audio-validated variant (§29–33) with a documented variance tradeoff; wh
 its better-mean-worse-tail profile is worth shipping as the default is a judgment
 call for the maintainer, not a gate the campaign can pass on its own terms.
 `legacy` remains the default.
+
+## 36. Making the adaptation robust — moderate-noise fixed, the −10 dB floor is not (2026-07-21)
+
+The §35 promotion attempt failed single-seed gates. The design question that
+followed — should the decoder adapt itself rather than expose a manual mode? — is
+right: bpfauto *already* auto-adapts (narrows only under noise, byte-identical when
+clean), so a toggle is the wrong shape. The task is to make the adaptation robust
+enough to be the default.
+
+First, is the variance even real? Comparing bpfauto against *fixed* narrow filters
+on worstcase per-seed (`[bpf-var]`) showed bpfauto is the **least-variance** narrow
+option (16 worse-seeds vs 18–24 for bpf20/30/40) and its worstcase distribution
+**dominates** legacy (mean/p95/max all better) — so the worstcase single-seed
+failures are the seed-42 unreliability the campaign already flagged (§20/§25), not
+a regression.
+
+The real regression was elsewhere. A paired sweep of the single-seed benchmark
+profiles (`[bpf-bench]`) found **moderate noise** (noiseAmp 1.5) regressing: legacy
+0.033 → bpfauto 0.072, +0.038, t=2.77. Cause: `inputSnr` saturates at ~6 dB once
+the signal is buried, so keying narrowFrac off it made the rule near-binary —
+moderate noise got the same aggressive 20 Hz as heavy noise, over-narrowing a
+still-readable signal.
+
+**Fix: grade the narrowing on `getSNR`** (which keeps resolution here: 5.4 at
+noiseAmp 1.5, 4.5 at 2.0, 3.7 at 3.0), narrowing gently at the margin and hard only
+when noise is unambiguous. This removed the moderate-noise regression (now ns) and
+kept the wins (noise3.0 0.817 → 0.59, noise2.0 → 0.022, real audio still ~1.6×).
+The real-audio peak win softened (0.026 → 0.076) — the price of gentleness — but it
+is still a significant win with no common-condition regression.
+
+**What did not work, and the irreducible limit.** Time-averaging `getSNR` (to damp
+QSB swings and acquisition spikes) was tried and reverted: the EMA-from-start is
+contaminated by acquisition transients exactly as `inputSnr` was, and it pushed the
+average out of the narrowing band entirely — bpfauto became a byte-identical no-op.
+The remaining failure is **noise4.0 (−10 dB)**: some seeds narrow (decision-point
+getSNR sneaks above the 3.5 floor) and the narrow filter rings noise into garbage
+(worst seed CER 2.5). It cannot be floored out without also blocking noise3.0
+(−7.5 dB, getSNR 3.7) — their getSNR distributions overlap, the same sub-dB
+resolution wall as §33. At −10 dB both legacy and bpfauto are total failures, so
+the regression is imperceptible, but it is a real multiseed-gate miss.
+
+**State: bpfauto is now robust at every usable SNR** — moderate-noise regression
+gone, worstcase distribution dominates, byte-identical on clean/light/QRM, real
+audio validated. Promotion is blocked only by (a) the worstcase single-seed gates,
+which are artifacts the distribution refutes, and (b) the −10 dB garbage floor,
+imperceptible but real. Whether to ship it as the default — converting the
+single-seed worstcase gates to multiseed (justified) and accepting −10 dB behavior
+as a wash — is the remaining maintainer call. `legacy` stays the default.

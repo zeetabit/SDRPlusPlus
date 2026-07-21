@@ -73,8 +73,19 @@ namespace cw {
             //    garbage rather than going silent (§4/§32 floor), a regression on
             //    an already-failed decode. Stay wide.
             if (postBpfSnrDb > 9.0f || postBpfSnrDb < 3.5f) { return {100.0f, 100.0f}; }
-            constexpr float SNR_HI = 9.0f, SNR_LO = 6.5f;
-            const float nf = std::min(std::max((SNR_HI - inputSnrDb) / (SNR_HI - SNR_LO), 0.0f), 1.0f);
+            // Only narrow when the input-referred estimate also indicates
+            // broadband noise (transfers across signal type; a high inputSnr means
+            // clean/light and the narrow filter would only smear).
+            if (inputSnrDb > 8.0f) { return {100.0f, 100.0f}; }
+            // GRADED narrowing on the post-BPF getSNR (§36). inputSnr saturates at
+            // ~6 dB once the signal is buried, so keying narrowFrac off it makes the
+            // rule near-binary: moderate noise gets the same aggressive 20 Hz as
+            // heavy noise, which over-narrows a still-readable signal (moderate-CER
+            // regression). getSNR keeps resolution here (5.4 at noiseAmp 1.5, 4.5 at
+            // 2.0, 3.7 at 3.0), so grading on it narrows gently at the margin — where
+            // a mis-estimate costs little — and hard only when noise is unambiguous.
+            constexpr float SNR_HI = 5.5f, SNR_LO = 3.7f;
+            const float nf = std::min(std::max((SNR_HI - postBpfSnrDb) / (SNR_HI - SNR_LO), 0.0f), 1.0f);
             const float cut   = 100.0f * (1.0f - nf) + matched * nf;
             const float trans = 100.0f * (1.0f - nf) + (matched + 10.0f) * nf;
             return {cut, trans};
