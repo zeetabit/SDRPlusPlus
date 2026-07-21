@@ -4127,3 +4127,140 @@ side and shown to bound even a speed-adaptive fix. `legacy+kalman2s` is the stro
 dit-source variant — a clean usable-regime win — but is **not promotable to default**
 under the strict rule: it regresses garbage cells at fast×heavy noise. `legacy`
 remains the default; kalman2s ships as a benchmarked variant.
+
+## 44. Bell trellis (#27) — headroom measured before building; not worth its complexity (2026-07-21)
+
+**Discipline check.** Before a Very-High-complexity joint-MAP trellis core, measure
+its capturable headroom. A trellis replaces {timing classify + gap classify + beam}
+with joint MAP decoding over the detector's REAL durations. Its ceiling is
+`ClairvoyantTiming` — real detector + perfect per-element timing decisions (true
+Bayes boundaries, confidence 1.0) + beam. A trellis cannot know the boundaries
+better; its only edge is marginal joint-sequence inference the beam already
+approximates. Crucially, it must beat the **best existing core**, not just legacy.
+
+`[trellis-headroom]`, 48 seeds, CER mean:
+
+| profile | legacy | kal2s | log | bimodal | clairvoyant | full oracle | trellisHR | detectHR |
+|---|---|---|---|---|---|---|---|---|
+| handkeyed-15 | 0.1749 | 0.0329 | 0.0270 | 0.0399 | 0.0141 | 0.0132 | +0.0129 | +0.0009 |
+| handkeyed-25 | 0.1300 | 0.1294 | 0.0910 | **0.0522** | 0.0170 | 0.0097 | **+0.0352** | +0.0073 |
+| qsb | 0.0109 | 0.0088 | 0.0085 | 0.0326 | 0.0059 | 0.0000 | +0.0026 | +0.0059 |
+| farnsworth20 | 0.0141 | 0.0141 | 0.0141 | 0.0282 | 0.0000 | 0.0000 | **+0.0141** | +0.0000 |
+| noise2.0 | 0.0977 | 0.0393 | 0.0352 | 0.0986 | 0.0387 | 0.0000 | −0.0035 | +0.0387 |
+| worstcase | 0.6168 | 0.3656 | 0.3530 | 0.6094 | 0.3583 | 0.0769 | −0.0053 | **+0.2814** |
+
+trellisHR = best-of-existing − clairvoyant (trellis's true marginal ceiling);
+detectHR = clairvoyant − full oracle (detector-limited, not trellis-addressable).
+
+**Findings.**
+
+1. **Noise is detector-limited — zero trellis headroom.** worstcase trellisHR is
+   *negative* (best existing already ≤ clairvoyant) while detectHR is +0.2814;
+   noise2.0 the same. The trellis cannot touch the regime that is the campaign's
+   actual problem — it works on the durations the detector has already destroyed.
+2. **The apparent hand-keyed headroom is mostly captured by existing cores.**
+   handkeyed-25 looks like +0.11 vs legacy, but `bimodal` already takes it 0.130 →
+   0.052. The trellis's *marginal* ceiling over best-existing is +0.035, and its
+   achievable fraction is smaller (clairvoyant knows the true boundaries a real
+   trellis must estimate).
+3. **Total real headroom is ~+0.06 CER, concentrated on handkeyed-25 (+0.035) and
+   Farnsworth (+0.014),** both a fraction achievable, both in a regime where a
+   cheaper regime-adaptive timing *selection* (bimodal wins hand-keyed, kal2s/log
+   win noise — complementary, no single core dominates) could capture most of it.
+
+**Recommendation — do not build the Bell trellis.** Very-High complexity for a
+fraction of +0.06 CER on two profiles, in a regime where existing timing strategies
+already do most of the work and the noise regime (the wall) is untouchable. The
+headroom check converted "#27 Future / principled" into "measured, not worth it" —
+exactly its purpose. If the hand-keyed headroom is wanted, a regime-adaptive timing
+selector (extending the §41 switch to pick among kalman2/log/bimodal) is the far
+cheaper lever, and Farnsworth's isolated +0.014 is a targeted gap-prior fix, not a
+decoder rewrite. #27 stays Future, now with data behind the deferral.
+
+## 45. Benchmark parameters grounded in the real VFO; selector power analysis (2026-07-21)
+
+**VFO fidelity.** The real module's signal chain (source): VFO 8000 Hz sample rate
+(`CW_SAMPLERATE`, channel.h), 3000 Hz bandwidth (`CW_VFO_BANDWIDTH`, main.cpp),
+decimated to 1000 Hz internal (`CW_INTERNAL_RATE`), 700 Hz tone, ~200 Hz front-end
+BPF. The test generator already uses 8000 Hz / 700 Hz and runs the REAL
+Channel/StagedCore/EnvelopeFrontEnd decode path — only signal generation is
+synthetic. The one ungrounded value was the SNR reference bandwidth (generic
+2500/500 Hz); added `REF_BW_VFO = 3000` (= CW_VFO_BANDWIDTH) for physically
+meaningful dB. Bandwidth affects the dB LABEL only — the ~200 Hz BPF sees the same
+N0 regardless — so no decode result or adjudication moves.
+
+**Selector power (MDE = 2·stderr of the paired delta) by seed count:**
+
+| profile | n=96 | n=192 | n=384 | n=768 |
+|---|---|---|---|---|
+| handkeyed-25 | 0.0366 | 0.0284 | 0.0197 | 0.0133 |
+| farnsworth20 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| noise2.0 | 0.0206 | 0.0161 | 0.0111 | 0.0078 |
+| qsb | 0.0023 | 0.0025 | 0.0017 | 0.0013 |
+| worstcase | 0.0278 | 0.0210 | 0.0146 | 0.0106 |
+| noise3.0-30wpm | 0.0109 | 0.0081 | 0.0056 | 0.0041 |
+| noise4.0 | 0.0355 | 0.0195 | 0.0135 | 0.0090 |
+
+The selector's *win* is large and easy (hand-keyed +0.078 vs default; Farnsworth
+deterministic, MDE 0). The power is for *non-inferiority*: noise3.0-30wpm needs
+n≈768 for bound < 0.005; noise2.0/worstcase/noise4.0 exceed 0.005 even at 768, so —
+as §42 — they clear only via a favourable mean. **Adjudication plan: n=384 working,
+n=768 escalation on better/neutral-mean HARM.** n=96 is inadequate (handkeyed-25
+MDE 0.037 barely exceeds the effect).
+
+## 46. Is bimodal's hand-keyed win noise-robust? No — the signal is jitter, and log is the champion (2026-07-21)
+
+`[bimodal-noise]`, hand-keyed (jitter 0.15 + bias 0.1), noiseAmp swept, n=192, dB
+in the real VFO band:
+
+| WPM | noiseAmp | dB | legacy | kalman2s | bimodal | log |
+|---|---|---|---|---|---|---|
+| 15 | 0.3 | +11.7 | 0.186 | 0.029 | 0.041 | **0.024** |
+| 15 | 1.0 | +1.2 | 0.153 | 0.026 | 0.041 | **0.020** |
+| 15 | 2.0 | −4.8 | 0.203 | 0.071 | 0.141 | **0.066** |
+| 25 | 0.3 | +11.7 | 0.169 | 0.127 | **0.056** | 0.094 |
+| 25 | 1.0 | +1.2 | 0.124 | 0.099 | **0.054** | 0.065 |
+| 25 | 1.5 | −2.3 | 0.116 | 0.125 | 0.096 | **0.090** |
+| 25 | 2.0 | −4.8 | **0.262** | 0.266 | 0.383 | 0.266 |
+
+**bimodal's win is narrow and NOT noise-robust:** only at 25 WPM AND SNR ≳ +1 dB.
+At 15 WPM it is beaten by log; above noiseAmp 1.5 (−2 dB) it collapses, and at
+−4.8 dB it is the WORST core (0.383 vs legacy 0.262). A bimodal-based selector
+would chase a fragile niche.
+
+**The real finding: `log` dominates hand-keyed** — best at every 15 WPM cell,
+best-or-2nd at 25 WPM, robust across the noise sweep. And log's known regression
+(§25, fast-CW under noise, which reverted it) is **low-jitter machine CW**, the
+opposite of hand-keyed. So the selection signal is **jitter**, not bimodal-niche:
+`log` when jittered (hand-keyed), `kalman2s` otherwise. One axis captures the win
+and avoids log's regression by construction. Selector reframed: jitter-gated log,
+not a 3-way bimodal split. Next: confirm jitter separates log-wins (hand-keyed)
+from log-regresses (machine fast-CW-noise) cleanly, then build and adjudicate at
+n=384/768.
+
+### 46b. Jitter does not cleanly gate log — the win is confined to hand-keyed × good SNR (2026-07-21)
+
+The reframe (§46) needs jitter to separate where log wins (hand-keyed) from where
+it regresses (machine fast-CW-noise, §25). `[jitter-sep]`, same speed/noise, jitter
+0.0 vs 0.15, delta = log − kalman2s, n=192:
+
+| WPM | noise dB | machine (jit0) t | hand-key (jit0.15) t |
+|---|---|---|---|
+| 25 | −2.3 | −0.0061 (−5.0) | −0.0351 (−7.7) |
+| 25 | −4.8 | +0.0142 (+3.1) | +0.0001 (0.0) |
+| 30 | −2.3 | +0.0064 (+2.0) | −0.0145 (−3.9) |
+| 30 | −4.8 | +0.0073 (+1.9) | +0.0058 (+1.3) |
+
+Only 30wpm-−2.3 dB shows the clean pattern (machine log-worse, hand log-better).
+Elsewhere the win is a joint function of speed×noise×jitter: at 25wpm-−2.3 log
+wins regardless of jitter; at −4.8 dB log loses even hand-keyed. A jitter-only gate
+misfires in 3 of 4 boundary cells — the gating estimate is not separable from the
+noise it must be robust to (the recurring entanglement wall).
+
+**But §46 shows the clean win is at hand-keyed AND good SNR (> ~0 dB)** — the
++11.7/+1.2 dB cells, not the −2.3/−4.8 dB edge tested here. A *conservative* gate
+(high jitter AND getSNR above a comfortable margin → log, else kalman2s) targets
+that clean regime and never approaches the fuzzy heavy-noise boundary. Modest,
+low-risk (~0.02–0.05 CER on good-SNR hand-keyed); a broad selector is not robustly
+gateable. Decision point: build the conservative gate, or stop — kalman2s already
+holds the robust usable-regime win.

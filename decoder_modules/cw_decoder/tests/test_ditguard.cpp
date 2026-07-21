@@ -2,6 +2,8 @@
 #include "cw_test_signals.h"
 #include "cw_matrix.h"
 #include "cw_bench_stats.h"
+#include "cw_oracle.h"
+#include "cw_snr.h"
 
 using namespace cw_test;
 
@@ -94,6 +96,176 @@ TEST_CASE("kalman2 recheck: paired n=96 vs legacy (§40/§41)", "[cw][.][kalman2
 // kalman2s at n=192 to check whether the whole gate goes 0-harmful with power.
 TEST_CASE("kalman2s adjudication at higher power (§42)", "[cw][.][kalman2s-power]") {
     adjudicateVsLegacy("kalman2s", 192);
+}
+
+// §46 — is bimodal's hand-keyed win noise-robust? Decides the selector design:
+// if bimodal loses its edge as noise rises, the selection signal is simply
+// "clean hand-keyed" (high jitter + low noise), and the switch is a narrow,
+// safe extension of kalman2s. If bimodal stays best under noise, the selector
+// needs a richer regime signal. Noise labelled in the real VFO band (§ REF_BW_VFO
+// = 3000 Hz, CW_VFO_BANDWIDTH). n=192 (§45: hand-keyed MDE ~0.028 at 192).
+TEST_CASE("bimodal hand-keyed win vs noise (§46)", "[cw][.][bimodal-noise]") {
+    constexpr int SEEDS = 192;
+    const char* cores[] = {"legacy", "legacy+kalman2s", "legacy+bimodal", "legacy+log"};
+    const float amps[]  = {0.3f, 0.7f, 1.0f, 1.5f, 2.0f};
+    const float dits[]  = {80.0f, 48.0f};   // 15, 25 WPM
+
+    printf("\n=== §46 hand-keyed CER vs noise (jitter0.15+bias0.1), n=%d ===\n", SEEDS);
+    printf("noise in dB re CW_VFO_BANDWIDTH 3000Hz; * marks the best core in each row\n");
+    printf("%4s %8s %6s", "wpm", "noiseAmp", "dB");
+    for (const char* c : cores) { printf(" %14s", c + 7); }  // strip "legacy"
+    printf("\n");
+
+    for (float dit : dits) {
+        const int wpm = (int)(1200.0f / dit + 0.5f);
+        for (float amp : amps) {
+            SignalParams p = profileHandKeyed(dit);
+            p.noiseAmp = amp;
+            const float db = noiseAmpToSnrDb(amp, REF_BW_VFO, 1.0f, 8000.0f);
+            char name[40]; snprintf(name, sizeof name, "hk%d-n%.1f", wpm, amp);
+            float cer[4]; int bestI = 0;
+            for (int i = 0; i < 4; i++) {
+                cer[i] = runCell(cores[i], name, MSG_FULL(), p, SEEDS).cerMean;
+                if (cer[i] < cer[bestI]) { bestI = i; }
+            }
+            printf("%4d %8.1f %6.1f", wpm, amp, db);
+            for (int i = 0; i < 4; i++) { printf(" %13.4f%s", cer[i], i == bestI ? "*" : " "); }
+            printf("\n");
+        }
+    }
+    printf("\nIf bimodal(*) only at low noiseAmp -> selection signal is 'clean hand-keyed'.\n");
+}
+
+// §46b — the load-bearing check for jitter-gated log: does jitter separate the
+// regime where log WINS (hand-keyed) from where it REGRESSES (machine fast-CW
+// under noise, §25)? Same speed and noise, jitter 0.0 (machine) vs 0.15 (hand).
+// If log-vs-kalman2s flips sign with jitter, the gate is valid.
+TEST_CASE("jitter separates log win from log regression (§46b)", "[cw][.][jitter-sep]") {
+    constexpr int SEEDS = 192;
+    const float dits[] = {48.0f, 40.0f};   // 25, 30 WPM
+    const float amps[] = {1.5f, 2.0f};
+
+    printf("\n=== §46b log vs kalman2s: delta by jitter (n=%d) ===\n", SEEDS);
+    printf("delta = log - kalman2s; negative = log wins. Gate needs: machine>0, hand<0\n");
+    printf("%4s %6s %8s %10s %8s   %10s %8s\n",
+           "wpm", "noise", "", "machine", "t", "hand-key", "t");
+    for (float dit : dits) {
+        const int wpm = (int)(1200.0f / dit + 0.5f);
+        for (float amp : amps) {
+            auto run = [&](float jit) {
+                SignalParams p = profileClean(dit);
+                p.noiseAmp = amp; p.jitterPct = jit;
+                if (jit > 0) { p.weightBias = 0.1f; }
+                char nm[40]; snprintf(nm, sizeof nm, "w%d-n%.1f-j%.2f", wpm, amp, jit);
+                auto k = runCell("legacy+kalman2s", nm, MSG_FULL(), p, SEEDS);
+                auto l = runCell("legacy+log",      nm, MSG_FULL(), p, SEEDS);
+                return comparePaired(k.cerSamples, l.cerSamples);   // log - kalman2s
+            };
+            auto m = run(0.0f);    // machine
+            auto h = run(0.15f);   // hand-keyed
+            printf("%4d %6.1f %8s %+10.4f %8.2f   %+10.4f %8.2f\n",
+                   wpm, amp, "", m.meanDelta, m.t, h.meanDelta, h.t);
+        }
+    }
+    printf("\nValid gate iff machine delta > 0 (log worse) and hand delta < 0 (log better).\n");
+}
+
+// §45 — POWER analysis before building the regime-adaptive timing selector.
+// The selector's target win is small (handkeyed-25 ceiling +0.035, Farnsworth
+// +0.014, §44), and §42 showed n=96 misjudges high-variance profiles. This
+// measures the minimum detectable effect (MDE = 2*stderr of the paired delta,
+// = the non-inferiority bound width at zero mean) per profile at increasing n,
+// using legacy-vs-kalman2s as a realistic variance proxy, so the selector is
+// adjudicated at adequate n from the start rather than discovered post-hoc.
+TEST_CASE("Selector power / MDE by seed count (§45)", "[cw][.][selector-power]") {
+    struct Prof { const char* name; SignalParams params; };
+    const Prof profs[] = {
+        {"handkeyed-25", profileHandKeyed(48.0f)},           // target win
+        {"farnsworth20", profileFarnsworth(80.0f, 2.0f)},    // target win
+        {"noise2.0",     [] { auto p = profileClean(80.0f); p.noiseAmp = 2.0f; return p; }()},
+        {"qsb",          profileQSB(80.0f)},                 // high variance
+        {"worstcase",    profileWorstCase(80.0f)},           // high variance
+        {"noise3.0-30wpm",[] { auto p = profileClean(40.0f); p.noiseAmp = 3.0f; return p; }()},
+        {"noise4.0",     [] { auto p = profileClean(80.0f); p.noiseAmp = 4.0f; return p; }()},
+    };
+    const int Ns[] = {96, 192, 384, 768};
+
+    printf("\n=== §45 MDE (2*stderr of paired delta) by n — the smallest effect resolvable ===\n");
+    printf("target selector wins: handkeyed-25 ~+0.035, farnsworth ~+0.014; tol=0.005\n");
+    printf("%-15s", "profile");
+    for (int n : Ns) { printf("  n=%-6d", n); }
+    printf("\n");
+    for (const auto& p : profs) {
+        printf("%-15s", p.name);
+        for (int n : Ns) {
+            auto a = runCell("legacy",          p.name, MSG_FULL(), p.params, n);
+            auto b = runCell("legacy+kalman2s", p.name, MSG_FULL(), p.params, n);
+            auto d = comparePaired(a.cerSamples, b.cerSamples);
+            printf("  %8.4f", 2.0f * d.stderrDelta);
+        }
+        printf("\n");
+    }
+    printf("\nRead: to DETECT a win, MDE must be < the effect; to PROVE non-inferiority,\n");
+    printf("bound (mean+MDE) must be < tol 0.005, so a ~0 profile needs MDE < 0.005.\n");
+}
+
+// §44 — headroom for a Bell-style trellis (#27) BEFORE building a Very-High-
+// complexity core. A trellis replaces {timing classify + gap classify + beam}
+// with a joint MAP decode over the detector's REAL durations. Its ceiling is
+// therefore "real detector + perfect per-element timing decisions + beam" =
+// ClairvoyantTiming (classifies the real durations at the true Bayes boundaries,
+// confidence 1.0). A trellis cannot know the boundaries better; its only edge is
+// marginal joint-sequence inference the beam already approximates. So the gap
+// [current-best -> clairvoyant] upper-bounds what a trellis could capture; the
+// further gap [clairvoyant -> full oracle] is DETECTOR headroom a trellis cannot
+// touch. If the first gap is small in the usable regime, the trellis is not worth
+// its complexity.
+TEST_CASE("Bell trellis headroom vs oracle (§44)", "[cw][.][trellis-headroom]") {
+    constexpr int SEEDS = 48;
+
+    struct Prof { const char* name; SignalParams params; };
+    const Prof profs[] = {
+        {"clean-15",    profileClean(80.0f)},
+        {"handkeyed-15",profileHandKeyed(80.0f)},
+        {"handkeyed-25",profileHandKeyed(48.0f)},
+        {"qsb",         profileQSB(80.0f)},
+        {"farnsworth20",profileFarnsworth(80.0f, 2.0f)},
+        {"noise2.0",    [] { auto p = profileClean(80.0f); p.noiseAmp = 2.0f; return p; }()},
+        {"worstcase",   profileWorstCase(80.0f)},
+    };
+
+    auto oracle = [](SignalParams p, bool det, bool tim) {
+        return [p, det, tim](const GeneratedSignal& sig) {
+            return makeOracleCore(sig, p, OracleConfig{det, tim});
+        };
+    };
+
+    // Include the best EXISTING timing cores: +log and +bimodal already beat
+    // legacy on hand-keyed (§ results table). The trellis must beat the best of
+    // ALL existing cores, not just legacy — that is its true marginal headroom.
+    const char* cores[] = {"legacy", "legacy+kalman2s", "legacy+log", "legacy+bimodal"};
+
+    printf("\n=== §44 trellis headroom: best EXISTING core vs timing-oracle vs full oracle ===\n");
+    printf("clairv = real detector + PERFECT timing decisions + beam = trellis ceiling\n");
+    printf("%-13s %8s %8s %8s %8s %9s %9s   %9s %9s\n",
+           "profile", "legacy", "kal2s", "log", "bimodal", "clairvoy", "full-orac",
+           "trellisHR", "detectHR");
+    for (const auto& p : profs) {
+        float best = 1e9f; float cer[4];
+        for (int i = 0; i < 4; i++) {
+            cer[i] = runCell(cores[i], p.name, MSG_FULL(), p.params, SEEDS).cerMean;
+            best = std::min(best, cer[i]);
+        }
+        auto clair= runCellWith(oracle(p.params, false, true), "clairvoy",
+                                p.name, MSG_FULL(), p.params, SEEDS);
+        auto full = runCellWith(oracle(p.params, true, true), "full",
+                                p.name, MSG_FULL(), p.params, SEEDS);
+        printf("%-13s %8.4f %8.4f %8.4f %8.4f %9.4f %9.4f   %+9.4f %+9.4f\n",
+               p.name, cer[0], cer[1], cer[2], cer[3], clair.cerMean, full.cerMean,
+               best - clair.cerMean, clair.cerMean - full.cerMean);
+    }
+    printf("\ntrellisHR = best-of-ALL-existing minus clairvoyant (trellis's true marginal win).\n");
+    printf("detectHR  = clairvoyant minus full-oracle (detector-limited, NOT trellis-addressable).\n");
 }
 
 // §43 — the noise×speed grid, including the fast×heavy-noise cells the standard

@@ -29,8 +29,14 @@ namespace cw_test {
 
     // Reference bandwidths. 2500 Hz is the SSB/voice channel PA3FWM and most
     // amateur SNR figures use; 500 Hz is the common CW crystal-filter width.
+    // REF_BW_VFO is THIS module's actual VFO passband delivered to the decoder
+    // (CW_VFO_BANDWIDTH, main.cpp) at CW_SAMPLERATE (channel.h) — the physically
+    // meaningful reference for reporting this decoder's SNR. Note the noiseAmp→CER
+    // mapping is bandwidth-independent (the ~200 Hz front-end BPF sees the same
+    // N0 regardless), so this changes dB LABELS only, never a decode result.
     constexpr float REF_BW_SSB = 2500.0f;
     constexpr float REF_BW_CW  = 500.0f;
+    constexpr float REF_BW_VFO = 3000.0f;   // = CW_VFO_BANDWIDTH (main.cpp:12), SR = CW_SAMPLERATE 8000
 
     inline float noiseAmpToSnrDb(float noiseAmp, float refBwHz = REF_BW_SSB,
                                  float amplitude = 1.0f, float sampleRate = 8000.0f) {
