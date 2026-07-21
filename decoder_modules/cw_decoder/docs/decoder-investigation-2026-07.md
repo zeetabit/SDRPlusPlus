@@ -3153,3 +3153,48 @@ regimes; the losses are fast CW at ~0 dB SNR where both decoders already fail
 registry variant. The fast+noise profiles are kept in `standardProfiles` (the
 coverage that exposed this), so any re-promotion must clear them. A speed-adaptive
 detector fix follows (§26).
+
+## 26. Speed-adaptive LR bound — attempted, hits the same wall (2026-07-21)
+
+§25 traced the fast-CW × noise regression to the LR detector's fixed evidence
+lag (~12 ms), too large a fraction of a short fast element, smearing event
+timing. Instrumentation confirmed it is timing distortion, not spurious
+detections: at 25 WPM / noise 2.0 the LR detector emits *fewer* events than
+Schmitt (161.8 vs 176) and fewer short elements (4.5 vs 7.3), yet the decoded
+text carries extra short letters clustered in the number groups — the gap
+classifier mis-segmenting the long dah-runs under distorted timing.
+
+The fix: scale the CUSUM bound by the recent element duration so the lag is a
+constant *fraction* of an element (`setAdaptive`, `legacy+lr+log+adapt`). Three
+estimators, each defeated by the same obstacle:
+
+| estimator | fast (handkeyed-40) | slow+heavy (noise3.0-15w) |
+|---|---|---|
+| mean ON duration | 0.076 (win) | 0.934 (broke; was 0.706) |
+| windowed median | 0.055 (win) | 1.636 (broke worse) |
+| median + sub-dit gate | 0.082 (win) | 1.541 (still broke) |
+
+Every version helps fast CW — handkeyed-40 0.168 → ~0.08, and the target
+fast+moderate-noise improves (noise2.0-25w 0.383 → 0.235, 30w 0.619 → 0.370).
+And every version **breaks slow + heavy noise**, because the speed estimate is
+built from the detector's own key-down durations, which at heavy noise are
+dominated by spurious short/mid-length elements. The estimate reads "fast" when
+the signal is slow, shrinks the bound, weakens spike rejection, and revives the
+runaway — a positive feedback at exactly the regime that needs the safe bound.
+
+The sub-dit gate (hold the full bound when a low percentile sits far below the
+median, i.e. sub-dit spikes are present) does not save it: at noise 3.0 the
+corruption is not only sub-dit spikes but mid-length spurious elements, so the
+median is dragged down while the gate stays open. **The detector cannot know the
+true 15 WPM median (237 ms) without external speed information**, and every
+self-estimate is corrupted precisely where the safe bound matters most. This is
+the §20.8 / §24 / §25 duration ambiguity a fifth time — a short element is a fast
+dit or a slow spike — now corrupting the very speed estimate meant to resolve it.
+
+**No re-promotion path via this route.** The adaptive variant is kept as the
+measured negative result (`legacy+lr+log+adapt`); the base LR detector is
+unchanged (the flag defaults off). A robust fix would need a speed signal from
+outside the detector — the timing stage's dit estimate, or an operator WPM
+setting — which is an architectural change (detector↔timing coupling) not
+pursued here. The LR detector stands as a variant with a known fast+heavy-noise
+weakness; `legacy` remains the default.

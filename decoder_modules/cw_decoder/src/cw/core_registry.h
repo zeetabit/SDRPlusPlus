@@ -34,10 +34,10 @@ namespace cw {
         inline std::unique_ptr<IDecodeCore> makeLR(
                 TimingStrategy timing, bool soft = false,
                 float theta = 0.5f, float boundHi = 3.0f, float boundLo = -3.0f,
-                float minElemScale = 1.0f) {
+                float minElemScale = 1.0f, bool adaptive = false) {
             return std::make_unique<StagedCore>(
                 std::make_unique<EnvelopeFrontEnd>(),
-                std::make_unique<LikelihoodRatioDetector>(theta, boundHi, boundLo, soft),
+                std::make_unique<LikelihoodRatioDetector>(theta, boundHi, boundLo, soft, adaptive),
                 std::make_unique<AdaptiveTimingStage>(timing),
                 std::make_unique<BeamSymbolDecoder>(),
                 MF_RESET, minElemScale);
@@ -125,6 +125,14 @@ namespace cw {
             //    A bounded tradeoff, not removable. Measured, not promoted. ──
             {"legacy+lr+log+nofilt", "Default chain, min-element filter off (§24)",
              []{ return detail::makeLR(TIMING_LOG, false, 0.5f, 3.0f, -3.0f, 0.0f); }},
+
+            // ── Speed-adaptive LR bound (docs §26). Scales the CUSUM bound by
+            //    the median recent element duration to cut the fixed lag on fast
+            //    CW (§25). Helps fast (handkeyed-40, fast+moderate-noise) but the
+            //    self-estimate is corrupted at slow + heavy noise, reviving the
+            //    runaway there. Measured, not promoted — the attempted §25 fix. ──
+            {"legacy+lr+log+adapt", "Speed-adaptive LR bound (§26)",
+             []{ return detail::makeLR(TIMING_LOG, false, 0.5f, 3.0f, -3.0f, 1.0f, true); }},
 
             // ── Matched-filter resize transient (docs §12). Zeroing the ring
             //    buffer on a window change injects a dropout mid-element; at

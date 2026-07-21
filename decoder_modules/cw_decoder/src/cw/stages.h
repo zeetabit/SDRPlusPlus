@@ -108,14 +108,16 @@ namespace cw {
     public:
         explicit LikelihoodRatioDetector(float theta = 0.5f,
                                          float boundHi = 3.0f, float boundLo = -3.0f,
-                                         bool soft = false)
-            : _theta(theta), _boundHi(boundHi), _boundLo(boundLo), _soft(soft) {}
+                                         bool soft = false, bool adaptive = false)
+            : _theta(theta), _boundHi(boundHi), _boundLo(boundLo),
+              _soft(soft), _adaptive(adaptive) {}
 
         void init(float internalRate) override {
             det.init(internalRate);
             det.setTheta(_theta);
             det.setBounds(_boundHi, _boundLo);
             det.setSoft(_soft);
+            det.setAdaptive(_adaptive);
         }
         void reset() override { det.reset(); }
         std::vector<KeyEvent> process(const float* env, int count) override {
@@ -129,7 +131,7 @@ namespace cw {
     private:
         LRDetector det;
         float _theta, _boundHi, _boundLo;
-        bool _soft;
+        bool _soft, _adaptive;
     };
 
     // ── Stage 3: timing ─────────────────────────────────────────

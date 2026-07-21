@@ -507,6 +507,7 @@ namespace cw {
         void setTheta(float t) { theta = t; }
         void setBounds(float hi, float lo) { boundHi = hi; boundLo = lo; }
         void setSoft(bool s) { soft = s; }
+        void setAdaptive(bool a) { adaptive = a; }
 
         std::vector<KeyEvent> process(const float* envelope, int count) {
             std::vector<KeyEvent> events;
@@ -550,16 +551,49 @@ namespace cw {
                 // to a confidence on the key-up that closes the element.
                 if (currentState) { elemUSum += u; elemUCount++; }
 
-                S += u - theta;
-                if (S > boundHi) { S = boundHi; }
-                if (S < boundLo) { S = boundLo; }
+                // Speed-adaptive bound: the fixed CUSUM lag is calibrated in
+                // absolute time, so at fast speed it is a large fraction of a
+                // short element and smears event timing (§25). Scaling the bound
+                // by the recent element duration keeps the lag a constant
+                // fraction. adaptScale is (median ON duration / 237 ms), 237 ms
+                // being the 15 WPM median where the fixed bound was tuned. A
+                // median, not a mean: at heavy noise the spurious SHORT elements
+                // are a sporadic low tail a median ignores, where a mean would be
+                // dragged down, shrinking the bound and reviving the runaway
+                // (§26). Fast dits are a consistent stream the median tracks.
+                const float bHi = boundHi * (adaptive ? adaptScale : 1.0f);
+                const float bLo = boundLo * (adaptive ? adaptScale : 1.0f);
 
-                if (!currentState && S >= boundHi) {
+                S += u - theta;
+                if (S > bHi) { S = bHi; }
+                if (S < bLo) { S = bLo; }
+
+                if (!currentState && S >= bHi) {
                     currentState = true;
                     elemUSum = 0.0f; elemUCount = 0;   // new element begins
                     events.push_back({true, i});
-                } else if (currentState && S <= boundLo) {
+                } else if (currentState && S <= bLo) {
                     currentState = false;
+                    if (adaptive && elemUCount > 0) {
+                        onWin[onPos] = (float)elemUCount;
+                        onPos = (onPos + 1) % ON_WIN;
+                        if (onCount < ON_WIN) { onCount++; }
+                        float tmp[ON_WIN];
+                        memcpy(tmp, onWin, onCount * sizeof(float));
+                        std::sort(tmp, tmp + onCount);
+                        const float med = tmp[onCount / 2];
+                        const float plo = tmp[onCount / 5];   // 20th percentile
+                        // Only trust the speed estimate when the window is free
+                        // of sub-dit elements: the shortest real element is a
+                        // dit, ~1/3 of the median, so plo well below that means
+                        // noise spikes contaminate the window and the median is
+                        // unreliable. Then hold the full (safe) bound. This is
+                        // what keeps slow + heavy noise from reviving the runaway
+                        // while still shrinking the lag on clean fast CW (§26).
+                        adaptScale = (onCount >= 6 && plo >= 0.2f * med)
+                            ? std::min(std::max(med / 237.0f, 0.4f), 1.2f)
+                            : 1.0f;
+                    }
                     float conf = 1.0f;
                     if (soft && elemUCount > 0) {
                         const float meanU = elemUSum / elemUCount;
@@ -594,6 +628,9 @@ namespace cw {
             currentState = false;
             elemUSum = 0.0f;
             elemUCount = 0;
+            onPos = 0;
+            onCount = 0;
+            adaptScale = 1.0f;
             std::fill(noiseWin.begin(), noiseWin.end(), 0.0f);
             noiseWinPos = 0;
             noiseWinCount = 0;
@@ -615,6 +652,7 @@ namespace cw {
         float boundHi = 3.0f;
         float boundLo = -3.0f;
         bool soft = false;
+        bool adaptive = false;
 
         float S = 0.0f;
         bool currentState = false;
@@ -622,6 +660,11 @@ namespace cw {
         float noiseFloor = 0.001f;
         float elemUSum = 0.0f;
         int elemUCount = 0;
+        static constexpr int ON_WIN = 20;   // recent ON durations for the median
+        float onWin[ON_WIN] = {};
+        int onPos = 0;
+        int onCount = 0;
+        float adaptScale = 1.0f;
 
         int noiseSubsample = 8;
         int noiseWinSize = 250;
