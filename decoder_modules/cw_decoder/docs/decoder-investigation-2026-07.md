@@ -3300,3 +3300,55 @@ at the floor), which is a marginal speed-side tweak, not a noise-side fix, and
 does not reach legacy. `legacy` remains the default. The LR detector stands as a
 variant that wins on hand-keyed and the runaway but loses on fast + heavy noise
 — a boundary now mapped from both the speed and the noise side.
+
+The residual is intrinsic to *fixing it at the detector*, not to the problem —
+see §29, which closes it from the front end.
+
+## 29. WPM-matched BPF — the fast+heavy residual was a front-end problem (2026-07-21)
+
+§21–28 attacked the fast + heavy-noise regression at the *detector* and hit a
+wall: the CUSUM bound cannot be short (for lag) and long (for spike rejection) at
+once. But §4 already measured that the largest heavy-noise lever is upstream of
+the detector entirely — the pre-detection BPF bandwidth (noise3.0/15WPM
+0.76 → 0.02, 38×, monotone in bandwidth). §4 could not promote a narrow BPF
+because a *fixed* narrow filter smears fast keying edges and costs fast CW
+(35 WPM 0.039). #31's proposal: match bandwidth to the locked WPM
+(ENBW ≈ 2/T_dit), so slow gets a narrow filter and fast a wide one — dissolving
+the tradeoff §4 was stuck on.
+
+Ceiling experiment before any runtime-retuning machinery (`test_bpf_wpm.cpp`,
+`[bpf-wpm]`, paired n=96): a `legacy` core (Schmitt + Kalman, unchanged) built
+per-signal with its BPF cutoff derived from the generator's ground-truth dit —
+the best a perfect WPM lock could do. Cutoff from the §4.1 fit
+`cut = (2000/ditMs + 2)/1.65`, clamped to the characterised 20–40 Hz range.
+
+| profile | cut (Hz) | legacy | matched | delta | t |
+|---|---|---|---|---|---|
+| noise3.0 (15wpm) | 20 | 0.817 | **0.075** | −0.743 | −39 |
+| noise4.0 | 20 | 0.911 | 0.521 | −0.390 | −22 |
+| noise2.0 | 20 | 0.123 | 0.005 | −0.118 | −11 |
+| worstcase | 20 | 0.610 | 0.462 | −0.148 | −7 |
+| **noise2.0-25wpm** | 26 | 0.184 | **0.023** | −0.161 | −25 |
+| **noise2.0-30wpm** | 31 | 0.287 | 0.125 | −0.162 | −18 |
+| qsb | 20 | 0.013 | 0.008 | −0.005 | −2.2 |
+| handkeyed-15..35 | 20–37 | ~0.15 | ~0.17 | +0.008..+0.033 | <1.7 (ns) |
+
+**7 significant wins, 0 significant regressions.** The two profiles that reverted
+the LR promotion (§25) and defeated every bound rule (§26–28) —
+`noise2.0-25/30wpm` — improve 8× and 2.3×. The residual §28 called "intrinsic to
+the CUSUM" was intrinsic to fixing it *at the detector*: raising pre-detection
+SNR sidesteps the lag/margin conflict, and WPM-matching keeps fast CW from paying
+the smear (handkeyed-40 gets a 40 Hz filter, −0.009 ns). This is a front-end
+mechanism, orthogonal to the detector, and a *minimal* change to the shipped
+default — only the BPF bandwidth, Schmitt and timing unchanged.
+
+**One caveat blocks a clean promotion.** Six hand-keyed profiles flag the
+non-inferiority bound (HARM): small positive deltas (+0.008…+0.033), all
+*non-significant* (t < 1.7, ndiff 71–90) — not proven regressions, not proven
+safe. Hand-keyed is noiseAmp 0.3 + 15% jitter: a bandwidth matched to *white
+noise* over-narrows a signal whose problem is *jitter*, and the narrow filter's
+longer impulse response smears the already-jittery edges. The matched ENBW should
+be a floor that *widens* when SNR is high (light noise does not need the
+rejection and cannot afford the smear) — a noise-aware bandwidth, the next step.
+Until then this is a measured ceiling, not a promotion: real, large, and pointed
+at the exact regime the detector work could not reach.
