@@ -4996,3 +4996,42 @@ selected speed, hence the EXPECTED element density; a runaway emits an implausib
 density for that speed. A self-monitoring fallback (implausible insertion rate ->
 Schmitt for that segment) is an in-detector regime gate using only quantities the
 detector already computes — no external speed/SNR needed. To try next.
+
+### 52.9 #42 research — the noise wall is a FILTER-BANDWIDTH problem (2026-07-22)
+
+User direction: don't chase decoding below human-audible SNR (squelch there, don't run
+away); beat human copy in the audible range; research IQ-based detection improvements.
+
+**Key finding (reframes the whole noise wall).**
+- Optimal CW pre-detection bandwidth ≈ **WPM × 2.5 Hz** (Fldigi manual): ~37 Hz @15 wpm,
+  ~50 Hz @20 wpm. A matched filter for CW is a **speed-matched boxcar** (rectangular
+  dit-length impulse response; correlate the detection statistic over the dit interval).
+- Our `EnvelopeFrontEnd` BPF is ~100–200 Hz — **4–5x too wide**, ~6–7 dB of lost SNR.
+- **CW Skimmer copies at CER < 0.02 at −10 dB** with a matched / narrow FFT filter
+  (~34 Hz @20 wpm) — the same −10 dB where legacy is 0.91. The difference is the FILTER.
+- Coherent/phase detection barely helps at low SNR — energy (envelope) detection is
+  Bayes-optimal there (arXiv 2502.17897). So the lever is BANDWIDTH, not coherence.
+
+**Reconciliation.** `detOracle=0` at noise4.0 (§52.5) meant the info survives our 200 Hz
+filter but only an oracle extracts it — the real detector is swamped by out-of-band
+noise the wide filter passes. My entire fb effort (§52.6–52.8) ran on the WRONG (too
+wide) input; the heavy-noise runaway is spurious marks from noise a matched filter would
+have removed pre-detection. Narrow to ~40 Hz -> recover 6–7 dB -> the fb detector's job
+becomes the moderate-SNR regime where it already WINS (§52.6).
+
+**This validates #31 (WPM-locked adaptive BPF), already built.** Narrowing took
+noiseAmp-1.0 CER 0.121 -> 0.026 (~5x, real audio) but was blocked (§35) by variance on
+the legacy Schmitt detector (narrowing adds QSB-dip variance, fails single-seed gates).
+The missing partner is a detector robust enough to exploit the narrowed signal — the
+speed-marginalised forward-backward detector (§52.6/52.8).
+
+**Research-backed #42 architecture (CW Skimmer / SparkGap recipe):**
+  IQ -> tone shift -> speed-matched matched filter (boxcar, ~WPM×2.5 Hz)
+     -> speed-marginalised forward-backward soft detector (§52.6/52.8)
+     -> self-monitoring squelch below human-copy SNR (user framing)
+     -> timing/beam decode
+The matched filter does the SNR lifting (6–7 dB); the fb detector + speed marginalisation
+exploit it; the squelch handles the truly-inaudible regime instead of running away. Target
+is better-than-human copy in the audible range. Sources: Fldigi CW manual (WPM×2.5),
+AG1LE blog (matched filter, CER<0.02 @ −10 dB), CW Skimmer (Bayesian + matched filter),
+arXiv 2502.17897 (energy detection Bayes-optimal at low SNR).
