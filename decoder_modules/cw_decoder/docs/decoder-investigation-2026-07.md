@@ -5072,3 +5072,30 @@ out-of-band noise. The fb detector was never the problem — the front end was.
 A fixed 40 Hz already delivers most of the win for 15–30 wpm; speed-matching (via the
 §52.8 evidence-selected speed) extends it to fast CW without smearing. Next: build the
 speed-matched filter + fb core and run the full paired adjudication vs legacy.
+
+### 52.9c #42 the matched filter is PER-CHANNEL — multi-channel is the ideal vehicle (2026-07-22)
+
+User insight: with multi-channel support, the narrow filter belongs per internal
+channel, not on the whole VFO. Confirmed in `dsp.h` — each channel's `EnvelopeDSP`
+already filters per-channel: shift the channel's tone to DC (`:95`, per-channel
+`_toneFreq` from the scanner), decimate, then a narrow BPF around that tone (`:148`).
+The 3 kHz VFO width exists only for the `ToneScanner` to FIND signals; decoding is
+already per-channel. This is the CW Skimmer model (wide FFT to detect, matched filter
+per signal to decode).
+
+Why multi-channel is the ideal vehicle for the matched filter:
+1. Each channel knows its own tone -> centre a narrow filter exactly on it.
+2. Each channel can estimate its OWN speed (§52.8 evidence-selected) and set its OWN
+   matched bandwidth — fast on one channel, slow on another, simultaneously. A single
+   VFO-wide filter cannot (different operators run different WPM).
+3. `setBandwidth()` already exists (`dsp.h:179`) for runtime per-channel bandwidth —
+   the #31 adaptive-BPF hook, wired but unused for speed-matching.
+
+BONUS: narrow per-channel filters also improve channel ISOLATION. Channels dedup at
+120 Hz spacing (`CW_TONE_MATCH_HZ`) but currently filter ~100 Hz wide, so adjacent
+channels overlap. A 40 Hz filter sits cleanly inside 120 Hz -> far less inter-channel
+bleed in a pileup. Narrowing helps decode SNR AND channel separation at once.
+
+The only change from today: narrow each channel's BPF and make it speed-matched
+(`setBandwidth()` per channel, driven by the per-channel evidence-selected speed).
+Per-channel tone shift, front end, and decode are all already in place.
