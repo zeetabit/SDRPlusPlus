@@ -1307,6 +1307,58 @@ namespace {
         return out;
     }
 
+    // §52 step 1a — STREAMING (fixed-lag) forward-backward. Same emission/transition
+    // model as batch fbDecode, but the backward pass is truncated to a window
+    // [t, t+lag] initialised flat at its leading edge, so every decision uses only
+    // `lag` samples of future — bounded latency, online-capable. The forward pass is
+    // already causal. If lag covers enough of the next element for its emissions to
+    // pin beta, the smoothed MAP path is identical to the full-backward batch path.
+    // This isolates the ONE algorithmic change (backward truncation); emission params
+    // are still the whole-signal fit here (online estimation is a later stage).
+    std::vector<TruthTransition> fbStream(const std::vector<float>& env, int n,
+                                          float muLo, float muHi, float vLo, float vHi,
+                                          float switchProb, int lag) {
+        if (muHi - muLo < 1e-6f) { return {}; }
+        auto emitLL = [&](int t, double& lb0, double& lb1) {
+            double d0 = env[t] - muLo, d1 = env[t] - muHi;
+            lb0 = -0.5 * (d0 * d0 / vLo + std::log(vLo));
+            lb1 = -0.5 * (d1 * d1 / vHi + std::log(vHi));
+        };
+        const double stay = 1.0 - switchProb, cross = switchProb;
+        // Causal forward, normalised (identical recursion to batch).
+        std::vector<double> a0(n), a1(n);
+        double lb0, lb1;
+        emitLL(0, lb0, lb1); { double m = std::max(lb0, lb1);
+            double x0 = 0.5*std::exp(lb0-m), x1 = 0.5*std::exp(lb1-m);
+            double s = 1.0/(x0+x1+1e-300); a0[0]=x0*s; a1[0]=x1*s; }
+        for (int t = 1; t < n; t++) {
+            emitLL(t, lb0, lb1); double m = std::max(lb0, lb1);
+            double e0 = std::exp(lb0-m), e1 = std::exp(lb1-m);
+            double x0 = (a0[t-1]*stay + a1[t-1]*cross) * e0;
+            double x1 = (a1[t-1]*stay + a0[t-1]*cross) * e1;
+            double s = 1.0/(x0+x1+1e-300); a0[t]=x0*s; a1[t]=x1*s;
+        }
+        // Fixed-lag smoothed MAP: re-run backward over [t, t+lag] per decision.
+        std::vector<uint8_t> path(n);
+        for (int t = 0; t < n; t++) {
+            int hi = std::min(n-1, t+lag);
+            double bb0 = 1.0, bb1 = 1.0;
+            for (int u = hi; u > t; u--) {
+                emitLL(u, lb0, lb1); double m = std::max(lb0, lb1);
+                double e0 = std::exp(lb0-m), e1 = std::exp(lb1-m);
+                double nb0 = stay*e0*bb0 + cross*e1*bb1;
+                double nb1 = stay*e1*bb1 + cross*e0*bb0;
+                double s = 1.0/(nb0+nb1+1e-300); bb0=nb0*s; bb1=nb1*s;
+            }
+            path[t] = (a1[t]*bb1 > a0[t]*bb0) ? 1 : 0;
+        }
+        const int minRun = 12;
+        for (int pass = 0; pass < 3; pass++) { int i=0; while(i<n){int j=i;while(j<n&&path[j]==path[i])j++;if(j-i<minRun&&i>0)for(int k=i;k<j;k++)path[k]=path[i-1];i=j;} }
+        std::vector<TruthTransition> out; uint8_t prev = 0;
+        for (int t = 0; t < n; t++) { if (path[t]!=prev){out.push_back({(long long)t,path[t]==1});prev=path[t];} }
+        return out;
+    }
+
     std::vector<float> frontEnvelope(const GeneratedSignal& sig, const SignalParams& p, int& n) {
         cw::EnvelopeFrontEnd fe; fe.init(p.toneFreq, p.sampleRate, 1000.0f);
         // Feed in blocks like the real core does: a single whole-signal process()
@@ -1563,6 +1615,57 @@ TEST_CASE("validated fb soft detector v2 (§52.6)", "[cw][.][softdet-v2]") {
         printf("%-10s %8.4f %8.4f %10.4f %10.4f  %s\n", pr.name, leg, dO, bs, bo, note);
     }
     printf("\nfbOracle clean must be ~0 (gate). Then oracleFrac = achievable ceiling with perfect params.\n");
+}
+
+// §52 step 1a — streaming (fixed-lag) fb vs the validated batch fb. Same emission
+// source (whole-signal ModelFitScorer, = fbSelf) for both, so this isolates the
+// backward-window truncation. Clean is a hard gate: fixed-lag must reproduce the
+// batch clean ~0 FIRST; then noise must track batch (the batch numbers are the
+// bar this streaming form has to hit before it can become a real IDetector).
+namespace {
+    std::vector<TruthTransition> fbSelfStream(const GeneratedSignal& sig, const SignalParams& p, float sw, int lag) {
+        int n; auto env = frontEnvelope(sig, p, n);
+        if (n < 8) return {};
+        cw::ModelFitScorer sc; auto f = sc.score(env.data(), n);
+        if (f.muHi-f.muLo < 1e-6f) return {};
+        float vf = 0.2f*(f.muHi-f.muLo); vf *= vf;
+        return fbStream(env, n, f.muLo, f.muHi, std::max(f.vLo,vf), std::max(f.vHi,vf), sw, lag);
+    }
+}
+
+TEST_CASE("streaming fixed-lag fb reproduces batch (§52 step 1a)", "[cw][.][softdet-stream]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; bool cleanGate; };
+    auto nz = [](float dit, float amp){ auto p=profileClean(dit); p.noiseAmp=amp; return p; };
+    const Prof profs[] = {
+        {"clean-15", profileClean(80.0f), true}, {"clean-25", profileClean(48.0f), true},
+        {"15wpm-n2", nz(80,2), false}, {"15wpm-n3", nz(80,3), false},
+        {"25wpm-n3", nz(48,3), false}, {"30wpm-n3", nz(40,3), false},
+    };
+    const float sw[] = {0.005f, 0.010f, 0.020f};
+    const int lags[] = {24, 48, 96};   // 24/48/96 ms latency at 1 kHz internal rate
+    auto mkBatch = [](SignalParams p, float s){
+        return [p,s](const GeneratedSignal& sig){ return std::unique_ptr<cw::IDecodeCore>(std::make_unique<cw::StagedCore>(
+            std::make_unique<cw::EnvelopeFrontEnd>(), std::make_unique<OracleDetector>(fbSelf(sig,p,s)),
+            std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN), std::make_unique<cw::BeamSymbolDecoder>())); }; };
+    auto mkStream = [](SignalParams p, float s, int L){
+        return [p,s,L](const GeneratedSignal& sig){ return std::unique_ptr<cw::IDecodeCore>(std::make_unique<cw::StagedCore>(
+            std::make_unique<cw::EnvelopeFrontEnd>(), std::make_unique<OracleDetector>(fbSelfStream(sig,p,s,L)),
+            std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN), std::make_unique<cw::BeamSymbolDecoder>())); }; };
+
+    printf("\n=== §52 step 1a streaming fixed-lag fb (n=%d) — clean is a hard gate ===\n", SEEDS);
+    printf("%-10s %8s %8s %9s %9s %9s  %s\n", "profile", "legacy", "batch", "L=24", "L=48", "L=96", "note");
+    for (auto& pr : profs) {
+        float leg = runCell("legacy", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float bat = 1e9f; for (float s : sw) bat = std::min(bat, runCellWith(mkBatch(pr.params,s),"b",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean);
+        float st[3];
+        for (int li = 0; li < 3; li++) { st[li]=1e9f; for (float s : sw) st[li]=std::min(st[li],runCellWith(mkStream(pr.params,s,lags[li]),"s",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean); }
+        const char* note = "";
+        if (pr.cleanGate) note = (st[1] < 0.05f) ? "CLEAN-OK" : "CLEAN-FAIL!";
+        else { static char b[40]; snprintf(b,sizeof b,"L48 vs batch %+.3f", st[1]-bat); note=b; }
+        printf("%-10s %8.4f %8.4f %9.4f %9.4f %9.4f  %s\n", pr.name, leg, bat, st[0], st[1], st[2], note);
+    }
+    printf("\nStreaming must hit batch clean ~0 FIRST; then L48 should track batch on noise.\n");
 }
 
 // §52.7 #42 runaway fix — posterior hysteresis. The slow+heavy runaway (CER>1) is
