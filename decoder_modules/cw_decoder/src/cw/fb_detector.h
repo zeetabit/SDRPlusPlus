@@ -54,7 +54,8 @@ namespace cw {
                 if (++_sinceRefit >= REFIT_STRIDE || (!_haveParams && _fill >= MIN_FIT)) { refit(); }
 
                 forwardStep(x);                       // updates _a0,_a1 + lag ring
-                if (_abs >= LAG) { finalize(_abs - LAG, blockStart, out); }
+                if (_fwdOnly) { fwdDecide(blockStart, out); }
+                else if (_abs >= LAG) { finalize(_abs - LAG, blockStart, out); }
                 _abs++;
             }
             return out;
@@ -118,6 +119,24 @@ namespace cw {
             _rA0[r] = _a0; _rA1[r] = _a1;
         }
 
+        // Forward-only (ZERO smoothing lag): decide from the causal forward posterior
+        // directly. The low transition prior (SWITCH_P) already makes the forward
+        // filter sticky, so it resists spurious flips without a backward pass; the
+        // min-run debounce adds a small CONSTANT detection delay (cancels in timing).
+        // No backward => none of the fixed-lag/windowed-emission boundary drift that
+        // char-splits high-SNR signals under narrow smoothing (§52 step 4, user).
+        void fwdDecide(long long blockStart, std::vector<KeyEvent>& out) {
+            uint8_t raw = (_a1 > _a0) ? 1 : 0;
+            if (raw == _rawState) { _rawRun++; }
+            else { _rawState = raw; _rawRun = 1; }
+            if (_rawState != _emitState && _rawRun >= MIN_RUN) {
+                _emitState = _rawState;
+                KeyEvent ev; ev.keyDown = (_emitState == 1);
+                ev.sampleOffset = (int)(_abs - blockStart);
+                out.push_back(ev);
+            }
+        }
+
         // Fixed-lag backward over [T, T+LAG]; MAP at T -> streaming debounce -> emit.
         void finalize(long long T, long long blockStart, std::vector<KeyEvent>& out) {
             const double stay = 1.0 - SWITCH_P, cross = SWITCH_P;
@@ -149,6 +168,7 @@ namespace cw {
             }
         }
 
+        bool _fwdOnly = true;     // §52 step 4: forward-only, zero-lag (user)
         float _rate = 1000.0f;
         int _winW = 1200;
         ModelFitScorer _scorer;
