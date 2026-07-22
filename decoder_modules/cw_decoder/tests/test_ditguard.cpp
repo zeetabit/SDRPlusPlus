@@ -2125,6 +2125,91 @@ TEST_CASE("FBDetector class vs batch fbStreamOnline (§52 step 4a)", "[cw][.][fb
     printf("\nStream should match batch (~perfect on clean) bar the first warmup char.\n");
 }
 
+// §52 step 4 — exact char-split mechanism: dump fb transition durations (ms) on a
+// clean signal at narrow(20) vs wide(80) smoothing. If narrow inflates GAPS or
+// shrinks MARKS, char-splitting follows. Uses the batch fb on the block-fed envelope.
+TEST_CASE("fb char-split duration dump (§52 step 4)", "[cw][.][fb-durs]") {
+    auto p = profileClean(80.0f); p.seed = 4242;      // dit=80ms => element-gap 80, char-gap 240
+    auto sig = generateMessage(MSG_FULL(), p);
+    for (float sm : {20.0f, 80.0f}) {
+        int n; auto env = frontEnvelopeBw(sig, p, 32.0f, sm, n);
+        cw::ModelFitScorer sc; auto f = sc.score(env.data(), n);
+        float vf = 0.2f*(f.muHi-f.muLo); vf*=vf;
+        auto tr = fbDecode(env, n, f.muLo, f.muHi, std::max(f.vLo,vf), std::max(f.vHi,vf), 0.01f);
+        printf("\n[smooth=%.0f] BATCH %d tr:\n  ", sm, (int)tr.size());
+        for (size_t i = 1; i < tr.size() && i < 26; i++)
+            printf("%s%ld ", tr[i-1].keyDown ? "M" : "g", (long)(tr[i].sample - tr[i-1].sample));
+        // online FBDetector on the SAME envelope
+        cw::FBDetector det; det.init(1000.0f);
+        std::vector<long long> on; long long base = 0;
+        for (int off = 0; off < n; off += 64) {
+            int c = std::min(64, n - off);
+            for (auto& e : det.process(env.data()+off, c)) on.push_back(base + e.sampleOffset);
+            base += c;
+        }
+        printf("\n[smooth=%.0f] ONLINE %d tr:\n  ", sm, (int)on.size());
+        for (size_t i = 1; i < on.size() && i < 26; i++) printf("%ld ", on[i]-on[i-1]);
+        printf("\n");
+    }
+    printf("\n(element-gap ~80ms, char-gap ~240ms; if narrow inflates gaps, splits follow)\n");
+}
+
+// §52 step 4 — decouple the two filters. Root cause: narrow SMOOTHING over-rounds
+// edges -> char-splitting on high-SNR signals; narrow BPF is the harmless matched
+// filter. Test narrow-bpf + wide-smooth: should fix clean/qrm/hand-keyed AND keep
+// the fast-noise wins, leaving only slow+heavy (15n3, gap-noise -> squelch's job).
+TEST_CASE("fb decouple bpf/smooth (§52 step 4)", "[cw][.][fb-decouple]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; };
+    auto nz=[](float dit,float amp){auto p=profileClean(dit);p.noiseAmp=amp;return p;};
+    const Prof profs[] = {
+        {"clean-15", profileClean(80.0f)}, {"handkeyed-25", profileHandKeyed(48.0f)},
+        {"handkeyed-40", profileHandKeyed(30.0f)}, {"qrm", profileQRM(80.0f)}, {"qrn", profileQRN(80.0f)},
+        {"15wpm-n3", nz(80,3)}, {"25wpm-n3", nz(48,3)}, {"30wpm-n3", nz(40,3)},
+    };
+    // narrow bpf (32) with three smoothings: 20 (current), 50, 80 (wide).
+    auto mk=[](float sm){ return [sm](const GeneratedSignal&){ return cw::detail::makeFB(cw::TIMING_KALMAN, false, 32.0f, 32.0f, sm, std::max(sm,25.0f)); }; };
+    printf("\n=== §52 step 4 decouple: bpf=32, smooth sweep (n=%d) ===\n", SEEDS);
+    printf("%-14s %8s %8s %8s %8s\n", "profile", "legacy", "sm=20", "sm=50", "sm=80");
+    for (auto& pr : profs) {
+        float leg = runCell("legacy", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float s20 = runCellWith(mk(20.0f), "f", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float s50 = runCellWith(mk(50.0f), "f", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float s80 = runCellWith(mk(80.0f), "f", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        printf("%-14s %8.4f %8.4f %8.4f %8.4f\n", pr.name, leg, s20, s50, s80);
+    }
+    printf("\nWide smooth should fix clean/qrm/hand-keyed; find a smooth that keeps fast-noise wins.\n");
+}
+
+// §52 step 4 — ROOT CAUSE debug: dump decoded text + wpm for hand-keyed and qrm
+// under narrow vs wide, to see HOW narrowing degrades them (edge-rounding->timing?
+// interferer in-band?), rather than heuristically avoiding narrow.
+TEST_CASE("fb narrow degradation root cause (§52 step 4)", "[cw][.][fb-root]") {
+    struct Case { const char* name; SignalParams params; };
+    const Case cases[] = {
+        {"handkeyed-40", profileHandKeyed(30.0f)}, {"handkeyed-15", profileHandKeyed(80.0f)},
+        {"qrm", profileQRM(80.0f)}, {"clean-15", profileClean(80.0f)},
+    };
+    auto dump = [](const char* core, const SignalParams& p, const GeneratedSignal& sig){
+        cw::Channel ch; ch.init(0, p.toneFreq, core);
+        for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+            int n = std::min(512, (int)sig.samples.size() - off);
+            ch.process(n, &sig.samples[off]);
+        }
+        printf("  %-16s wpm=%.1f snr=%.1f : %s\n", core, ch.wpm, ch.snr, ch.text.getText().c_str());
+    };
+    printf("\n=== §52 step 4 narrow-degradation root cause ===\n");
+    for (auto& c : cases) {
+        SignalParams p = c.params; p.seed = 4242;
+        auto sig = generateMessage(MSG_FULL(), p);
+        printf("\n[%s]  truth: %s\n", c.name, std::string(MSG_FULL()).c_str());
+        dump("legacy",           p, sig);
+        dump("legacy+fb+wide",   p, sig);
+        dump("legacy+fb+narrow", p, sig);
+    }
+    printf("\n");
+}
+
 // §52 step 4 — isolate WHY fb fails non-AWGN profiles: filter (adaptive narrowing
 // them wrongly) or detector? Compare fb (adaptive) vs fb+wide (never narrows) vs
 // fb+narrow (always) vs legacy on the failing profiles. If fb+wide ~ legacy, the

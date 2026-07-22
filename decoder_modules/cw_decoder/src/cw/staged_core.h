@@ -153,6 +153,12 @@ namespace cw {
                 // AWGN stays narrow (keeps the fast-noise wins), hand-keyed/QRN stay
                 // wide (match legacy). QRM reads below AWGN (unfixable here); QSB/
                 // Farnsworth are detector limits.
+                // Widen for non-broadband signal (§52 step 4 calibration: AWGN reads
+                // ~6 dB, hand-keyed/QRN ~10 dB). NOTE: this filter routing is an
+                // interim — the real degradation on narrow smoothing is the online
+                // debounce shifting mark/gap boundaries (see [fb-durs]); fixing that
+                // in FBDetector is the non-workaround path and may remove the need to
+                // route the filter at all.
                 const float bpf = (in > 8.0f) ? 140.0f : 32.0f;
                 if (bpf != _fbCurBpf) {
                     const float sm = 0.625f * bpf;
