@@ -39,6 +39,7 @@ namespace {
         v.push_back({"handkeyed-15wpm",    MSG_FULL(), profileHandKeyed(80.0f)});
         v.push_back({"handkeyed-20wpm",    MSG_FULL(), profileHandKeyed(60.0f)});
         v.push_back({"handkeyed-25wpm",    MSG_FULL(), profileHandKeyed(48.0f)});
+        v.push_back({"handkeyed-30wpm",    MSG_FULL(), profileHandKeyed(40.0f)});
         v.push_back({"qsb",                MSG_FULL(), profileQSB(80.0f)});
         v.push_back({"qrm",                MSG_FULL(), profileQRM(80.0f)});
         v.push_back({"qrn",                MSG_FULL(), profileQRN(80.0f)});
@@ -142,15 +143,20 @@ TEST_CASE("Gate: additive noise", "[cw][multiseed][gate]") {
     gate("moderate-noise", MSG_FULL(), profileModerateNoise(80.0f), 0.006f);
 }
 
-// Thresholds are legacy's measured mean + 2*stderr at n=24. (They were briefly
-// re-ratcheted for the lr+log promotion, §21, then restored on its revert, §25.)
+// §52.2: re-ratcheted from legacy's loose n=24 bounds (0.238/0.311/0.199 — ~4x the
+// real mean, effectively vacuous) to the SHIPPING default's (select) measured
+// mean + 2*stderr at n=24. Seeds are deterministic so these are stable, strict
+// bounds; the #40b bimodal routing is now locked (hk-25/30 must stay low). A rise
+// is a regression even if every single-seed test passes. NEVER widen to admit a
+// change — lower when a change earns it.
 TEST_CASE("Gate: hand-keyed jitter", "[cw][multiseed][gate]") {
-    // Distribution is bimodal (median << mean): most seeds decode, a minority
-    // fail catastrophically. Suspected cause is the Kalman seed ambiguity in
-    // timing.h — see docs/decoder-investigation-2026-07.md 2.1(c).
-    gate("handkeyed-15wpm", MSG_FULL(), profileHandKeyed(80.0f), 0.238f);
-    gate("handkeyed-20wpm", MSG_FULL(), profileHandKeyed(60.0f), 0.311f);
-    gate("handkeyed-25wpm", MSG_FULL(), profileHandKeyed(48.0f), 0.199f);
+    // hk-20 stays higher-variance (median << mean): the Kalman seed ambiguity in
+    // timing.h — see docs/decoder-investigation-2026-07.md 2.1(c). hk-25/30 sit in
+    // the #40b bimodal window and are now materially tighter.
+    gate("handkeyed-15wpm", MSG_FULL(), profileHandKeyed(80.0f), 0.055f);
+    gate("handkeyed-20wpm", MSG_FULL(), profileHandKeyed(60.0f), 0.135f);
+    gate("handkeyed-25wpm", MSG_FULL(), profileHandKeyed(48.0f), 0.081f);
+    gate("handkeyed-30wpm", MSG_FULL(), profileHandKeyed(40.0f), 0.096f);
 }
 
 TEST_CASE("Gate: propagation and interference", "[cw][multiseed][gate]") {

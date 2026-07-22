@@ -10,10 +10,12 @@
 #include "conversation.h"
 #include "core.h"
 #include "core_registry.h"
+#include "model_fit.h"
 
 #define CW_SAMPLERATE    8000.0f
 #define CW_INTERNAL_RATE 1000.0f
 #define CW_MAX_ENVELOPE  65536
+#define CW_MODELFIT_STRIDE 256   // §52.3 #41: re-score model fit per this many new envelope samples
 
 namespace cw {
 
@@ -34,6 +36,10 @@ namespace cw {
         float wpm = 0;
         float confidence = 0;
         float inputSnr = 0;   // pre-BPF, input-referred SNR (docs §32/§33)
+        // §52.3 #41: passive model-fit quality of the envelope — a two-level
+        // (keyed CW) log-likelihood ratio, orthogonal to SNR. High for real CW,
+        // ~0 for a carrier/het or noise. Observability only; does not touch decode.
+        float modelFit = 0;
         TextBuffer text;
         ConversationTracker conversation;
 
@@ -68,10 +74,23 @@ namespace cw {
             int diagN = 0;
             const float* env = core->diagnostic(diagN);
             if (env && diagN > 0) {
-                std::lock_guard<std::mutex> lck(diagMtx);
-                int toCopy = std::min(diagN, (int)diagBuf.size());
-                diagBuf.erase(diagBuf.begin(), diagBuf.begin() + toCopy);
-                diagBuf.insert(diagBuf.end(), env, env + toCopy);
+                std::vector<float> snapshot;
+                {
+                    std::lock_guard<std::mutex> lck(diagMtx);
+                    int toCopy = std::min(diagN, (int)diagBuf.size());
+                    diagBuf.erase(diagBuf.begin(), diagBuf.begin() + toCopy);
+                    diagBuf.insert(diagBuf.end(), env, env + toCopy);
+                    // §52.3 #41: re-score the rolling envelope window once enough
+                    // new samples have arrived (EM is O(iters*N), so throttle).
+                    envSinceScore += diagN;
+                    if (envSinceScore >= CW_MODELFIT_STRIDE) {
+                        envSinceScore = 0;
+                        snapshot = diagBuf;
+                    }
+                }
+                if (!snapshot.empty()) {
+                    modelFit = modelFitScorer.score(snapshot.data(), (int)snapshot.size()).llr;
+                }
             }
 
             auto st = core->stats();
@@ -141,6 +160,8 @@ namespace cw {
             snr = 0;
             wpm = 0;
             confidence = 0;
+            modelFit = 0;
+            envSinceScore = 0;
             currentWord.clear();
             currentWordConfSum = 0;
             currentWordCharCount = 0;
@@ -164,5 +185,8 @@ namespace cw {
 
         std::mutex diagMtx;
         std::vector<float> diagBuf = std::vector<float>(512, 0.0f);
+
+        ModelFitScorer modelFitScorer;   // §52.3 #41
+        int envSinceScore = 0;
     };
 }

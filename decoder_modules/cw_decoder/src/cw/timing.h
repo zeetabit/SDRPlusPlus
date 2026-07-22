@@ -703,12 +703,13 @@ namespace cw {
             if (_strategy == TIMING_SELECT) {
                 TimingEvent kEvt = kalman.classifyOn(durationMs);
                 TimingEvent lEvt = logTiming.classifyOn(durationMs);
+                TimingEvent bEvt = bimodal.classifyOn(durationMs);   // §52.1 #40b: kept warm
                 elementDurations.push_back(durationMs);
                 if ((int)elementDurations.size() > 30) elementDurations.erase(elementDurations.begin());
                 // Decide/settle the mode until frozen; after that it re-opens only
                 // at a word gap on a robust dit-drift trigger (reEvalSelectGate).
                 updateSelectGate();
-                return selectUseLog ? lEvt : kEvt;
+                return selectUseLog ? (selectUseBimodal ? bEvt : lEvt) : kEvt;
             }
 
             TimingEvent result;
@@ -758,6 +759,14 @@ namespace cw {
             const float cv   = mean > 1.0f ? sqrtf(var) / mean : 0.0f;
             if (!selectUseLog && cv > SELECT_CV_HI && _snr > SELECT_SNR_HI) { selectUseLog = true; }
             else if (selectUseLog && (cv < SELECT_CV_LO || _snr < SELECT_SNR_LO)) { selectUseLog = false; }
+            // §52.1 #40b: within the hand-keyed (log) branch, a mid-speed operator
+            // (dit band ~[35,57] ms, 22-30 wpm) decodes better on bimodal than log
+            // (measured, [select-bimodal-sweep]). Slow keeps log; very fast (dit<LO)
+            // keeps log (bimodal's cluster separation degrades on the shortest dits).
+            // Decided here so it settles and freezes with the mode; the good-SNR gate
+            // above keeps weak hand-keyed off bimodal (where it is far worse).
+            selectUseBimodal = selectUseLog &&
+                               dit >= SELECT_BIMODAL_DIT_LO && dit <= SELECT_BIMODAL_DIT_HI;
             if (kalman.isLocked()) { selectFrozen = true; selectFrozenDit = dit; }
         }
 
@@ -856,7 +865,7 @@ namespace cw {
                 case TIMING_KMEANS:  return kmeans.getWPM();
                 case TIMING_MEDIAN:  return median.getWPM();
                 case TIMING_BIMODAL: return bimodal.getWPM();
-                case TIMING_SELECT:  return selectUseLog ? logTiming.getWPM() : kalman.getWPM();
+                case TIMING_SELECT:  return selectUseLog ? (selectUseBimodal ? bimodal.getWPM() : logTiming.getWPM()) : kalman.getWPM();
                 case TIMING_KALMAN:
                 case TIMING_KALMAN_V2S:
                 case TIMING_KALMAN_GUARD:
@@ -873,7 +882,7 @@ namespace cw {
                 case TIMING_KMEANS:  return kmeans.getDitDuration();
                 case TIMING_MEDIAN:  return median.getDitDuration();
                 case TIMING_BIMODAL: return bimodal.getDitDuration();
-                case TIMING_SELECT:  return selectUseLog ? logTiming.getDitDuration() : kalman.getDitDuration();
+                case TIMING_SELECT:  return selectUseLog ? (selectUseBimodal ? bimodal.getDitDuration() : logTiming.getDitDuration()) : kalman.getDitDuration();
                 case TIMING_KALMAN:
                 case TIMING_KALMAN_V2S:
                 case TIMING_KALMAN_GUARD:
@@ -890,7 +899,7 @@ namespace cw {
                 case TIMING_KMEANS:  return kmeans.isLocked();
                 case TIMING_MEDIAN:  return median.isLocked();
                 case TIMING_BIMODAL: return bimodal.isLocked();
-                case TIMING_SELECT:  return selectUseLog ? logTiming.isLocked() : kalman.isLocked();
+                case TIMING_SELECT:  return selectUseLog ? (selectUseBimodal ? bimodal.isLocked() : logTiming.isLocked()) : kalman.isLocked();
                 case TIMING_KALMAN:
                 case TIMING_KALMAN_V2S:
                 case TIMING_KALMAN_GUARD:
@@ -911,6 +920,7 @@ namespace cw {
             elementDurations.clear();
             gapDurations.clear();
             selectUseLog = false;   // §48: start on kalman2s until a jittered good-SNR run is seen
+            selectUseBimodal = false;   // §52.1 #40b
             selectFrozen = false;
             selectFrozenDit = 0.0f;
         }
@@ -1105,12 +1115,17 @@ namespace cw {
         // signal is jittered but log loses it (§46b), so low SNR forces kalman2s.
         float _snr = 20.0f;                   // pushed each block by StagedCore::setSnr
         bool  selectUseLog = false;           // §48: log/kalman2s choice
+        bool  selectUseBimodal = false;       // §52.1 #40b: bimodal/log sub-choice within the log branch
         bool  selectFrozen = false;           // §48: mode settled; re-opens only on dit drift
         float selectFrozenDit = 0.0f;         // §48: dit at freeze — the operator-change reference
         static constexpr float SELECT_CV_HI  = 0.12f;  // dit-CV enter-log (hand-keyed jitter ~0.15)
         static constexpr float SELECT_CV_LO  = 0.09f;  // dit-CV leave-log (machine at good SNR ~0.05-0.08)
         static constexpr float SELECT_SNR_HI = 8.0f;   // getSNR enter-log (hand-keyed ~11+, noise2.0 ~4.5)
         static constexpr float SELECT_SNR_LO = 6.0f;   // getSNR leave-log
+        // §52.1 #40b: dit band (ms) where bimodal beats log inside the hand-keyed
+        // branch (22-30 wpm). Slow (dit>HI) and very fast (dit<LO) keep log.
+        static constexpr float SELECT_BIMODAL_DIT_LO = 35.0f;
+        static constexpr float SELECT_BIMODAL_DIT_HI = 57.0f;
     };
 
 }

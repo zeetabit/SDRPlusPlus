@@ -447,34 +447,68 @@ TEST_CASE("word-gap drop mechanism (§50)", "[cw][.][onechar-mech]") {
     }
 }
 
-// §48 — verify legacy+select routes correctly: it should track log on good-SNR
-// hand-keyed (where log wins) and kalman2s on noise (never log's catastrophic
-// noise CER) and on weak hand-keyed (§46b). n=96 (routing is a large effect).
-TEST_CASE("select routing verification (§48)", "[cw][.][select-verify]") {
+// §52.1 #40b Stage 1 — pin the log->bimodal crossover dit inside the good-SNR
+// hand-keyed branch. select routes ALL hand-keyed to log, but bimodal overtakes
+// log as the operator gets faster. This sweeps clean hand-keyed by WPM to set
+// SELECT_BIMODAL_DIT_MS from data. Weak (n1.5) rows confirm bimodal must NOT be
+// reached there (it is far worse), which the good-SNR gate already guarantees.
+TEST_CASE("select bimodal crossover sweep (§52.1 #40b)", "[cw][.][select-bimodal-sweep]") {
     constexpr int SEEDS = 96;
-    struct Prof { const char* name; SignalParams params; const char* want; };
+    struct Cell { const char* name; float dit; float noise; };
+    const Cell cells[] = {
+        {"hk-15",  80.0f, 0.0f}, {"hk-18",  67.0f, 0.0f}, {"hk-20",  60.0f, 0.0f},
+        {"hk-22",  55.0f, 0.0f}, {"hk-25",  48.0f, 0.0f}, {"hk-30",  40.0f, 0.0f},
+        {"hk-40",  30.0f, 0.0f},
+        {"hk-20-n1.5", 60.0f, 1.5f}, {"hk-25-n1.5", 48.0f, 1.5f},   // must stay off bimodal
+    };
+    printf("\n=== §52.1 #40b crossover: log vs bimodal on clean hand-keyed (n=%d) ===\n", SEEDS);
+    printf("%-13s %6s %9s %9s %9s  %s\n", "cell", "dit", "log", "bimodal", "winner", "delta");
+    for (const auto& c : cells) {
+        auto p = profileHandKeyed(c.dit); p.noiseAmp = c.noise;
+        auto l = runCell("legacy+log",     c.name, MSG_FULL(), p, SEEDS).cerMean;
+        auto b = runCell("legacy+bimodal", c.name, MSG_FULL(), p, SEEDS).cerMean;
+        printf("%-13s %6.0f %9.4f %9.4f %9s  %+.4f\n",
+               c.name, c.dit, l, b, b < l ? "bimodal" : "log", b - l);
+    }
+    printf("\nSELECT_BIMODAL_DIT_MS = the dit where bimodal starts winning (clean rows only).\n");
+}
+
+// §48/§52.1 — verify legacy+select routes correctly: slow good-SNR hand-keyed ->
+// log, mid-speed good-SNR hand-keyed (22-30 wpm) -> bimodal (§52.1 #40b), heavy
+// noise / weak hand-keyed -> kalman2s. n=96 (routing is a large effect).
+TEST_CASE("select routing verification (§48/§52.1)", "[cw][.][select-verify]") {
+    constexpr int SEEDS = 96;
+    // maxCer: strict absolute ratchet on select's deterministic n=96 CER (measured
+    // value + a small margin). Replaces the old `s <= max(k,l,b)+0.02` bound, which
+    // bimodal's catastrophic noise CER (2.05 on noise3.0-30wpm) inflated into a
+    // vacuous gate. A rise trips it — never widen to admit a change (§52.2).
+    struct Prof { const char* name; SignalParams params; const char* want; float maxCer; };
     SignalParams n3 = profileClean(80.0f); n3.noiseAmp = 3.0f;
     SignalParams hk25n15 = profileHandKeyed(48.0f); hk25n15.noiseAmp = 1.5f;
     const Prof profs[] = {
-        {"handkeyed-25", profileHandKeyed(48.0f),  "log"},      // good SNR jittered -> log
-        {"handkeyed-40", profileHandKeyed(30.0f),  "log"},
-        {"noise3.0",     n3,                        "kalman2s"}, // heavy noise -> kalman2s
-        {"noise3.0-30wpm",[]{auto p=profileClean(40.0f);p.noiseAmp=3.0f;return p;}(), "kalman2s"},
-        {"hk25-n1.5",    hk25n15,                   "kalman2s"}, // weak hand-keyed -> kalman2s
-        {"noise2.0",     [] { auto p = profileClean(80.0f); p.noiseAmp = 2.0f; return p; }(), "kalman2s"},
+        {"handkeyed-15", profileHandKeyed(80.0f),  "log",     0.046f}, // slow good-SNR -> log
+        {"handkeyed-25", profileHandKeyed(48.0f),  "bimodal", 0.085f}, // mid-speed -> bimodal (#40b)
+        {"handkeyed-30", profileHandKeyed(40.0f),  "bimodal", 0.090f},
+        {"handkeyed-40", profileHandKeyed(30.0f),  "log",     0.107f}, // dit<LO -> log
+        {"noise3.0",     n3,                        "kalman2s", 0.715f}, // heavy noise -> kalman2s
+        {"noise3.0-30wpm",[]{auto p=profileClean(40.0f);p.noiseAmp=3.0f;return p;}(), "kalman2s", 0.925f},
+        {"hk25-n1.5",    hk25n15,                   "kalman2s", 0.120f}, // weak hand-keyed -> kalman2s
+        {"noise2.0",     [] { auto p = profileClean(80.0f); p.noiseAmp = 2.0f; return p; }(), "kalman2s", 0.045f},
     };
 
-    printf("\n=== §48 select routing (CER, n=%d) — select should match its target ===\n", SEEDS);
-    printf("%-16s %8s %8s %8s %8s  %s\n", "profile", "kal2s", "log", "select", "want", "ok?");
+    printf("\n=== §48/§52.1 select routing (CER, n=%d) — select should match its target ===\n", SEEDS);
+    printf("%-16s %8s %8s %8s %8s %9s  %s\n",
+           "profile", "kal2s", "log", "bimodal", "select", "want", "<=max?");
     for (const auto& p : profs) {
         auto k = runCell("legacy+kalman2s", p.name, MSG_FULL(), p.params, SEEDS).cerMean;
         auto l = runCell("legacy+log",      p.name, MSG_FULL(), p.params, SEEDS).cerMean;
+        auto b = runCell("legacy+bimodal",  p.name, MSG_FULL(), p.params, SEEDS).cerMean;
         auto s = runCell("legacy+select",   p.name, MSG_FULL(), p.params, SEEDS).cerMean;
-        const float target = std::string(p.want) == "log" ? l : k;
-        const float other  = std::string(p.want) == "log" ? k : l;
-        const bool ok = std::fabs(s - target) < std::fabs(s - other) + 1e-6f;
-        printf("%-16s %8.4f %8.4f %8.4f %8s  %s\n", p.name, k, l, s, p.want, ok ? "OK" : "MISROUTED");
-        CHECK(s <= std::max(k, l) + 0.02f);   // select never worse than the worse of its two options
+        const bool ok = s <= p.maxCer;
+        printf("%-16s %8.4f %8.4f %8.4f %8.4f %9s  %s\n",
+               p.name, k, l, b, s, p.want, ok ? "OK" : "OVER");
+        INFO(p.name << " select=" << s << " maxCer=" << p.maxCer);
+        CHECK(s <= p.maxCer);   // strict absolute ratchet on the shipping default
     }
 }
 
@@ -637,6 +671,61 @@ TEST_CASE("Bell trellis headroom vs oracle (§44)", "[cw][.][trellis-headroom]")
     }
     printf("\ntrellisHR = best-of-ALL-existing minus clairvoyant (trellis's true marginal win).\n");
     printf("detectHR  = clairvoyant minus full-oracle (detector-limited, NOT trellis-addressable).\n");
+}
+
+// §52 #40 — speed-marginalisation headroom vs the SHIPPING default.
+//
+// Speed marginalisation (SparkGap: score N dit/WPM hypotheses, marginalise) can
+// at best pick the correct global dit scale — its ceiling is the timing-oracle
+// (clairvoyant: real detector + PERFECT dit/boundaries). §44 measured that ceiling
+// but predates `select`. `select` now routes hand-keyed to `log` (§48), so the
+// live question is not "vs legacy" but "does anything remain between the SHIPPING
+// default and the timing-oracle on hand-keyed?" A ~0 gap kills #40 before a build.
+// Weak-hand-keyed (hk*-n1.5) is included because select routes THOSE to kalman,
+// not log (§46b) — the cells where speedmarg's marginal room is largest.
+TEST_CASE("speedmarg headroom: select vs timing-oracle (§52 #40)", "[cw][.][speedmarg-headroom]") {
+    constexpr int SEEDS = 96;
+
+    struct Prof { const char* name; SignalParams params; };
+    auto weak = [](float dit){ auto p = profileHandKeyed(dit); p.noiseAmp = 1.5f; return p; };
+    const Prof profs[] = {
+        {"hk-15",      profileHandKeyed(80.0f)},
+        {"hk-20",      profileHandKeyed(60.0f)},
+        {"hk-25",      profileHandKeyed(48.0f)},
+        {"hk-30",      profileHandKeyed(40.0f)},
+        {"hk-40",      profileHandKeyed(30.0f)},
+        {"hk-15-n1.5", weak(80.0f)},
+        {"hk-25-n1.5", weak(48.0f)},
+    };
+
+    auto oracle = [](SignalParams p) {
+        return [p](const GeneratedSignal& sig) {
+            return makeOracleCore(sig, p, OracleConfig{false, true});   // real detector + oracle timing
+        };
+    };
+
+    printf("\n=== §52 #40 speedmarg headroom (decomposed vs best-existing) ===\n");
+    printf("ceiling = clairvoyant (perfect dit). shipGap = select-ceiling (routing+timing).\n");
+    printf("margGap = best-existing-ceiling = TRUE speedmarg marginal room (the §44 rule).\n");
+    printf("%-12s %8s %8s %8s %8s %9s %9s\n",
+           "profile", "select", "log", "bimodal", "ceiling", "shipGap", "margGap");
+
+    float maxMarg = 0.0f;
+    for (const auto& p : profs) {
+        auto sel  = runCell("legacy+select",  p.name, MSG_FULL(), p.params, SEEDS);
+        auto lg   = runCell("legacy+log",     p.name, MSG_FULL(), p.params, SEEDS);
+        auto bm   = runCell("legacy+bimodal", p.name, MSG_FULL(), p.params, SEEDS);
+        auto ceil = runCellWith(oracle(p.params), "ceiling", p.name, MSG_FULL(), p.params, SEEDS);
+        float bestExisting = std::min({sel.cerMean, lg.cerMean, bm.cerMean});
+        float margGap = bestExisting - ceil.cerMean;
+        printf("%-12s %8.4f %8.4f %8.4f %8.4f %+9.4f %+9.4f\n",
+               p.name, sel.cerMean, lg.cerMean, bm.cerMean, ceil.cerMean,
+               sel.cerMean - ceil.cerMean, margGap);
+        maxMarg = std::max(maxMarg, margGap);
+    }
+    printf("\nlargest margGap = %.4f CER. Two separate findings to read off this table:\n", maxMarg);
+    printf(" (1) if select >> bimodal on hand-keyed, select mis-routes (cheap: add bimodal target).\n");
+    printf(" (2) margGap is the TRUE speedmarg room over best-existing; ~0 => #40 not worth a build.\n");
 }
 
 // §43 — the noise×speed grid, including the fast×heavy-noise cells the standard

@@ -4433,3 +4433,217 @@ legacy/kalman2 byte-identical, gate coverage complete. The campaign's first stan
 promotion — a regime-adaptive timing selector giving log's hand-keyed excellence,
 kalman2s's noise robustness (worstcase 0.60→0.37, t=−31), and V1's light-noise/QRM
 robustness, routed per signal by jitter and SNR with operator-change adaptation.
+
+## 52. SparkGap (ITILA) cross-read — three extractable levers (2026-07-22)
+
+**Source.** hotairfred/SparkGap, a real-air CW skimmer (Red Pitaya, 8 HF bands,
+GPL-3.0 → license-compatible with this GPLv3 tree). Its decoder core, ITILA
+(`itila_core.c`, ~1400 lines C), is a **two-state HMM over keystate (mark/space)**,
+parameters fit per window by **EM** (noise mean, signal amplitude, observation
+variance, dit unit length), decoded by **forward-backward soft posteriors that are
+never thresholded inside the decoder** — quantised once at the end
+(`γ_marg > 0.5`) after a 64-wide beam consumes Morse element-timing log-likelihoods.
+Speed is handled by **marginalising the forward-backward log-evidence over 16 WPM
+bins (8–60 WPM)**, warm-started from the prior window. Reported B1_seg2 40 m:
+92.9 % recall vs SkimSrv, 49.7 % vs RBN global consensus.
+
+**Architectural mapping (this codebase).**
+
+| stage | ITILA | ours |
+|---|---|---|
+| envelope | per-bin IIR LPF, real @200 Hz | `EnvelopeFrontEnd`, magnitude @1000 Hz — same class |
+| key detect | forward-backward soft posterior, late-quantised | `SchmittDetector`, hard `v > onThresh` — quantises FIRST |
+| timing/WPM | EM dit + 16-bin WPM marginalisation | `KalmanTiming` point-estimate |
+| symbol | 64-wide beam over element log-likelihoods | `morse_tree` beam — same idea |
+| multi-signal | FFT channelisation, N decoders | `ChannelManager`, ≤20 `Channel`s — same class |
+
+The defining difference is **late quantisation**: ITILA integrates evidence in
+soft-posterior space across the whole window, then thresholds; we threshold at the
+first stage (`v > onThresh`) and every downstream stage inherits that lossy call.
+This is the §"5.x"/#24 diagnosis restated from an independent working decoder.
+
+**Does this contradict §44 ("noise is detector-limited, zero trellis headroom")?**
+No — and this is the load-bearing point. §44 measured the headroom of decoders that
+run on the detector's *already-quantised durations* and correctly capped that class
+at `clairvoyant`. It ALSO measured `detectHR` = clairvoyant − full-oracle = **+0.28
+on worstcase**, and labelled it NOT trellis-addressable. A soft detector attacks
+exactly that detectHR by replacing the detector, so §44 does not refute it — ITILA
+is precisely the "different detector class, the only lever §28 leaves open in
+principle" that the leftovers list already names. §44's headroom table therefore
+does not bound a soft detector; the detectHR-capture fraction is unmeasured and is
+the gate before any build.
+
+**Three levers, extracted and ranked by cleanest first win (not gain).**
+
+1. **#41 model-fit log-evidence as a quality metric — recommended first.** The
+   forward log-likelihood ("how well does the mark/space model explain this
+   envelope") is a decode-confidence number we do not have anywhere. Two un-captured
+   uses: a real UI confidence readout (`getMarkers` currently colours on SNR alone,
+   `channel_manager.h:292`) and a replacement for the channel manager's `snr > 6.0`
+   spawn/prune/merge gate (`:182`, `:202`), which passes loud non-Morse (carriers,
+   QRM, key-clicks) an amplitude threshold cannot reject. Additive — cannot regress
+   a decode core, so no headroom-vs-`select` fight — and it is the shared machinery
+   down-payment on lever 3. First measurement: per-channel forward log-likelihood as
+   a real-CW-vs-carrier/QRM classifier against the current SNR gate.
+
+2. **#40 speed marginalisation — gated on a probe, not a build.** Maintain a small
+   set of dit/WPM hypotheses, score each by element-duration fit, marginalise/select
+   instead of Kalman point-estimating one dit. Targets the hand-keyed seed-ambiguity
+   bimodality (median≪mean, minority locks the wrong global scale). BUT `select`
+   already routes hand-keyed to `log` and takes every 15–40 cell better (§48), and
+   §44 put best-existing→clairvoyant hand-keyed headroom at only +0.035, of which a
+   fraction is achievable. So the marginal headroom over the shipping default may be
+   ~0. First step is `[speedmarg-headroom]`: does a speed-marginalised dit capture
+   anything on hand-keyed that `select` leaves? Build only if yes. NB `bimodal`
+   (§46) is a within-message two-mode clusterer, not global-scale marginalisation —
+   related, already measured and not promoted; the probe must show speedmarg differs.
+
+3. **#42 soft-posterior detector — the big bet, deferred to a measured headroom
+   check.** Forward-backward soft key-state, late quantisation; the only lever that
+   attacks the noise wall (detectHR +0.28). Very-High complexity (joint
+   detector+timing+symbol core — "Bell cannot be a stage"). Do not start until #41
+   pays down the likelihood machinery and a headroom probe shows a real detectHR
+   fraction is capturable. Supersedes #24 (LR/CUSUM = its sequential approximation)
+   and #27 (Bell trellis = the older instance of the same joint-MAP idea). ⚠ Rician
+   model validated against its own noise; SparkGap's 40 m numbers are evidence the
+   direction works on air, not proof for our synthetic gate.
+
+**One SparkGap idea explicitly does NOT transfer: cross-receiver (RBN peer-skimmer)
+consensus.** It needs independent physical receivers; our N channels share one
+antenna/one IQ stream, and dedup guarantees one station = one channel
+(`channel_manager.h:202`), so there is no redundant observation to corroborate.
+Adaptive *frequency* consensus (temporal + spatial candidate agreement) we already
+implement (StableTone hysteresis `:144`, 120 Hz merge `:154`); lever #41 only
+upgrades the signal that gating runs on, from amplitude SNR to model fit.
+
+### 52.1 Both probes run (2026-07-22)
+
+**#40 headroom probe (`[speedmarg-headroom]`, n=96).** Decomposed select vs
+best-existing vs the timing-oracle on hand-keyed. Two findings, one unexpected:
+
+| profile | select | log | bimodal | ceiling | shipGap | margGap |
+|---|---|---|---|---|---|---|
+| hk-15 | 0.0409 | **0.0258** | 0.0428 | 0.0141 | +0.027 | +0.012 |
+| hk-25 | 0.1018 | 0.0921 | **0.0560** | 0.0182 | +0.084 | +0.038 |
+| hk-30 | 0.1276 | 0.1251 | **0.0745** | 0.0195 | +0.108 | +0.055 |
+| hk-40 | 0.1064 | 0.0800 | **0.0643** | 0.0242 | +0.082 | +0.040 |
+| hk-15-n1.5 | 0.0337 | **0.0285** | 0.0742 | 0.0144 | +0.019 | +0.014 |
+| hk-25-n1.5 | 0.1130 | 0.0825 | **0.0974** | 0.0183 | +0.095 | +0.064 |
+
+1. **`select` mis-routes fast hand-keyed — a cheap existing-core win.** Routing is
+   speed-inverted: SLOW hand-keyed (hk-15) → `log` wins (0.026 vs bimodal 0.043),
+   but FAST hand-keyed (25–40 wpm) → `bimodal` wins ~2× (hk-25 0.056 vs the 0.102
+   select ships; hk-30 0.075 vs 0.128). select routes ALL hand-keyed to log,
+   leaving bimodal's win on the table. Fix = a speed-conditioned routing target,
+   already-validated cores, no new algorithm. This corrects the §48 assumption that
+   select captured the hand-keyed headroom — it captured log's share, not bimodal's.
+2. **True speedmarg headroom is real but second-order.** `margGap` (best-existing →
+   oracle) is +0.04–0.06 on fast/weak hand-keyed (matches §44's +0.035 for hk-25),
+   a fraction achievable. #40 is NOT dead-on-arrival as feared, but it sits BEHIND
+   finding 1: capture the routing win first, then speedmarg competes for the
+   residual. Discipline note: my first probe measured `shipGap` (+0.11) and
+   over-stated #40's room; decomposing vs best-existing (the §44 rule) cut it to a
+   third — most of `shipGap` is a routing miss, not a missing timing model.
+
+**#41 Stage 0/1 — `ModelFitScorer` built and characterised (`[modelfit]`).** A
+header-only two-component Gaussian-mixture EM on the envelope, scored as a per-sample
+LLR against a **composite unimodal null** = better-of(single Gaussian, single
+Rayleigh). Design arrived at by two measured corrections:
+
+- A single-Gaussian null floors noise-only at LLR ≈ +0.04 (Gaussian misspecified for
+  skewed Rayleigh) → weak CW confounded with noise. A single-Rayleigh null fixes
+  noise but scores a CARRIER highest (mixture beats Rayleigh hugely on a non-Rayleigh
+  carrier). The composite null (max of both) is the resolution: only genuinely
+  two-level data (Rayleigh floor + separated marks) beats BOTH.
+
+| signal | snrDb | llr | verdict |
+|---|---|---|---|
+| noise | 0.0 | −0.014 | reject |
+| carrier | 12.0 | 0.0002 | reject |
+| carrierL (loud het) | 21.6 | 0.0004 | **reject despite 22 dB SNR** |
+| cw-25 | 12.0 | 0.290 | keep |
+| cw-15 | 12.0 | 0.295 | keep |
+| cw-weak | 6.0 | −0.010 | floor |
+
+**Result:** the metric is **orthogonal to SNR** — a 22 dB het (sails past `snr > 6.0`)
+scores 0.0004 while 12 dB CW scores 0.29; a single threshold in [0.05, 0.19] separates
+usable CW from ALL loud non-Morse across varied amplitudes. **Honest limit:** at 6 dB
+weak CW falls to the floor — the two-level structure ≈ best unimodal. So #41 is a
+**carrier/het veto at usable SNR, not a weak-signal detector** (recall stays SNR's
+job); it is used AND-ed with SNR, not as a replacement. Passive, decode-path
+byte-identical (suite 1674/227 green). Stages 2–3 (wire into `channel_manager`
+spawn/prune, real front-end envelope) remain.
+
+### 52.2 #40b landed — select routes mid-speed hand-keyed to bimodal (2026-07-22)
+
+The #40 probe's cheap win, built and adjudicated. `select` was a 2-way warm-fed
+router (kalman2s / log); the hand-keyed branch always chose log. Extended to 3-way
+with a `selectUseBimodal` sub-flag INSIDE the log branch, keyed on the dit band.
+
+**Crossover measured first (`[select-bimodal-sweep]`, n=96, clean hand-keyed).** The
+win is a WINDOW, not a threshold — bimodal beats log only for dit ~[40,55] ms
+(22-30 wpm); slow (dit≥60) keeps log, and at 40 wpm (dit 30) log *recovers* (bimodal's
+cluster separation degrades on the shortest dits). Set `SELECT_BIMODAL_DIT_LO=35`,
+`SELECT_BIMODAL_DIT_HI=57`. A one-sided threshold would have regressed hk-40.
+
+**Confinement by construction.** `selectUseBimodal` requires `selectUseLog` already
+true (cv>0.12 ∧ snr>8) AND dit∈[35,57]. Noise (snr<8) and machine/contest (cv<0.12)
+can never reach it, so every non-hand-keyed profile is byte-identical to old select.
+Decided in `updateSelectGate` so it settles and freezes with the mode (§49 latch
+protection extends to the third model for free).
+
+**Routing verified (`[select-verify]`, n=96):** hk-25 0.079 / hk-30 0.083 now track
+bimodal; hk-15/40 stay log; weak (hk25-n1.5) and noise stay kalman2s.
+
+**Paired n=384 vs legacy (`[select-adj]`):** 13 better, 0 significant worse, 6 ns-HARM
+— the IDENTICAL non-inferiority profile as old select (§48), the 6 ns-HARM all
+pre-existing garbage/weak cells (noise3.0/4.0 CER 0.90-0.97, hk25-n1.5), NONE in the
+mid-band. Plus the targeted wins now clean BETTER: **hk-25 t=−8.94, hk-30 t=−11.20**.
+Matched-n before/after: hk-25 0.1018→0.0792 (−22%), hk-30 0.1276→0.0830 (−35%).
+
+**Result: strict improvement of the shipping default.** No tradeoff to weigh — select
+dominates old-select (better on the six mid-band cells, byte-identical elsewhere).
+Suite 1674/227 green, serial byte-identical, legacy/kalman2/log/bimodal unchanged.
+Warmup residual remains (select 0.079 vs bimodal-standalone 0.056 on hk-25: the
+pre-freeze elements decode on kalman/log before the switch) — a separate, non-#40b
+optimisation.
+
+**Gates ratcheted to lock the win (never loosened).** Two strict-gate repairs:
+(1) the multiseed hand-keyed bounds were legacy's loose n=24 draws (0.238/0.311/0.199
+— ~4x the real mean, effectively vacuous) — re-ratcheted DOWN to the shipping
+default's measured mean+2·stderr (hk-15 0.055, hk-20 0.135, hk-25 0.081) and
+handkeyed-30 added at 0.096 (the biggest #40b win now permanently gated). Seeds are
+deterministic so these are stable, strict bounds. (2) `[select-verify]`'s check had
+been silently LOOSENED while extending it to 3-way — `s <= max(k,l)+0.02` became
+`s <= max(k,l,b)+0.02`, and bimodal's catastrophic noise CER (2.05 on noise3.0-30wpm)
+inflated it into a vacuous gate. Replaced with a strict per-cell absolute CER ratchet.
+No bound was ever widened to admit a change; a gate too loose to see the real state
+is itself a smell.
+
+### 52.3 #41 Stage 2 — scorer validated on real envelopes and wired into Channel (2026-07-22)
+
+**Stage 2a — survives the real front end (`[modelfit]` real-envelope case).** Stage
+0/1 used hand-built envelopes; the concern was the ~200 Hz BPF blurring the two-level
+structure. Measured the opposite: pushing CW / carrier / noise-only IQ through a real
+`Channel` and scoring `getDiagramData` (the 512-sample UI window):
+
+| signal | real-envelope LLR | fit |
+|---|---|---|
+| cw-25 | 2.51 | muLo 0.001, muHi 0.899 — clean two levels |
+| carrier | −0.001 | flat 0.997 — unimodal, vetoed |
+| noise | 0.000 | flat ~0 (BPF removes off-tone energy), vetoed |
+
+The front end SHARPENS the metric (mark≈0.9 vs floor≈0.001), so real CW scores ~2.5
+vs ~0 for carrier/noise — a wider margin than the synthetic 0.29.
+
+**Stage 2b — wired into `Channel` (passive).** Added `float modelFit`, a
+`ModelFitScorer`, and throttled re-scoring of the rolling 512-sample envelope window
+every `CW_MODELFIT_STRIDE=256` new samples (EM is O(iters·N); ≤20 channels × a score
+per 256 ms = negligible). Populated through the real `process()` path: CW 1.82,
+carrier −0.001. Decode byte-identical (registry 38, suite 1679/228) — the scorer only
+reads the envelope and writes a separate field, never touching the decode path.
+
+**Remaining — Stage 3:** use `modelFit` in the `channel_manager` spawn/prune/merge
+decisions (replace/augment the `snr > 6.0` gate, `:182`) behind a config flag, plus
+surface it in `getMarkers`; validated with the `test_channel_manager` harness on a
+carrier+CW multi-tone. The behavior change, gated and reversible.
