@@ -144,7 +144,8 @@ TEST_CASE("Promotion: fb core adjudication (§52 step 4)", "[cw][.][fb-adjudicat
         baselines.push_back(runCell("legacy", pr.name, pr.message, pr.params, PSEEDS));
     }
     adjudicate("legacy+select", baselines);   // current shipped default
-    adjudicate("legacy+fb",     baselines);   // candidate
+    adjudicate("legacy+fb",     baselines);   // fb standalone
+    adjudicate("legacy+route",  baselines);   // §52 step 4B regime router (select | fb)
 }
 
 TEST_CASE("Promotion: paired adjudication vs legacy", "[cw][.][promotion]") {

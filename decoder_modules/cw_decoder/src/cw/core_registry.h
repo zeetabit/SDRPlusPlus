@@ -1,6 +1,7 @@
 #pragma once
 #include "core.h"
 #include "staged_core.h"
+#include "regime_route.h"
 
 // The single list of benchmarkable decoder configurations.
 //
@@ -155,6 +156,13 @@ namespace cw {
             //    is a plain wide front end for the batch-reproduction probe. ──
             {"legacy+fb", "Forward-backward soft detector + SNR-adaptive BPF/smoothing + Kalman timing",
              []{ return detail::makeFB(TIMING_KALMAN, /*fbBpf=*/true); }},
+
+            // Regime router (§52 step 4B): select by default, fb in heavy broadband
+            // noise. Captures fb's fast+heavy-AWGN wins without its weak-regime harm.
+            {"legacy+route", "Regime router: select, or fb when buried in broadband noise",
+             []{ return std::make_unique<RegimeRouteCore>(
+                     detail::makeStaged(TIMING_SELECT),
+                     detail::makeFB(TIMING_KALMAN, /*fbBpf=*/true)); }},
 
             {"legacy+fb+wide", "Forward-backward soft detector, fixed wide BPF (no adaptation)",
              []{ return detail::makeFB(TIMING_KALMAN, /*fbBpf=*/false, 140.0f, 140.0f, 88.0f, 100.0f); }},
