@@ -1309,9 +1309,20 @@ namespace {
 
     std::vector<float> frontEnvelope(const GeneratedSignal& sig, const SignalParams& p, int& n) {
         cw::EnvelopeFrontEnd fe; fe.init(p.toneFreq, p.sampleRate, 1000.0f);
-        std::vector<float> env(sig.samples.size() + 8);
-        n = fe.process((int)sig.samples.size(), sig.samples.data(), env.data());
-        env.resize(std::max(0, n)); return env;
+        // Feed in blocks like the real core does: a single whole-signal process()
+        // call overflows the front end's internal decimation buffer and SILENTLY
+        // TRUNCATES the envelope (§52.6) — the root cause of every §52.5 prototype
+        // failure. Blocked accumulation reproduces the core's envelope exactly.
+        std::vector<float> env; env.reserve(sig.samples.size() / 8 + 16);
+        std::vector<float> out(1024);
+        const int BLK = 512;
+        for (int off = 0; off < (int)sig.samples.size(); off += BLK) {
+            int cnt = std::min(BLK, (int)sig.samples.size() - off);
+            int m = fe.process(cnt, sig.samples.data() + off, out.data());
+            env.insert(env.end(), out.data(), out.data() + m);
+        }
+        n = (int)env.size();
+        return env;
     }
 
     std::vector<TruthTransition> fbTransitionsOracle(const GeneratedSignal& sig,
@@ -1453,4 +1464,103 @@ TEST_CASE("fb vs per-sample MAP on clean (§52.5g-2)", "[cw][.][fb-map]") {
     printf("\nclean perfect-params: truthTr=%d  MAPtr=%d  fbTr=%d\n", (int)tt.size(), mapTr, (int)fb.size());
     printf("=> MAP~truth but fb<<truth: fb temporal decode is buggy (verdict-invalidating).\n");
     printf("=> MAP also << truth: emission/env issue despite aligned labels.\n");
+}
+
+// §52.6 — FULLY characterise the clean case before building. Resolve 48 vs 104:
+// print n, truthTransitions count, truthLabels transition count, MAP count, agreement,
+// envelope stats, and the envelope around the first few truth transitions.
+TEST_CASE("clean pipeline characterisation (§52.6)", "[cw][.][clean-char]") {
+    auto p = profileClean(80.0f); p.noiseAmp = 0.0f; p.seed = 42;
+    auto sig = generateMessage("CQ CQ DE W1AW W1AW TEST", p);
+    int n; auto env = frontEnvelope(sig, p, n);
+    auto tt = truthTransitions(sig, p.sampleRate, 1000.0f);
+    auto raw = truthLabels(sig, p, n);
+    int rawTr = 0; for (int t = 1; t < n; t++) if (raw[t] != raw[t-1]) rawTr++;
+
+    const int D = 41;
+    std::vector<uint8_t> lab(n,0); for (int t=0;t<n;t++) lab[t]=(t-D>=0)?raw[t-D]:0;
+    int labTr = 0; for (int t=1;t<n;t++) if (lab[t]!=lab[t-1]) labTr++;
+    double s0=0,s0s=0,s1=0,s1s=0;int c0=0,c1=0;
+    for(int t=0;t<n;t++){if(lab[t]){s1+=env[t];s1s+=(double)env[t]*env[t];c1++;}else{s0+=env[t];s0s+=(double)env[t]*env[t];c0++;}}
+    float muLo=s0/c0,muHi=s1/c1,vLo=std::max((float)(s0s/c0-(double)muLo*muLo),1e-9f),vHi=std::max((float)(s1s/c1-(double)muHi*muHi),1e-9f);
+    std::vector<uint8_t> mp(n); int ag=0, mpTr=0;
+    for(int t=0;t<n;t++){double d0=env[t]-muLo,d1=env[t]-muHi;mp[t]=((-d1*d1/vHi-std::log(vHi))>(-d0*d0/vLo-std::log(vLo)))?1:0; if(mp[t]==lab[t])ag++;}
+    for(int t=1;t<n;t++) if(mp[t]!=mp[t-1]) mpTr++;
+    float emin=1e9,emax=-1e9,emean=0; for(int t=0;t<n;t++){emin=std::min(emin,env[t]);emax=std::max(emax,env[t]);emean+=env[t];} emean/=n;
+
+    printf("\n=== §52.6 clean characterisation ===\n");
+    printf("n=%d  truthTr=%d  rawLabTr=%d  labTr(D=41)=%d  mapTr=%d  agree=%.2f%%\n",
+           n, (int)tt.size(), rawTr, labTr, mpTr, 100.0*ag/n);
+    printf("env: min=%.3f max=%.3f mean=%.3f | muLo=%.3f muHi=%.3f\n", emin, emax, emean, muLo, muHi);
+    printf("first 6 truthTransitions (env-idx): ");
+    for (int i=0;i<6 && i<(int)tt.size();i++) printf("%lld/%d ", tt[i].sample, tt[i].keyDown);
+    printf("\nenv[195..250]: "); for (int t=195;t<250 && t<n;t++) printf("%.2f ", env[t]);
+    printf("\n");
+}
+
+// §52.6 v2 — the VALIDATED forward-backward soft detector, built on the fixed
+// (block-fed) envelope. Two param sources: self (ModelFitScorer, shippable) and
+// delay-aligned oracle (upper bound). CLEAN is a hard gate: if a variant cannot
+// decode clean at ~0, its noise numbers are discarded (the §52.5 lesson).
+namespace {
+    std::vector<TruthTransition> fbSelf(const GeneratedSignal& sig, const SignalParams& p, float sw) {
+        int n; auto env = frontEnvelope(sig, p, n);
+        if (n < 8) return {};
+        cw::ModelFitScorer sc; auto f = sc.score(env.data(), n);
+        float muLo=f.muLo, muHi=f.muHi;
+        if (muHi-muLo < 1e-6f) return {};
+        float vf=0.2f*(muHi-muLo); vf*=vf;
+        return fbDecode(env, n, muLo, muHi, std::max(f.vLo,vf), std::max(f.vHi,vf), sw);
+    }
+    std::vector<TruthTransition> fbOracleAligned(const GeneratedSignal& sig, const SignalParams& p, float sw) {
+        int n; auto env = frontEnvelope(sig, p, n);
+        if (n < 8) return {};
+        auto raw = truthLabels(sig, p, n);
+        int bestD=0; double bestA=-1;
+        for (int d=0; d<=80; d++) {
+            double s0=0,s0s=0,s1=0,s1s=0; int c0=0,c1=0;
+            for (int t=0;t<n;t++){uint8_t l=(t-d>=0)?raw[t-d]:0; if(l){s1+=env[t];s1s+=(double)env[t]*env[t];c1++;}else{s0+=env[t];s0s+=(double)env[t]*env[t];c0++;}}
+            if(c0<4||c1<4)continue;
+            float muLo=s0/c0,muHi=s1/c1,vLo=std::max((float)(s0s/c0-(double)muLo*muLo),1e-9f),vHi=std::max((float)(s1s/c1-(double)muHi*muHi),1e-9f);
+            int ag=0;for(int t=0;t<n;t++){uint8_t l=(t-d>=0)?raw[t-d]:0;double d0=env[t]-muLo,d1=env[t]-muHi;if((((-d1*d1/vHi-std::log(vHi))>(-d0*d0/vLo-std::log(vLo)))?1:0)==l)ag++;}
+            double a=(double)ag/n; if(a>bestA){bestA=a;bestD=d;}
+        }
+        std::vector<uint8_t> lab(n,0); for(int t=0;t<n;t++) lab[t]=(t-bestD>=0)?raw[t-bestD]:0;
+        double s0=0,s0s=0,s1=0,s1s=0;int c0=0,c1=0;
+        for(int t=0;t<n;t++){if(lab[t]){s1+=env[t];s1s+=(double)env[t]*env[t];c1++;}else{s0+=env[t];s0s+=(double)env[t]*env[t];c0++;}}
+        float muLo=s0/c0,muHi=s1/c1,vLo=std::max((float)(s0s/c0-(double)muLo*muLo),1e-9f),vHi=std::max((float)(s1s/c1-(double)muHi*muHi),1e-9f);
+        return fbDecode(env, n, muLo, muHi, vLo, vHi, sw);
+    }
+}
+
+TEST_CASE("validated fb soft detector v2 (§52.6)", "[cw][.][softdet-v2]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; bool cleanGate; };
+    auto nz = [](float dit, float amp){ auto p=profileClean(dit); p.noiseAmp=amp; return p; };
+    const Prof profs[] = {
+        {"clean-15", profileClean(80.0f), true}, {"clean-25", profileClean(48.0f), true},
+        {"15wpm-n2", nz(80,2), false}, {"15wpm-n3", nz(80,3), false}, {"15wpm-n4", nz(80,4), false},
+        {"25wpm-n3", nz(48,3), false}, {"30wpm-n3", nz(40,3), false},
+    };
+    const float sw[] = {0.005f, 0.010f, 0.020f};
+    auto mk = [](std::vector<TruthTransition>(*fn)(const GeneratedSignal&,const SignalParams&,float), SignalParams p, float s){
+        return [fn,p,s](const GeneratedSignal& sig){ return std::unique_ptr<cw::IDecodeCore>(std::make_unique<cw::StagedCore>(
+            std::make_unique<cw::EnvelopeFrontEnd>(), std::make_unique<OracleDetector>(fn(sig,p,s)),
+            std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN), std::make_unique<cw::BeamSymbolDecoder>())); }; };
+    auto detOr = [](SignalParams p){ return [p](const GeneratedSignal& sig){ return makeOracleCore(sig,p,OracleConfig{true,false}); }; };
+
+    printf("\n=== §52.6 validated fb v2 (n=%d) — clean is a hard gate ===\n", SEEDS);
+    printf("%-10s %8s %8s %10s %10s  %s\n", "profile", "legacy", "detOr", "fbSelf", "fbOracle", "note");
+    for (auto& pr : profs) {
+        float leg = runCell("legacy", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float dO  = runCellWith(detOr(pr.params), "d", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float bs=1e9,bo=1e9;
+        for (float s : sw) { bs=std::min(bs,runCellWith(mk(fbSelf,pr.params,s),"s",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean);
+                             bo=std::min(bo,runCellWith(mk(fbOracleAligned,pr.params,s),"o",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean); }
+        const char* note = "";
+        if (pr.cleanGate) note = (bo < 0.05f) ? "CLEAN-OK" : "CLEAN-FAIL!";
+        else { float frac=(leg-dO)>1e-6f?100.0f*(leg-bo)/(leg-dO):0; static char b[32]; snprintf(b,sizeof b,"oracleFrac=%.0f%%",frac); note=b; }
+        printf("%-10s %8.4f %8.4f %10.4f %10.4f  %s\n", pr.name, leg, dO, bs, bo, note);
+    }
+    printf("\nfbOracle clean must be ~0 (gate). Then oracleFrac = achievable ceiling with perfect params.\n");
 }

@@ -4891,3 +4891,42 @@ that PASSES A CLEAN-SIGNAL VALIDATION FIRST (reproduces truth on clean) before a
 noise number is trusted — the sanity gate I skipped. That is a real, validated build,
 not a throwaway probe. Campaign lesson: a negative result from an unvalidated
 implementation is not evidence; validate on the easy case before trusting the hard one.
+
+### 52.6 #42 the ROOT bug, and a validated fb detector that WORKS (2026-07-22)
+
+**Root cause of every §52.5 prototype failure: a truncated envelope.** `frontEnvelope`
+called `EnvelopeFrontEnd::process` ONCE on the whole signal; the front end's internal
+decimation buffer caps output at 8192 samples, so it SILENTLY truncated to the first
+~65% of the message (n=8192 for an 18520-sample signal). Half the truth transitions
+fell beyond n (104 -> 48), so every prototype decoded a truncated signal. The core
+never hits this — it feeds small blocks. Fix: block-fed accumulation (BLK=512).
+Clean characterisation after fix: n=18520, mapTr=truthTr=104, per-sample emission
+agreement 100%. THE CLEAN GATE THE PROTOTYPES SKIPPED.
+
+**Validated forward-backward detector (`[softdet-v2]`, n=96, clean is a hard gate):**
+
+| profile | legacy | detOracle | fbSelf | fbOracle | note |
+|---|---|---|---|---|---|
+| clean-15/25 | 0.000 | 0.000 | 0.000 | 0.000 | CLEAN-OK (gate pass) |
+| 15wpm-n2 | 0.1227 | 0 | 0.0757 | 0.0604 | BETTER, 51% of ceiling |
+| 25wpm-n3 | 0.9567 | 0 | 0.6200 | 0.6520 | BETTER, 0.96->0.62, 32% |
+| 30wpm-n3 | 0.9123 | 0 | 0.5618 | 0.5814 | BETTER, 0.91->0.56, 36% |
+| 15wpm-n3 | 0.8173 | 0 | 1.0665 | 1.0516 | WORSE — runaway |
+| 15wpm-n4 | 0.9108 | 0 | 2.4481 | 2.4143 | catastrophic — runaway |
+
+**Findings (now trustworthy — clean passes):**
+1. A validated fb detector BEATS legacy and captures 32–51% of the ceiling on
+   15wpm-n2, 25wpm-n3, 30wpm-n3 — including FAST+heavy noise, where LR failed (§25).
+   Complementary to LR, not redundant.
+2. `fbSelf ≈ fbOracle` — ModelFitScorer params are good enough; param estimation is
+   NOT the bottleneck.
+3. One failure mode: a RUNAWAY at slow+heavy noise (15wpm-n3/n4, CER>1) — spurious
+   elements flood the decoder. Known, fixable (evidence-duration gate / min-element /
+   SNR-adaptive transition prior), the same class as the §20.8 log runaway.
+
+**#42 verdict: REACHABLE IN PART, promising.** The retracted "unreachable" (§52.5g) was
+a truncation-bug artifact. A validated soft detector genuinely captures the ceiling in
+several regimes and beats legacy; the remaining work is the slow+heavy runaway. This is
+the first evidence in the campaign that the noise wall is partially movable. Next:
+fix the runaway (conservative at low SNR), then a full paired adjudication vs legacy —
+and if it survives, the first shippable attack on the noise wall.
