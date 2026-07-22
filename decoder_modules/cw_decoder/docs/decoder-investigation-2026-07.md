@@ -4851,3 +4851,43 @@ the wall is not achievable without essentially reproducing SparkGap in full and 
 our heavy-noise regime is more pessimistic than real air — a Very-High-effort,
 evidence-against bet. Bank the finding; #42 stays measured-and-deferred, now with a
 7-detector benchmark behind the deferral (the §44 discipline, applied to the detector).
+
+### 52.5g #42 verdict RETRACTED — prototype evidence invalid (fails clean) (2026-07-22)
+
+On review (prompted by "the last stages had missed implementation cases — can they be
+reviewed?"), the §52.5c/d/f prototype soft detectors were found to be **riddled with
+bugs**, and their negative results DO NOT support the "don't build #42" verdict.
+
+Bugs found on review:
+1. §52.5c Viterbi: flicker (sub-dit spurious elements) — inherent to hard MAP, partly.
+2. §52.5d forward-backward: missed half the marks.
+3. §52.5f "oracle params": truth labels were MISALIGNED with the envelope by the
+   front-end group delay (~41 samples), so the "oracle" emission params were computed
+   from mislabelled samples (mark ramps as space etc.) — the oracle experiment was
+   INVALID. On CLEAN it gave muLo=0.24/muHi=0.75 with variance ~= separation.
+4. §52.5g: after fixing alignment (delay search -> D=41, clean params muLo=0.022,
+   muHi=0.975, 100% per-sample emission agreement), the pipeline STILL produces only
+   48 transitions vs 104 truth ON A CLEAN SIGNAL — and per-sample MAP (no temporal
+   decode) gives 48 too. So the failure is upstream of the fb decode (envelope
+   extraction / truthLabels / MAP), and the whole pipeline cannot reproduce clean,
+   which `legacy` (Schmitt) decodes at CER ~= 0.
+
+**Consequence: every noise number from my prototypes (§52.5c/d/f) is invalid.** A
+detector that cannot decode a clean signal says nothing about noise. The "unreachable
+by soft detection" verdict is RETRACTED.
+
+**What survives review (still valid):**
+- The CEILING (§52.5/52.5b): oracle-detector drives noise to CER 0 — the detector IS
+  the noise wall. Oracle-harness based, not my prototype code. Robust.
+- The existing LR grid (§52.5e): shipped, validated `+lr*` variants capture 2–14% at
+  heavy noise — BUT LR is CUSUM, a weaker method than forward-backward, so it does NOT
+  settle whether a proper soft detector reaches the ceiling.
+- Encouraging fragment: with correctly-aligned oracle params, per-sample emission
+  separability is 100/95/84% at n0/n2/n3 — the discriminating information IS present
+  in the envelope; a CORRECT detector might capture much of the ceiling.
+
+**Corrected #42 status: UNRESOLVED (not "no").** Settling it requires a soft detector
+that PASSES A CLEAN-SIGNAL VALIDATION FIRST (reproduces truth on clean) before any
+noise number is trusted — the sanity gate I skipped. That is a real, validated build,
+not a throwaway probe. Campaign lesson: a negative result from an unvalidated
+implementation is not evidence; validate on the easy case before trusting the hard one.

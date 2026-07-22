@@ -1252,3 +1252,205 @@ TEST_CASE("existing soft-detector grid benchmark (§52.5e #42)", "[cw][.][softde
     }
     printf("\nfraction = (legacy - bestSoft) / (legacy - detOracle) = ceiling captured.\n");
 }
+
+// §52.5f #42 fix-and-retry — is the fb failure param estimation or the METHOD?
+// Give forward-backward ORACLE emission params (mark/space mean+var from truth-
+// labelled envelope samples) and re-measure. Isolates "my ModelFitScorer params
+// are wrong" from "forward-backward itself cannot reach the wall".
+namespace {
+    // Per-envelope-sample truth label (1=mark) from the ground-truth transitions.
+    std::vector<uint8_t> truthLabels(const GeneratedSignal& sig, const SignalParams& p,
+                                     int n, float internalRate = 1000.0f) {
+        auto tt = truthTransitions(sig, p.sampleRate, internalRate);
+        std::vector<uint8_t> lab(n, 0);
+        size_t k = 0; uint8_t cur = 0;
+        for (int t = 0; t < n; t++) {
+            while (k < tt.size() && tt[k].sample <= t) { cur = tt[k].keyDown ? 1 : 0; k++; }
+            lab[t] = cur;
+        }
+        return lab;
+    }
+
+    // Forward-backward with EXTERNALLY supplied emission params.
+    std::vector<TruthTransition> fbDecode(const std::vector<float>& env, int n,
+                                          float muLo, float muHi, float vLo, float vHi,
+                                          float switchProb) {
+        if (muHi - muLo < 1e-6f) { return {}; }
+        auto emit = [&](int t, double& e0, double& e1) {
+            double d0 = env[t] - muLo, d1 = env[t] - muHi;
+            double lb0 = -0.5 * (d0 * d0 / vLo + std::log(vLo));
+            double lb1 = -0.5 * (d1 * d1 / vHi + std::log(vHi));
+            double m = std::max(lb0, lb1); e0 = std::exp(lb0 - m); e1 = std::exp(lb1 - m);
+        };
+        const double stay = 1.0 - switchProb, cross = switchProb;
+        std::vector<double> a0(n), a1(n), b0(n), b1(n), c(n);
+        double e0, e1; emit(0, e0, e1);
+        a0[0] = 0.5 * e0; a1[0] = 0.5 * e1; c[0] = 1.0/(a0[0]+a1[0]+1e-300); a0[0]*=c[0]; a1[0]*=c[0];
+        for (int t = 1; t < n; t++) {
+            emit(t, e0, e1);
+            double x0 = (a0[t-1]*stay + a1[t-1]*cross) * e0;
+            double x1 = (a1[t-1]*stay + a0[t-1]*cross) * e1;
+            c[t] = 1.0/(x0+x1+1e-300); a0[t]=x0*c[t]; a1[t]=x1*c[t];
+        }
+        b0[n-1] = 1.0; b1[n-1] = 1.0;
+        for (int t = n-2; t >= 0; t--) {
+            emit(t+1, e0, e1);
+            b0[t] = (stay*e0*b0[t+1] + cross*e1*b1[t+1]) * c[t];
+            b1[t] = (stay*e1*b1[t+1] + cross*e0*b0[t+1]) * c[t];
+        }
+        std::vector<uint8_t> path(n);
+        for (int t = 0; t < n; t++) { path[t] = (a1[t]*b1[t] > a0[t]*b0[t]) ? 1 : 0; }
+        const int minRun = 12;
+        for (int pass = 0; pass < 3; pass++) { int i=0; while(i<n){int j=i;while(j<n&&path[j]==path[i])j++;if(j-i<minRun&&i>0)for(int k=i;k<j;k++)path[k]=path[i-1];i=j;} }
+        std::vector<TruthTransition> out; uint8_t prev = 0;
+        for (int t = 0; t < n; t++) { if (path[t]!=prev){out.push_back({(long long)t,path[t]==1});prev=path[t];} }
+        return out;
+    }
+
+    std::vector<float> frontEnvelope(const GeneratedSignal& sig, const SignalParams& p, int& n) {
+        cw::EnvelopeFrontEnd fe; fe.init(p.toneFreq, p.sampleRate, 1000.0f);
+        std::vector<float> env(sig.samples.size() + 8);
+        n = fe.process((int)sig.samples.size(), sig.samples.data(), env.data());
+        env.resize(std::max(0, n)); return env;
+    }
+
+    std::vector<TruthTransition> fbTransitionsOracle(const GeneratedSignal& sig,
+                                                     const SignalParams& p, float switchProb) {
+        int n; auto env = frontEnvelope(sig, p, n);
+        if (n < 8) { return {}; }
+        auto lab = truthLabels(sig, p, n);
+        double s0=0,s0s=0,s1=0,s1s=0; int c0=0,c1=0;
+        for (int t = 0; t < n; t++) {
+            if (lab[t]) { s1+=env[t]; s1s+=(double)env[t]*env[t]; c1++; }
+            else        { s0+=env[t]; s0s+=(double)env[t]*env[t]; c0++; }
+        }
+        if (c0 < 4 || c1 < 4) { return {}; }
+        float muLo=s0/c0, muHi=s1/c1;
+        float vLo=std::max((float)(s0s/c0-(double)muLo*muLo),1e-9f);
+        float vHi=std::max((float)(s1s/c1-(double)muHi*muHi),1e-9f);
+        return fbDecode(env, n, muLo, muHi, vLo, vHi, switchProb);
+    }
+}
+
+TEST_CASE("fb with ORACLE emission params (§52.5f #42)", "[cw][.][softdet-fb-oracle]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; };
+    auto n = [](float dit, float amp){ auto p = profileClean(dit); p.noiseAmp = amp; return p; };
+    const Prof profs[] = {
+        {"15wpm-n2", n(80.0f,2.0f)}, {"15wpm-n3", n(80.0f,3.0f)}, {"15wpm-n4", n(80.0f,4.0f)},
+        {"25wpm-n2", n(48.0f,2.0f)}, {"25wpm-n3", n(48.0f,3.0f)}, {"30wpm-n3", n(40.0f,3.0f)},
+    };
+    const float sw[] = {0.005f, 0.010f, 0.020f};
+    auto detOracle = [](SignalParams p){ return [p](const GeneratedSignal& sig){
+        return makeOracleCore(sig, p, OracleConfig{true, false}); }; };
+    auto fbo = [](SignalParams p, float s){ return [p, s](const GeneratedSignal& sig){
+        return std::unique_ptr<cw::IDecodeCore>(std::make_unique<cw::StagedCore>(
+            std::make_unique<cw::EnvelopeFrontEnd>(),
+            std::make_unique<OracleDetector>(fbTransitionsOracle(sig, p, s)),
+            std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),
+            std::make_unique<cw::BeamSymbolDecoder>())); }; };
+
+    printf("\n=== §52.5f fb with ORACLE emission params (n=%d) ===\n", SEEDS);
+    printf("%-11s %8s %8s  %8s  %s\n", "profile", "legacy", "detOrac", "fbOracBest", "fraction");
+    for (auto& pr : profs) {
+        float leg = runCell("legacy", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float dO  = runCellWith(detOracle(pr.params), "dO", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float best = 1e9f;
+        for (float s : sw) best = std::min(best, runCellWith(fbo(pr.params, s), "o", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean);
+        float frac = (leg-dO)>1e-6f ? (leg-best)/(leg-dO) : 0.0f;
+        printf("%-11s %8.4f %8.4f  %8.4f  %7.1f%%\n", pr.name, leg, dO, best, 100.0f*frac);
+    }
+    printf("\nHigh fraction => fb METHOD works; my ModelFitScorer params were the bug (#42 viable).\n");
+    printf("Still low     => forward-backward itself cannot reach the wall (verdict strong).\n");
+}
+
+// §52.5f diag — with ORACLE params, WHERE does fb break? Per-sample emission MAP
+// agreement with truth (tests emission separability) vs fb-path agreement (tests
+// the temporal decode) vs transition count. Localises: bad emission / bad fb-decode
+// / bad replay.
+TEST_CASE("fb-oracle path accuracy diagnostic (§52.5f)", "[cw][.][fb-oracle-diag]") {
+    for (float amp : {0.0f, 2.0f, 3.0f}) {
+        auto p = profileClean(80.0f); p.noiseAmp = amp; p.seed = 42;
+        auto sig = generateMessage("CQ CQ DE W1AW W1AW TEST", p);
+        int n; auto env = frontEnvelope(sig, p, n);
+        if (n < 8) continue;
+        auto lab = truthLabels(sig, p, n);
+        double s0=0,s0s=0,s1=0,s1s=0; int c0=0,c1=0;
+        for (int t=0;t<n;t++){ if(lab[t]){s1+=env[t];s1s+=(double)env[t]*env[t];c1++;} else {s0+=env[t];s0s+=(double)env[t]*env[t];c0++;} }
+        float muLo=s0/c0, muHi=s1/c1;
+        float vLo=std::max((float)(s0s/c0-(double)muLo*muLo),1e-9f), vHi=std::max((float)(s1s/c1-(double)muHi*muHi),1e-9f);
+
+        // per-sample emission MAP agreement
+        int agree=0;
+        for (int t=0;t<n;t++){
+            double d0=env[t]-muLo,d1=env[t]-muHi;
+            double lb0=-0.5*(d0*d0/vLo+std::log(vLo)), lb1=-0.5*(d1*d1/vHi+std::log(vHi));
+            if (((lb1>lb0)?1:0)==lab[t]) agree++;
+        }
+        auto ft = fbDecode(env, n, muLo, muHi, vLo, vHi, 0.01f);
+        auto tt = truthTransitions(sig, p.sampleRate, 1000.0f);
+        printf("n%.0f: markFrac=%.2f muLo=%.4f muHi=%.4f vLo=%.5f vHi=%.5f | emissMAP-agree=%.1f%% | truthTr=%d fbTr=%d\n",
+               amp, (float)c1/n, muLo, muHi, vLo, vHi, 100.0*agree/n, (int)tt.size(), (int)ft.size());
+    }
+}
+
+// §52.5g — validate FIRST on clean. Align truth labels to the envelope by searching
+// the front-end delay (max per-sample agreement), recompute oracle params, and check
+// the fb reproduces truth on a CLEAN signal. If it cannot decode clean, every noise
+// number from it is invalid (which retroactively voids §52.5c-f prototype evidence).
+TEST_CASE("fb clean-signal validation with aligned oracle params (§52.5g)", "[cw][.][fb-validate]") {
+    for (float amp : {0.0f, 2.0f, 3.0f}) {
+        auto p = profileClean(80.0f); p.noiseAmp = amp; p.seed = 42;
+        auto sig = generateMessage("CQ CQ DE W1AW W1AW TEST", p);
+        int n; auto env = frontEnvelope(sig, p, n);
+        if (n < 8) continue;
+        auto rawLab = truthLabels(sig, p, n);
+        // Search delay d: aligned[t] = rawLab[t-d]; pick d maximising emission-MAP agreement.
+        int bestD = 0; double bestAgree = -1;
+        for (int d = 0; d <= 80; d++) {
+            std::vector<uint8_t> lab(n, 0);
+            for (int t = 0; t < n; t++) lab[t] = (t - d >= 0) ? rawLab[t-d] : 0;
+            double s0=0,s0s=0,s1=0,s1s=0; int c0=0,c1=0;
+            for (int t=0;t<n;t++){ if(lab[t]){s1+=env[t];s1s+=(double)env[t]*env[t];c1++;} else {s0+=env[t];s0s+=(double)env[t]*env[t];c0++;} }
+            if (c0<4||c1<4) continue;
+            float muLo=s0/c0,muHi=s1/c1,vLo=std::max((float)(s0s/c0-(double)muLo*muLo),1e-9f),vHi=std::max((float)(s1s/c1-(double)muHi*muHi),1e-9f);
+            int ag=0; for(int t=0;t<n;t++){double d0=env[t]-muLo,d1=env[t]-muHi;double lb0=-0.5*(d0*d0/vLo+std::log(vLo)),lb1=-0.5*(d1*d1/vHi+std::log(vHi));if(((lb1>lb0)?1:0)==lab[t])ag++;}
+            double a=(double)ag/n; if(a>bestAgree){bestAgree=a;bestD=d;}
+        }
+        // Recompute at bestD and report fb transitions.
+        std::vector<uint8_t> lab(n,0); for(int t=0;t<n;t++) lab[t]=(t-bestD>=0)?rawLab[t-bestD]:0;
+        double s0=0,s0s=0,s1=0,s1s=0;int c0=0,c1=0;
+        for(int t=0;t<n;t++){if(lab[t]){s1+=env[t];s1s+=(double)env[t]*env[t];c1++;}else{s0+=env[t];s0s+=(double)env[t]*env[t];c0++;}}
+        float muLo=s0/c0,muHi=s1/c1,vLo=std::max((float)(s0s/c0-(double)muLo*muLo),1e-9f),vHi=std::max((float)(s1s/c1-(double)muHi*muHi),1e-9f);
+        auto ft = fbDecode(env, n, muLo, muHi, vLo, vHi, 0.01f);
+        auto tt = truthTransitions(sig, p.sampleRate, 1000.0f);
+        printf("n%.0f: bestDelay=%d agree=%.1f%% muLo=%.3f muHi=%.3f vLo=%.4f vHi=%.4f | truthTr=%d fbTr=%d\n",
+               amp, bestD, 100.0*bestAgree, muLo, muHi, vLo, vHi, (int)tt.size(), (int)ft.size());
+    }
+    printf("clean should be ~99%% agree, fbTr~=truthTr. If not, the fb pipeline is still broken.\n");
+}
+
+// §52.5g-2 — clean, perfect params: does per-sample MAP (no temporal) reproduce
+// truth? If MAP gives ~104 transitions but fb gives 48, the bug is the fb temporal
+// decode / min-dwell, not emission. Dumps a segment to see the failure.
+TEST_CASE("fb vs per-sample MAP on clean (§52.5g-2)", "[cw][.][fb-map]") {
+    auto p = profileClean(80.0f); p.noiseAmp = 0.0f; p.seed = 42;
+    auto sig = generateMessage("CQ CQ DE W1AW W1AW TEST", p);
+    int n; auto env = frontEnvelope(sig, p, n);
+    auto raw = truthLabels(sig, p, n);
+    const int D = 41;
+    std::vector<uint8_t> lab(n,0); for(int t=0;t<n;t++) lab[t]=(t-D>=0)?raw[t-D]:0;
+    double s0=0,s0s=0,s1=0,s1s=0;int c0=0,c1=0;
+    for(int t=0;t<n;t++){if(lab[t]){s1+=env[t];s1s+=(double)env[t]*env[t];c1++;}else{s0+=env[t];s0s+=(double)env[t]*env[t];c0++;}}
+    float muLo=s0/c0,muHi=s1/c1,vLo=std::max((float)(s0s/c0-(double)muLo*muLo),1e-9f),vHi=std::max((float)(s1s/c1-(double)muHi*muHi),1e-9f);
+
+    // per-sample MAP path + transition count
+    std::vector<uint8_t> mp(n);
+    for(int t=0;t<n;t++){double d0=env[t]-muLo,d1=env[t]-muHi;mp[t]=((-d1*d1/vHi-std::log(vHi))>(-d0*d0/vLo-std::log(vLo)))?1:0;}
+    int mapTr=0; for(int t=1;t<n;t++) if(mp[t]!=mp[t-1]) mapTr++;
+    auto fb = fbDecode(env, n, muLo, muHi, vLo, vHi, 0.01f);
+    auto tt = truthTransitions(sig, p.sampleRate, 1000.0f);
+    printf("\nclean perfect-params: truthTr=%d  MAPtr=%d  fbTr=%d\n", (int)tt.size(), mapTr, (int)fb.size());
+    printf("=> MAP~truth but fb<<truth: fb temporal decode is buggy (verdict-invalidating).\n");
+    printf("=> MAP also << truth: emission/env issue despite aligned labels.\n");
+}
