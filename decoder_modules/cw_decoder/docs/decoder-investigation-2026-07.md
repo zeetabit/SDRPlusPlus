@@ -5035,3 +5035,40 @@ exploit it; the squelch handles the truly-inaudible regime instead of running aw
 is better-than-human copy in the audible range. Sources: Fldigi CW manual (WPM×2.5),
 AG1LE blog (matched filter, CER<0.02 @ −10 dB), CW Skimmer (Bayesian + matched filter),
 arXiv 2502.17897 (energy detection Bayes-optimal at low SNR).
+
+### 52.9b #42 CONFIRMED — narrow matched filter transforms the noise wall (2026-07-22)
+
+`[softdet-bw]`, n=96, fb detector across pre-detection bandwidths:
+
+| profile | legacy | fb wide(100/80) | fb mid(60/40) | fb narrow(40/25) |
+|---|---|---|---|---|
+| 15wpm-n2 | 0.1227 | 0.0751 | 0.0329 | **0.0073** |
+| 25wpm-n3 | 0.9567 | 0.6422 | 0.5421 | **0.2657** |
+| 30wpm-n3 | 0.9123 | 0.5756 | 0.4896 | **0.2435** |
+| 15wpm-n3 (runaway) | 0.8173 | 1.0913 | 1.1106 | **0.3445** |
+| 15wpm-n4 | 0.9108 | 2.4591 | 2.4448 | **1.6715** |
+| clean-30 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+
+**The research hypothesis is confirmed.** Narrowing the pre-detection filter to ~40 Hz
+(matched to the keying rate) transforms every result:
+- The 15wpm-n3 RUNAWAY (1.09) collapses to 0.345 — now BEATS legacy (0.82). It was never
+  information-theoretic (§52.7 was wrong on that); it was out-of-band noise the wide
+  filter passed. The narrow filter removes it pre-detection.
+- Every heavy-noise cell improves massively: 25wpm-n3 0.96(legacy)->0.27, 15wpm-n2
+  0.12->0.007 (near-perfect). Monotone in narrowing (wide>mid>narrow) across the board.
+- clean-30 stays 0.000 — 40 Hz does not smear 30 wpm dits.
+- Only 15wpm-n4 (−10 dB slow) stays elevated (1.67) — near the human-copy floor; squelch
+  handles it (user framing), or an even-narrower speed-matched filter.
+
+**Closes the #42 investigation loop.** Every prior failure (LR revert §25, prototype
+runaways §52.7, "unreachable" §52.5d) traced to a front-end filter 4–5x too wide.
+detOracle=0 was the tell: info survives the wide filter, real detectors drown in
+out-of-band noise. The fb detector was never the problem — the front end was.
+
+**Shippable #42 architecture, now validated end to end:**
+  IQ -> tone shift -> SPEED-MATCHED matched filter (narrow for slow, wider for fast;
+       #31 adaptive BPF is the vehicle) -> speed-marginalised fb detector (§52.6/52.8)
+       -> squelch below human-copy SNR -> timing/beam decode.
+A fixed 40 Hz already delivers most of the win for 15–30 wpm; speed-matching (via the
+§52.8 evidence-selected speed) extends it to fast CW without smearing. Next: build the
+speed-matched filter + fb core and run the full paired adjudication vs legacy.

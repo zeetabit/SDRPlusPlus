@@ -1747,3 +1747,50 @@ TEST_CASE("fb speed marginalisation vs fixed prior (§52.8 #42)", "[cw][.][softd
     }
     printf("\nDoes evidence-based speed selection fix the runaway (no cheating on speed)?\n");
 }
+
+// §52.9b #42 test the research: does a NARROWER (matched) pre-detection filter fix the
+// runaway and improve the wins? Runs the fb detector on envelopes from front ends of
+// different bandwidth. wide=current (~100/80 Hz); narrow ~ WPM*2.5 for these speeds.
+namespace {
+    std::vector<float> frontEnvelopeBw(const GeneratedSignal& sig, const SignalParams& p,
+                                       float bpfCut, float smoothCut, int& n) {
+        cw::EnvelopeFrontEnd fe(bpfCut, bpfCut, smoothCut, smoothCut);
+        fe.init(p.toneFreq, p.sampleRate, 1000.0f);
+        std::vector<float> env; env.reserve(sig.samples.size()/8+16);
+        std::vector<float> out(1024); const int BLK=512;
+        for(int off=0;off<(int)sig.samples.size();off+=BLK){int cnt=std::min(BLK,(int)sig.samples.size()-off);int m=fe.process(cnt,sig.samples.data()+off,out.data());env.insert(env.end(),out.data(),out.data()+m);}
+        n=(int)env.size(); return env;
+    }
+    std::vector<TruthTransition> fbSelfBw(const GeneratedSignal& sig, const SignalParams& p,
+                                          float bpfCut, float smoothCut, float sw) {
+        int n; auto env=frontEnvelopeBw(sig,p,bpfCut,smoothCut,n); if(n<8)return {};
+        cw::ModelFitScorer sc; auto f=sc.score(env.data(),n); if(f.muHi-f.muLo<1e-6f)return {};
+        float vf=0.2f*(f.muHi-f.muLo);vf*=vf;
+        return fbDecode(env,n,f.muLo,f.muHi,std::max(f.vLo,vf),std::max(f.vHi,vf),sw);
+    }
+}
+
+TEST_CASE("fb + narrow matched filter (§52.9b #42)", "[cw][.][softdet-bw]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; bool win; };
+    auto nz=[](float dit,float amp){auto p=profileClean(dit);p.noiseAmp=amp;return p;};
+    const Prof profs[] = {
+        {"15wpm-n2",nz(80,2),true},{"25wpm-n3",nz(48,3),true},{"30wpm-n3",nz(40,3),true},
+        {"15wpm-n3",nz(80,3),false},{"15wpm-n4",nz(80,4),false},{"clean-30",profileClean(40.0f),true},
+    };
+    // (bpf, smooth) Hz: wide=current, mid, narrow. sw=0.01 fixed for this filter test.
+    struct BW { const char* nm; float bpf; float sm; };
+    const BW bws[] = { {"wide100/80",100,80}, {"mid60/40",60,40}, {"narrow40/25",40,25} };
+    auto mk=[](SignalParams p,float bpf,float sm){return [p,bpf,sm](const GeneratedSignal& sig){return std::unique_ptr<cw::IDecodeCore>(std::make_unique<cw::StagedCore>(std::make_unique<cw::EnvelopeFrontEnd>(bpf,bpf,sm,sm),std::make_unique<OracleDetector>(fbSelfBw(sig,p,bpf,sm,0.01f)),std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),std::make_unique<cw::BeamSymbolDecoder>()));};};
+    printf("\n=== §52.9b fb + matched-filter bandwidth (n=%d) ===\n", SEEDS);
+    printf("%-10s %8s %6s", "profile","legacy","win?");
+    for(auto& b:bws) printf(" %12s", b.nm);
+    printf("\n");
+    for(auto& pr:profs){
+        float leg=runCell("legacy",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean;
+        printf("%-10s %8.4f %6s", pr.name, leg, pr.win?"WIN":"run");
+        for(auto& b:bws){float h=runCellWith(mk(pr.params,b.bpf,b.sm),"b",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean;printf(" %12.4f",h);}
+        printf("\n");
+    }
+    printf("\nDoes a narrower (matched) filter fix the runaway + improve wins (research §52.9)?\n");
+}
