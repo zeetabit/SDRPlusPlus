@@ -1366,11 +1366,12 @@ namespace {
     // at/before u, so they are causal within the fixed lag. Everything else matches
     // step 1a (fixed-lag backward), isolating the emission change.
     std::vector<TruthTransition> fbStreamOnline(const std::vector<float>& env, int n,
-                                                float switchProb, int lag, int W, int stride) {
+                                                float switchProb, int lag, int W, int stride,
+                                                float squelchLlr = -1e9f) {
         if (n < 8) { return {}; }
-        std::vector<float> muLoA(n), muHiA(n), vLoA(n), vHiA(n);
+        std::vector<float> muLoA(n), muHiA(n), vLoA(n), vHiA(n), llrA(n);
         cw::ModelFitScorer sc;
-        float pMuLo = 0, pMuHi = 0, pVLo = 1, pVHi = 1; bool have = false;
+        float pMuLo = 0, pMuHi = 0, pVLo = 1, pVHi = 1, pLlr = 0; bool have = false;
         for (int t = 0; t < n; t++) {
             if (t % stride == 0 || !have) {
                 int lo = std::max(0, t - W + 1), cnt = t - lo + 1;
@@ -1379,11 +1380,12 @@ namespace {
                     if (f.muHi - f.muLo > 1e-6f) {
                         float vf = 0.2f * (f.muHi - f.muLo); vf *= vf;
                         pMuLo = f.muLo; pMuHi = f.muHi;
-                        pVLo = std::max(f.vLo, vf); pVHi = std::max(f.vHi, vf); have = true;
+                        pVLo = std::max(f.vLo, vf); pVHi = std::max(f.vHi, vf);
+                        pLlr = f.llr; have = true;
                     }
                 }
             }
-            muLoA[t] = pMuLo; muHiA[t] = pMuHi; vLoA[t] = pVLo; vHiA[t] = pVHi;
+            muLoA[t] = pMuLo; muHiA[t] = pMuHi; vLoA[t] = pVLo; vHiA[t] = pVHi; llrA[t] = pLlr;
         }
         if (!have) { return {}; }
         auto emitLL = [&](int t, double& lb0, double& lb1) {
@@ -1414,6 +1416,11 @@ namespace {
             }
             path[t] = (a1[t]*bb1 > a0[t]*bb0) ? 1 : 0;
         }
+        // Squelch: where the local model-fit LLR (bimodal vs unimodal-null, #41) is
+        // below floor, the window is noise-only being split into a spurious mixture —
+        // force space, turning an insertion runaway into (bounded) deletions. LLR is
+        // orthogonal to SNR: high only for genuine keyed CW. Disabled at -1e9.
+        if (squelchLlr > -1e8f) { for (int t = 0; t < n; t++) if (llrA[t] < squelchLlr) path[t] = 0; }
         const int minRun = 12;
         for (int pass = 0; pass < 3; pass++) { int i=0; while(i<n){int j=i;while(j<n&&path[j]==path[i])j++;if(j-i<minRun&&i>0)for(int k=i;k<j;k++)path[k]=path[i-1];i=j;} }
         std::vector<TruthTransition> out; uint8_t prev = 0;
@@ -2052,4 +2059,72 @@ TEST_CASE("streaming online fb + matched filter (§52 step 2)", "[cw][.][softdet
         printf("%-10s %8.4f %10.4f %10.4f %10.4f  %s\n", pr.name, leg, bat, o7, o12, note);
     }
     printf("\nFull streaming stack. Clean gate first; then W1200 should beat legacy where batchNarr does.\n");
+}
+
+// §52 step 3 — squelch on the model-fit LLR (#41). The full streaming stack runs
+// away at 15wpm-n4 because noise-only gap windows get split into a spurious mixture.
+// The bimodal-vs-null LLR is ~0 for noise-only and high (~1.8) for real keyed CW, so
+// it targets exactly those windows. Sweep the threshold: kill the n4 runaway (CER<1)
+// WITHOUT touching the n2/n3/15n3 wins or the clean gate. sq=off => step-2 baseline.
+namespace {
+    std::vector<TruthTransition> fbOnlineBwSq(const GeneratedSignal& sig, const SignalParams& p,
+                                              float bpf, float sm, float sw, int W, float sq) {
+        int n; auto env = frontEnvelopeBw(sig, p, bpf, sm, n); if (n < 8) return {};
+        return fbStreamOnline(env, n, sw, 48, W, 128, sq);
+    }
+}
+
+TEST_CASE("streaming fb squelch below copy floor (§52 step 3)", "[cw][.][softdet-squelch]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; bool cleanGate; };
+    auto nz=[](float dit,float amp){auto p=profileClean(dit);p.noiseAmp=amp;return p;};
+    const Prof profs[] = {
+        {"clean-30", profileClean(40.0f), true},
+        {"15wpm-n2",nz(80,2),false},{"25wpm-n3",nz(48,3),false},{"30wpm-n3",nz(40,3),false},
+        {"15wpm-n3",nz(80,3),false},{"15wpm-n4",nz(80,4),false},
+    };
+    const float sqs[] = {-1e9f, 0.1f, 0.3f, 0.6f, 1.0f};   // -1e9 = off; LLR thresholds
+    auto mk=[](SignalParams p,float sq){return [p,sq](const GeneratedSignal& sig){return std::unique_ptr<cw::IDecodeCore>(std::make_unique<cw::StagedCore>(std::make_unique<cw::EnvelopeFrontEnd>(40,40,25,25),std::make_unique<OracleDetector>(fbOnlineBwSq(sig,p,40,25,0.01f,1200,sq)),std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),std::make_unique<cw::BeamSymbolDecoder>()));};};
+    printf("\n=== §52 step 3 LLR squelch (n=%d, W1200, matched 40/25) ===\n", SEEDS);
+    printf("%-10s %8s", "profile","legacy");
+    for(float sq:sqs) printf(sq<-1e8f?"   sq=off":"  sq=%.1f",sq);
+    printf("\n");
+    for(auto& pr:profs){
+        float leg=runCell("legacy",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean;
+        printf("%-10s %8.4f", pr.name, leg);
+        for(float sq:sqs){float h=runCellWith(mk(pr.params,sq),"q",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean;printf(" %8.4f",h);}
+        printf("\n");
+    }
+    printf("\nGoal: an LLR threshold that pulls 15wpm-n4 <1.0 while wins + clean are unchanged.\n");
+}
+
+// §52 step 3b — is squelch a CHANNEL-level decision? Per-window in-detector squelch
+// hurts the wins (above). The channel gate (#41: modelFit>0.25) uses the WHOLE-signal
+// model-fit LLR. This measures that integrated LLR per profile on the matched-filter
+// envelope: if n4 sits below a threshold that n2/n3 clear, channel-level squelch
+// contains the n4 runaway WITHOUT any per-window damage to the wins.
+TEST_CASE("channel-level model-fit separates below-floor (§52 step 3b)", "[cw][.][softdet-chansq]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; };
+    auto nz=[](float dit,float amp){auto p=profileClean(dit);p.noiseAmp=amp;return p;};
+    const Prof profs[] = {
+        {"clean-30", profileClean(40.0f)},
+        {"15wpm-n2",nz(80,2)},{"25wpm-n3",nz(48,3)},{"30wpm-n3",nz(40,3)},
+        {"15wpm-n3",nz(80,3)},{"15wpm-n4",nz(80,4)},{"15wpm-n5",nz(80,5)},
+    };
+    printf("\n=== §52 step 3b whole-signal model-fit LLR (matched 40/25, n=%d) ===\n", SEEDS);
+    printf("%-10s %10s %10s %10s  %s\n", "profile", "llr_mean", "llr_min", "llr_max", "note");
+    for (auto& pr : profs) {
+        double sum=0; float lo=1e9f, hi=-1e9f;
+        for (int s = 0; s < SEEDS; s++) {
+            SignalParams pp = pr.params; pp.seed = 1000u + (unsigned)s * 7919u;
+            auto sig = generateMessage(MSG_FULL(), pp);
+            int n; auto env = frontEnvelopeBw(sig, pp, 40, 25, n); if (n<8) continue;
+            cw::ModelFitScorer sc; float l = sc.score(env.data(), n).llr;
+            sum += l; lo = std::min(lo,l); hi = std::max(hi,l);
+        }
+        float mean = (float)(sum/SEEDS);
+        printf("%-10s %10.4f %10.4f %10.4f\n", pr.name, mean, lo, hi);
+    }
+    printf("\nIf n4/n5 llr sits clearly below n2/n3, a channel gate contains the runaway cleanly.\n");
 }
