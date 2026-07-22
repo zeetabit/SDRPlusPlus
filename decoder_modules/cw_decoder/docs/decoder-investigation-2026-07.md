@@ -4691,3 +4691,76 @@ form can never drop what snr>6 keeps. Integration test: marginal CW survives wit
 gate, idles out without (`[manager]`). Decode byte-identical (registry 38), suite
 1683/230 green. #41 complete through Stage 3; robustness to exotic contrast
 interference is deferred to #42's temporal model.
+
+### 52.5 #42 headroom — BUILD it: the noise wall is entirely a detector problem (2026-07-22)
+
+`[softdet-headroom]`, n=96, kalman timing held constant to isolate the detector:
+
+| profile | legacy | lr | lrsoft | detOracle | ceiling | captured | residual |
+|---|---|---|---|---|---|---|---|
+| noise2.0 | 0.1227 | 0.0596 | 0.1360 | **0.0000** | +0.123 | +0.063 | +0.060 |
+| noise3.0 | 0.8173 | 0.7827 | 0.7833 | **0.0000** | +0.817 | +0.035 | +0.783 |
+| noise4.0 | 0.9108 | 0.8904 | 0.8906 | **0.0000** | +0.911 | +0.020 | +0.890 |
+| qrm | 0.0018 | 0.0000 | 0.0000 | 0.0000 | +0.002 | — | 0 |
+| qrn | 0.0019 | 0.0000 | 0.0000 | 0.0000 | +0.002 | — | 0 |
+| worstcase | 0.6096 | 0.5968 | 0.6106 | 0.4266 | +0.183 | +0.013 | +0.170 |
+| handkeyed-25 | 0.1536 | 0.1876 | 0.1975 | 0.0692 | +0.084 | −0.034 | +0.118 |
+
+detOracle = oracle DETECTOR + real Kalman timing (perfect key transitions, normal timing).
+
+**The finding, and it is campaign-defining.** A perfect detector drives noise2/3/4 to
+**CER 0.0000** with the *same* Kalman timing — even noise4.0 (SNR ~−10 dB). So the
+entire noise-wall CER is a **detector** failure: the timing/decoder already handle
+heavy noise flawlessly IF the key transitions are right; the Schmitt threshold is what
+destroys them. Ceiling +0.82 (noise3.0) / +0.91 (noise4.0) — the **largest capturable
+headroom measured anywhere in this campaign**, and it sits exactly on the wall §21–51
+could never move.
+
+**This is the OPPOSITE of §44's trellis verdict, and the two are consistent.** §44's
+clairvoyant ran the trellis on the *Schmitt detector's already-destroyed* durations →
+zero noise headroom. detOracle *replaces* the detector → the durations were never
+fundamentally lost, only mis-detected. The lever is the DETECTOR, not the decoder —
+exactly what §52 predicted (detectHR is soft-detector-addressable, not
+trellis-addressable).
+
+**Existing soft detectors capture almost none of it.** legacy+lr / +lr+soft win only
++0.02–0.06 on heavy noise (and HURT hand-keyed, −0.034) — the CUSUM is nowhere near the
+oracle. So the residual for a full forward-backward HMM is nearly the entire ceiling
+(+0.78 on noise3.0). Unlike §44 (best-existing already at the ceiling → defer), here the
+best existing is far below it → **build #42**.
+
+**The one honest caveat.** detOracle uses GROUND TRUTH transitions, so +0.8 is a
+CEILING, not achievable CER. Whether a real forward-backward HMM approaches it at −10 dB
+is unknown from this probe. Two signals bracket it: the LR's poor capture is a caution
+(a weak soft method gains little); SparkGap's real-40 m 92.9 % recall is encouragement (a
+full HMM does far better than CUSUM on air). Build gated on an early achievable-fraction
+measurement (a minimal soft detector vs legacy on the noise ladder) before committing to
+the full joint core.
+
+**Campaign insight.** Every timing lever (§21–51: kalman2, log, select, #40b) improves
+jitter/hand-keyed but provably CANNOT touch the noise wall — because the wall is a
+detector problem and those all run downstream of the detector. #42 is the only lever
+that attacks it. Verdict: **JUSTIFIED — the strongest build case the campaign has
+produced.** Very-High complexity (joint detector; "Bell cannot be a stage"), so stage it
+behind the achievable-fraction gate.
+
+### 52.5b #42 headroom — detOracle=0 confirmed across the WPM x noise grid (2026-07-22)
+
+§52.5 tested the noise ladder only at 15 wpm; §43's lesson is that fast x heavy cells
+behave differently. `[softdet-grid]`, n=96, reporting detOracle MEAN and WORST seed:
+
+| wpm | noise | legacy | detOrac mean | detOrac worst |
+|---|---|---|---|---|
+| 15 | 2/3/4 | 0.12/0.82/0.91 | 0.0000 | 0.0000 |
+| 25 | 2/3/4 | 0.18/0.96/0.90 | 0.0000 | 0.0000 |
+| 30 | 2/3/4 | 0.29/0.91/0.89 | 0.0000 | 0.0000 |
+| 40 | 2/3/4 | 0.35/0.86/0.89 | 0.0000 | 0.0000 |
+
+**detOracle is 0.0000 mean AND worst across all 12 cells** — even 40 wpm x noise4.0
+(legacy 0.889). The noise-wall-is-a-detector-problem finding is uniform across speed,
+not a 15 wpm artifact, and has no bad tail. The +0.8/+0.9 ceiling applies at every
+speed. This holds because the oracle transitions are noise-INDEPENDENT (ground truth,
+not the noisy envelope), so the value is the CONTRAST: the same timing/decoder fails at
+0.8-0.9 with the real Schmitt detector and is perfect with oracle transitions — 100% of
+the noise-wall CER is detector transition error, at every speed. The build-#42 verdict
+is robust to the §43 multi-condition coverage that reverted earlier candidates.

@@ -842,3 +842,97 @@ TEST_CASE("kalman2s speed-gate threshold sweep (§41)", "[cw][.][kalman2s-sweep]
     printf("across gates => the fast regression is V2's dah-gain, so the whole\n");
     printf("V1/V2 behaviour must switch, not just the gate.)\n");
 }
+
+// §52.5 #42 headroom — should we build the forward-backward soft-posterior detector?
+//
+// The discipline (§44): before a Very-High-complexity joint HMM, measure its
+// CAPTURABLE headroom. A soft detector REPLACES the Schmitt detector, so §44's
+// clairvoyant table does NOT bound it — the relevant ceiling is the ORACLE DETECTOR
+// (real timing held constant). And unlike §44 we have real soft-ish detectors
+// already: legacy+lr (sequential CUSUM) and legacy+lr+soft (evidence-weighted) are
+// approximations of the forward-backward posterior. So:
+//   ceiling   = legacy - detOracle        (what any better DETECTOR can win, kalman timing)
+//   captured  = legacy - best(lr, lrsoft) (what the existing soft-approx already wins)
+//   residual  = best(lr, lrsoft) - detOracle (marginal room a FULL HMM has over them)
+// If residual is small, the full HMM buys little over the cheaper LR detector -> defer
+// (the §44 verdict). If large, #42 is justified. All cores use kalman timing so the
+// comparison isolates the DETECTOR.
+TEST_CASE("soft-detector headroom vs oracle detector (§52.5 #42)", "[cw][.][softdet-headroom]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; };
+    auto n = [](float amp){ auto p = profileClean(80.0f); p.noiseAmp = amp; return p; };
+    const Prof profs[] = {
+        {"noise2.0",     n(2.0f)},
+        {"noise3.0",     n(3.0f)},
+        {"noise4.0",     n(4.0f)},
+        {"qrm",          profileQRM(80.0f)},
+        {"qrn",          profileQRN(80.0f)},
+        {"worstcase",    profileWorstCase(80.0f)},
+        {"handkeyed-25", profileHandKeyed(48.0f)},
+    };
+    auto detOracle = [](SignalParams p) {
+        return [p](const GeneratedSignal& sig) {
+            return makeOracleCore(sig, p, OracleConfig{true, false});   // oracle DET, real timing
+        };
+    };
+    auto fullOracle = [](SignalParams p) {
+        return [p](const GeneratedSignal& sig) {
+            return makeOracleCore(sig, p, OracleConfig{true, true});
+        };
+    };
+
+    printf("\n=== §52.5 #42 soft-detector headroom (kalman timing, n=%d) ===\n", SEEDS);
+    printf("%-13s %8s %8s %8s %9s %9s   %8s %8s %8s\n",
+           "profile", "legacy", "lr", "lrsoft", "detOrac", "fullOrac",
+           "ceiling", "captured", "residual");
+    for (const auto& p : profs) {
+        float leg  = runCell("legacy",          p.name, MSG_FULL(), p.params, SEEDS).cerMean;
+        float lr   = runCell("legacy+lr",       p.name, MSG_FULL(), p.params, SEEDS).cerMean;
+        float lrs  = runCell("legacy+lr+soft",  p.name, MSG_FULL(), p.params, SEEDS).cerMean;
+        float dO   = runCellWith(detOracle(p.params),  "dO", p.name, MSG_FULL(), p.params, SEEDS).cerMean;
+        float fO   = runCellWith(fullOracle(p.params), "fO", p.name, MSG_FULL(), p.params, SEEDS).cerMean;
+        float best = std::min(lr, lrs);
+        printf("%-13s %8.4f %8.4f %8.4f %9.4f %9.4f   %+8.4f %+8.4f %+8.4f\n",
+               p.name, leg, lr, lrs, dO, fO, leg - dO, leg - best, best - dO);
+    }
+    printf("\nceiling = legacy-detOracle (max any detector can win, kalman timing).\n");
+    printf("residual = best(lr,lrsoft)-detOracle = marginal room for the FULL HMM.\n");
+    printf("Small residual => full HMM buys little over existing LR -> defer (§44 logic).\n");
+}
+
+// §52.5b #42 headroom — multi-condition robustness of the detOracle=0 claim.
+// §52.5 tested the noise ladder ONLY at 15 wpm. §43's lesson: fast x heavy cells
+// behave differently and hide the truth. The whole "build #42" verdict rests on
+// detOracle ~= 0, so verify it across WPM x noise AND report the WORST seed, not
+// just the mean (a mean-0 with a bad tail would weaken the ceiling claim).
+TEST_CASE("soft-detector headroom grid: WPM x noise, mean+worst (§52.5b #42)", "[cw][.][softdet-grid]") {
+    constexpr int SEEDS = 96;
+    const float dits[] = {80.0f, 48.0f, 40.0f, 30.0f};   // 15, 25, 30, 40 wpm
+    const int   wpms[] = {15, 25, 30, 40};
+    const float amps[] = {2.0f, 3.0f, 4.0f};
+
+    auto detOracle = [](SignalParams p) {
+        return [p](const GeneratedSignal& sig) {
+            return makeOracleCore(sig, p, OracleConfig{true, false});
+        };
+    };
+    auto worst = [](const std::vector<float>& v) {
+        return v.empty() ? 0.0f : *std::max_element(v.begin(), v.end());
+    };
+
+    printf("\n=== §52.5b #42 detOracle robustness (oracle DET + real timing, n=%d) ===\n", SEEDS);
+    printf("If detOracle stays ~0 across the grid, the noise wall is a detector problem\n");
+    printf("at every speed. A rise at fast x heavy = partly intrinsic (perfect detection\n");
+    printf("still cannot decode short elements at -10 dB) -> smaller real headroom there.\n");
+    printf("%5s %6s %9s %11s %11s\n", "wpm", "noise", "legacy", "detOrac_mean", "detOrac_worst");
+    for (size_t i = 0; i < 4; i++) {
+        for (float amp : amps) {
+            SignalParams p = profileClean(dits[i]); p.noiseAmp = amp;
+            char nm[24]; snprintf(nm, sizeof(nm), "%dwpm-n%.0f", wpms[i], amp);
+            auto leg = runCell("legacy", nm, MSG_FULL(), p, SEEDS);
+            auto dO  = runCellWith(detOracle(p), "dO", nm, MSG_FULL(), p, SEEDS);
+            printf("%5d %6.1f %9.4f %11.4f %11.4f\n",
+                   wpms[i], amp, leg.cerMean, dO.cerMean, worst(dO.cerSamples));
+        }
+    }
+}
