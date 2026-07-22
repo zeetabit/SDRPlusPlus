@@ -42,6 +42,7 @@ namespace cw {
             _rVLo.assign(R, 1.0f); _rVHi.assign(R, 1.0f);
             _rA0.assign(R, 0.5); _rA1.assign(R, 0.5);
             _emitState = 0; _rawRun = 0; _rawState = 0;
+            _wLo = _wXLo = _wXXLo = _wHi = _wXHi = _wXXHi = 0.0;
         }
 
         std::vector<KeyEvent> process(const float* env, int count) {
@@ -49,11 +50,17 @@ namespace cw {
             const long long blockStart = _abs;
             for (int i = 0; i < count; i++) {
                 const float x = env[i];
-                _win[_winHead] = x; _winHead = (_winHead + 1) % _winW;
-                if (_fill < _winW) { _fill++; }
-                if (++_sinceRefit >= REFIT_STRIDE || (!_haveParams && _fill >= MIN_FIT)) { refit(); }
+                // Fixed window only bootstraps the first fit; recursive online-EM
+                // (updateEmission) tracks the params thereafter, so QSB fades are
+                // followed without the window's long/short noise-vs-fade tradeoff.
+                if (!_haveParams) {
+                    _win[_winHead] = x; _winHead = (_winHead + 1) % _winW;
+                    if (_fill < _winW) { _fill++; }
+                    if (++_sinceRefit >= REFIT_STRIDE || _fill >= MIN_FIT) { refit(); }
+                }
 
                 forwardStep(x);                       // updates _a0,_a1 + lag ring
+                if (_haveParams) { updateEmission(x); }
                 if (_fwdOnly) { fwdDecide(blockStart, out); }
                 else if (_abs >= LAG) { finalize(_abs - LAG, blockStart, out); }
                 _abs++;
@@ -72,6 +79,7 @@ namespace cw {
         static constexpr int MIN_RUN     = 12;    // debounce: min committed run
         static constexpr float SWITCH_P  = 0.01f; // HMM transition prior
         static constexpr float FIT_LLR_MIN = 0.02f; // min bimodality to adopt a refit
+        static constexpr double ONLINE_LAM = 0.003;  // online-EM forgetting (~0.33s eff)
 
         void refit() {
             _sinceRefit = 0;
@@ -93,7 +101,37 @@ namespace cw {
                 _vLo = std::max(f.vLo, vf); _vHi = std::max(f.vHi, vf);
                 // keying-contrast SNR: mark/noise separation in dB, for the channel gate
                 _snrDb = 10.0f * std::log10((f.muHi + 1e-9f) / (f.muLo + 1e-9f));
+                // Seed the recursive online-EM sufficient stats (normalised, so
+                // wHi+wLo=1) from this one-shot bootstrap fit; online tracking takes
+                // over from here (§52 step 4: no fixed window -> fade-robust).
+                double wH = std::max(0.05, std::min(0.95, (double)f.wHi)), wL = 1.0 - wH;
+                _wHi = wH; _wXHi = wH * _muHi; _wXXHi = wH * ((double)_vHi + (double)_muHi*_muHi);
+                _wLo = wL; _wXLo = wL * _muLo; _wXXLo = wL * ((double)_vLo + (double)_muLo*_muLo);
                 _haveParams = true;
+            }
+        }
+
+        // Recursive online EM: exponentially-forgetting, POSTERIOR-WEIGHTED updates
+        // of the two-component emission stats. Only mark-posterior mass updates the
+        // mark stats, so muHi tracks the fading mark level as marks arrive and HOLDS
+        // through gaps (no all-space collapse); muLo tracks the noise floor. One
+        // timescale (ONLINE_LAM) but soft-weighted, so it adapts in element-time:
+        // fast enough for QSB, noise-robust by averaging over marks.
+        void updateEmission(float x) {
+            const double lam = ONLINE_LAM, keep = 1.0 - lam;
+            const double rHi = _a1, rLo = _a0;
+            _wHi  = keep*_wHi  + lam*rHi;       _wLo  = keep*_wLo  + lam*rLo;
+            _wXHi = keep*_wXHi + lam*rHi*x;     _wXLo = keep*_wXLo + lam*rLo*x;
+            _wXXHi= keep*_wXXHi+ lam*rHi*x*x;   _wXXLo= keep*_wXXLo+ lam*rLo*x*x;
+            if (_wHi > 1e-4 && _wLo > 1e-4) {
+                double muHi = _wXHi/_wHi, muLo = _wXLo/_wLo;
+                if (muHi > muLo + 1e-6) {
+                    double vf = 0.2*(muHi-muLo); vf *= vf;
+                    _muHi = (float)muHi; _muLo = (float)muLo;
+                    _vHi = (float)std::max(_wXXHi/_wHi - muHi*muHi, vf);
+                    _vLo = (float)std::max(_wXXLo/_wLo - muLo*muLo, vf);
+                    _snrDb = 10.0f * std::log10((float)((muHi + 1e-9) / (muLo + 1e-9)));
+                }
             }
         }
 
@@ -185,6 +223,8 @@ namespace cw {
         std::vector<double> _rA0, _rA1;
 
         uint8_t _emitState = 0, _rawState = 0; int _rawRun = 0;
+        // Recursive online-EM sufficient statistics (posterior-weighted, forgetting).
+        double _wLo = 0, _wXLo = 0, _wXXLo = 0, _wHi = 0, _wXHi = 0, _wXXHi = 0;
     };
 
 }
