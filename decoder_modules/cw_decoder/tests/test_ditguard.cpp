@@ -1698,3 +1698,52 @@ TEST_CASE("fb runaway fix v2: asymmetric prior (§52.7b #42)", "[cw][.][softdet-
     }
     printf("\nGoal: asym<1 drops runaway cells to <=legacy while wins stay <legacy.\n");
 }
+
+// §52.8 #42 speed marginalisation (SparkGap's missing piece; user's insight). A single
+// switchProb is a hard speed assumption. Run the forward pass at several speed
+// hypotheses, score each by its LOG-EVIDENCE (sum log of the pre-normalisation forward
+// mass — computable from data alone, no truth), pick the best, then decode with it.
+namespace {
+    double fbEvidence(const std::vector<float>& env, int n, float muLo, float muHi,
+                      float vLo, float vHi, float switchProb) {
+        auto emit=[&](int t,double&e0,double&e1){double d0=env[t]-muLo,d1=env[t]-muHi;double lb0=-0.5*(d0*d0/vLo+std::log(vLo)),lb1=-0.5*(d1*d1/vHi+std::log(vHi));double m=std::max(lb0,lb1);e0=std::exp(lb0-m);e1=std::exp(lb1-m);};
+        const double stay=1.0-switchProb, cross=switchProb;
+        double a0,a1,e0,e1,logEv=0;
+        emit(0,e0,e1); a0=0.5*e0;a1=0.5*e1; double z=a0+a1+1e-300; logEv+=std::log(z); a0/=z;a1/=z;
+        for(int t=1;t<n;t++){emit(t,e0,e1);double x0=(a0*stay+a1*cross)*e0,x1=(a1*stay+a0*cross)*e1;z=x0+x1+1e-300;logEv+=std::log(z);a0=x0/z;a1=x1/z;}
+        return logEv;   // emission max-normalisation cancels across switchProb -> comparable
+    }
+    std::vector<TruthTransition> fbMultiSpeed(const GeneratedSignal& sig, const SignalParams& p,
+                                              bool& pickedSlow) {
+        int n; auto env=frontEnvelope(sig,p,n); if(n<8){pickedSlow=false;return {};}
+        cw::ModelFitScorer sc; auto f=sc.score(env.data(),n); if(f.muHi-f.muLo<1e-6f){pickedSlow=false;return {};}
+        float vf=0.2f*(f.muHi-f.muLo);vf*=vf; float vLo=std::max(f.vLo,vf),vHi=std::max(f.vHi,vf);
+        // dwell 1/sw spans ~8..60 wpm element scales at 1 kHz.
+        const float sws[]={0.004f,0.008f,0.015f,0.030f,0.060f};
+        float bestSw=sws[0]; double bestEv=-1e300;
+        for(float sw:sws){double ev=fbEvidence(env,n,f.muLo,f.muHi,vLo,vHi,sw); if(ev>bestEv){bestEv=ev;bestSw=sw;}}
+        pickedSlow = bestSw<=0.008f;
+        return fbDecode(env,n,f.muLo,f.muHi,vLo,vHi,bestSw);
+    }
+}
+
+TEST_CASE("fb speed marginalisation vs fixed prior (§52.8 #42)", "[cw][.][softdet-marg]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; bool win; };
+    auto nz=[](float dit,float amp){auto p=profileClean(dit);p.noiseAmp=amp;return p;};
+    const Prof profs[] = {
+        {"15wpm-n2",nz(80,2),true},{"25wpm-n3",nz(48,3),true},{"30wpm-n3",nz(40,3),true},
+        {"15wpm-n3",nz(80,3),false},{"15wpm-n4",nz(80,4),false},
+        {"clean-15",profileClean(80.0f),true},{"clean-40",profileClean(30.0f),true},
+    };
+    auto mk=[](SignalParams p){return [p](const GeneratedSignal& sig){bool s;auto tr=fbMultiSpeed(sig,p,s);return std::unique_ptr<cw::IDecodeCore>(std::make_unique<cw::StagedCore>(std::make_unique<cw::EnvelopeFrontEnd>(),std::make_unique<OracleDetector>(tr),std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),std::make_unique<cw::BeamSymbolDecoder>()));};};
+    printf("\n=== §52.8 fb speed-marginalised (evidence-selected, n=%d) ===\n", SEEDS);
+    printf("%-10s %8s %6s %10s  %s\n", "profile","legacy","win?","fbMarg","note");
+    for(auto& pr:profs){
+        float leg=runCell("legacy",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean;
+        float h=runCellWith(mk(pr.params),"m",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean;
+        const char* note = h < leg-1e-4f ? "better" : (h > leg+1e-4f ? "WORSE" : "=");
+        printf("%-10s %8.4f %6s %10.4f  %s\n", pr.name, leg, pr.win?"WIN":"run", h, note);
+    }
+    printf("\nDoes evidence-based speed selection fix the runaway (no cheating on speed)?\n");
+}

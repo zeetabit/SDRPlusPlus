@@ -4961,3 +4961,38 @@ routing signal needs speed+SNR, since separation alone cannot separate the regim
 **Status: fb validated, wins real, runaway understood (not a bug — information limit).**
 #42 is partially reachable and the first genuine movement of the noise wall; a shippable
 version is a detector-routing build, not a runaway "fix".
+
+### 52.8 #42 speed marginalisation works (user's insight) — but runaway is orthogonal (2026-07-22)
+
+A single switchProb is a hard speed assumption, and §52.6/7's per-cell sweep cheated by
+using the known answer. Fixed per the user's insight: run the forward pass at several
+speed hypotheses (dwell ~8–60 wpm), score each by LOG-EVIDENCE (sum log of the
+pre-normalisation forward mass — the emission max-normalisation cancels across
+switchProb, so it is comparable, and it needs NO ground truth), select the best, decode
+with it. `[softdet-marg]`, n=96:
+
+| profile | legacy | fb speed-marginalised |
+|---|---|---|
+| clean-15 | 0.000 | 0.000 |
+| clean-40 | 0.000 | 0.000 |
+| 15wpm-n2 | 0.1227 | 0.0773 (win) |
+| 25wpm-n3 | 0.9567 | 0.6381 (win) |
+| 30wpm-n3 | 0.9123 | 0.5737 (win) |
+| 15wpm-n3 | 0.8173 | 1.0502 (runaway) |
+| 15wpm-n4 | 0.9108 | 2.4507 (runaway) |
+
+**Positive: speed marginalisation is a real capability.** Evidence-based selection makes
+the detector SPEED-AGNOSTIC with no cheating — clean-15 AND clean-40 both decode
+perfectly and all wins are preserved. This removes the fixed-prior confound.
+
+**But the runaway is ORTHOGONAL to speed.** Even with the correct slow prior selected by
+evidence, 15wpm-n3/n4 still runs away. Three mechanisms now defeated (hysteresis §52.7,
+asymmetric prior §52.7b, speed marginalisation §52.8) — the failure is not the dwell but
+the SPURIOUS-TO-SIGNAL RATIO: slow speed = longer gaps = more sustained noise excursions
+that are statistically identical to dits at −10 dB. Information-theoretic, confirmed.
+
+**Next lever (hands itself to us from marginalisation):** the detector now KNOWS its
+selected speed, hence the EXPECTED element density; a runaway emits an implausible
+density for that speed. A self-monitoring fallback (implausible insertion rate ->
+Schmitt for that segment) is an in-detector regime gate using only quantities the
+detector already computes — no external speed/SNR needed. To try next.
