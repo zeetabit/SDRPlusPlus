@@ -1564,3 +1564,137 @@ TEST_CASE("validated fb soft detector v2 (§52.6)", "[cw][.][softdet-v2]") {
     }
     printf("\nfbOracle clean must be ~0 (gate). Then oracleFrac = achievable ceiling with perfect params.\n");
 }
+
+// §52.7 #42 runaway fix — posterior hysteresis. The slow+heavy runaway (CER>1) is
+// spurious marks inserted in long noisy gaps. fbDecode thresholds gamma at 0.5;
+// this ENTERS mark only when gamma1 > hi (strong evidence) and LEAVES when < lo,
+// so weak noise marks never cross hi. Sweeps hi on runaway cells AND win cells to
+// confirm the fix contains the runaway without losing the wins.
+namespace {
+    std::vector<TruthTransition> fbDecodeHyst(const std::vector<float>& env, int n,
+                                              float muLo, float muHi, float vLo, float vHi,
+                                              float switchProb, float hi, float lo) {
+        if (muHi - muLo < 1e-6f) return {};
+        auto emit=[&](int t,double&e0,double&e1){double d0=env[t]-muLo,d1=env[t]-muHi;double lb0=-0.5*(d0*d0/vLo+std::log(vLo)),lb1=-0.5*(d1*d1/vHi+std::log(vHi));double m=std::max(lb0,lb1);e0=std::exp(lb0-m);e1=std::exp(lb1-m);};
+        const double stay=1.0-switchProb, cross=switchProb;
+        std::vector<double> a0(n),a1(n),b0(n),b1(n),c(n);
+        double e0,e1; emit(0,e0,e1);
+        a0[0]=0.5*e0;a1[0]=0.5*e1;c[0]=1.0/(a0[0]+a1[0]+1e-300);a0[0]*=c[0];a1[0]*=c[0];
+        for(int t=1;t<n;t++){emit(t,e0,e1);double x0=(a0[t-1]*stay+a1[t-1]*cross)*e0,x1=(a1[t-1]*stay+a0[t-1]*cross)*e1;c[t]=1.0/(x0+x1+1e-300);a0[t]=x0*c[t];a1[t]=x1*c[t];}
+        b0[n-1]=1.0;b1[n-1]=1.0;
+        for(int t=n-2;t>=0;t--){emit(t+1,e0,e1);b0[t]=(stay*e0*b0[t+1]+cross*e1*b1[t+1])*c[t];b1[t]=(stay*e1*b1[t+1]+cross*e0*b0[t+1])*c[t];}
+        // hysteresis on the normalised posterior gamma1
+        std::vector<uint8_t> path(n); uint8_t st=0;
+        for(int t=0;t<n;t++){double g1=a1[t]*b1[t],g0=a0[t]*b0[t];double g=g1/(g1+g0+1e-300);
+            if(!st && g>hi) st=1; else if(st && g<lo) st=0; path[t]=st;}
+        const int minRun=12;
+        for(int pass=0;pass<3;pass++){int i=0;while(i<n){int j=i;while(j<n&&path[j]==path[i])j++;if(j-i<minRun&&i>0)for(int k=i;k<j;k++)path[k]=path[i-1];i=j;}}
+        std::vector<TruthTransition> out;uint8_t prev=0;for(int t=0;t<n;t++)if(path[t]!=prev){out.push_back({(long long)t,path[t]==1});prev=path[t];}return out;
+    }
+    std::vector<TruthTransition> fbSelfHyst(const GeneratedSignal& sig, const SignalParams& p, float sw, float hi, float lo) {
+        int n; auto env=frontEnvelope(sig,p,n); if(n<8)return {};
+        cw::ModelFitScorer sc; auto f=sc.score(env.data(),n); if(f.muHi-f.muLo<1e-6f)return {};
+        float vf=0.2f*(f.muHi-f.muLo);vf*=vf;
+        return fbDecodeHyst(env,n,f.muLo,f.muHi,std::max(f.vLo,vf),std::max(f.vHi,vf),sw,hi,lo);
+    }
+}
+
+TEST_CASE("fb runaway fix via posterior hysteresis (§52.7 #42)", "[cw][.][softdet-runaway]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; bool win; };
+    auto nz=[](float dit,float amp){auto p=profileClean(dit);p.noiseAmp=amp;return p;};
+    const Prof profs[] = {
+        {"15wpm-n2", nz(80,2), true}, {"25wpm-n3", nz(48,3), true}, {"30wpm-n3", nz(40,3), true},
+        {"15wpm-n3", nz(80,3), false}, {"15wpm-n4", nz(80,4), false},
+    };
+    const float his[] = {0.5f, 0.8f, 0.95f, 0.99f};
+    auto mk=[](SignalParams p,float sw,float hi){return [p,sw,hi](const GeneratedSignal& sig){return std::unique_ptr<cw::IDecodeCore>(std::make_unique<cw::StagedCore>(std::make_unique<cw::EnvelopeFrontEnd>(),std::make_unique<OracleDetector>(fbSelfHyst(sig,p,sw,hi,0.5f)),std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),std::make_unique<cw::BeamSymbolDecoder>()));};};
+
+    printf("\n=== §52.7 fb runaway fix: posterior hysteresis (sw=0.01, n=%d) ===\n", SEEDS);
+    printf("%-10s %8s %6s", "profile", "legacy", "win?");
+    for(float hi:his) printf("   hi=%.2f", hi);
+    printf("\n");
+    for(auto& pr:profs){
+        float leg=runCell("legacy",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean;
+        printf("%-10s %8.4f %6s", pr.name, leg, pr.win?"WIN":"run");
+        for(float hi:his){float h=runCellWith(mk(pr.params,0.01f,hi),"h",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean;printf(" %8.4f",h);}
+        printf("\n");
+    }
+    printf("\nGoal: runaway cells drop to <= legacy while win cells stay < legacy.\n");
+}
+
+// §52.7 diag — why does 15wpm-n3 run away but 25wpm-n3 win at the SAME noise? Print
+// fitted separation and fb transition count vs truth (insertion => fbTr >> truthTr).
+TEST_CASE("runaway mechanism: separation & insertion (§52.7)", "[cw][.][runaway-diag]") {
+    struct C { const char* nm; float dit; float amp; };
+    for (C c : {C{"15wpm-n2",80,2}, C{"25wpm-n3",48,3}, C{"30wpm-n3",40,3}, C{"15wpm-n3",80,3}, C{"15wpm-n4",80,4}}) {
+        double tr=0,ft=0,sepAcc=0; int K=8;
+        for (int s=0;s<K;s++){
+            auto p=profileClean(c.dit); p.noiseAmp=c.amp; p.seed=100+s*13;
+            auto sig=generateMessage("CQ CQ DE W1AW W1AW TEST", p);
+            int n; auto env=frontEnvelope(sig,p,n); if(n<8)continue;
+            cw::ModelFitScorer sc; auto f=sc.score(env.data(),n);
+            float sep=(f.muHi-f.muLo)/std::sqrt(0.5f*(f.vLo+f.vHi)+1e-9f);
+            float vf=0.2f*(f.muHi-f.muLo);vf*=vf;
+            auto fb=fbDecode(env,n,f.muLo,f.muHi,std::max(f.vLo,vf),std::max(f.vHi,vf),0.01f);
+            auto tt=truthTransitions(sig,p.sampleRate,1000.0f);
+            tr+=tt.size(); ft+=fb.size(); sepAcc+=sep;
+        }
+        printf("%-10s sep=%.2f  truthTr=%.0f  fbTr=%.0f  (fb/truth=%.2fx)\n",
+               c.nm, sepAcc/K, tr/K, ft/K, ft/tr);
+    }
+    printf("\nsep = (muHi-muLo)/sd (d-prime). fbTr>>truthTr => insertion runaway.\n");
+}
+
+// §52.7b runaway fix v2 — ASYMMETRIC transition prior. Insertions are space->mark->
+// space excursions in noisy gaps. Make P(space->mark)=switchProb*asym (asym<1) while
+// P(mark->space)=switchProb: the forward-backward itself resists ENTERING mark unless
+// the emission persistently and strongly favours it, suppressing spurious marks at the
+// source (unlike post-hoc hysteresis). Swept on runaway AND win cells.
+namespace {
+    std::vector<TruthTransition> fbDecodeAsym(const std::vector<float>& env, int n,
+                                              float muLo, float muHi, float vLo, float vHi,
+                                              float switchProb, float asym) {
+        if (muHi-muLo<1e-6f) return {};
+        auto emit=[&](int t,double&e0,double&e1){double d0=env[t]-muLo,d1=env[t]-muHi;double lb0=-0.5*(d0*d0/vLo+std::log(vLo)),lb1=-0.5*(d1*d1/vHi+std::log(vHi));double m=std::max(lb0,lb1);e0=std::exp(lb0-m);e1=std::exp(lb1-m);};
+        const double up=switchProb*asym, dn=switchProb, sS=1.0-up, sM=1.0-dn;  // sS stay-space, sM stay-mark
+        std::vector<double> a0(n),a1(n),b0(n),b1(n),c(n);
+        double e0,e1; emit(0,e0,e1);
+        a0[0]=0.5*e0;a1[0]=0.5*e1;c[0]=1.0/(a0[0]+a1[0]+1e-300);a0[0]*=c[0];a1[0]*=c[0];
+        for(int t=1;t<n;t++){emit(t,e0,e1);double x0=(a0[t-1]*sS+a1[t-1]*dn)*e0,x1=(a1[t-1]*sM+a0[t-1]*up)*e1;c[t]=1.0/(x0+x1+1e-300);a0[t]=x0*c[t];a1[t]=x1*c[t];}
+        b0[n-1]=1.0;b1[n-1]=1.0;
+        for(int t=n-2;t>=0;t--){emit(t+1,e0,e1);b0[t]=(sS*e0*b0[t+1]+up*e1*b1[t+1])*c[t];b1[t]=(sM*e1*b1[t+1]+dn*e0*b0[t+1])*c[t];}
+        std::vector<uint8_t> path(n);for(int t=0;t<n;t++)path[t]=(a1[t]*b1[t]>a0[t]*b0[t])?1:0;
+        const int minRun=12;for(int pass=0;pass<3;pass++){int i=0;while(i<n){int j=i;while(j<n&&path[j]==path[i])j++;if(j-i<minRun&&i>0)for(int k=i;k<j;k++)path[k]=path[i-1];i=j;}}
+        std::vector<TruthTransition> out;uint8_t prev=0;for(int t=0;t<n;t++)if(path[t]!=prev){out.push_back({(long long)t,path[t]==1});prev=path[t];}return out;
+    }
+    std::vector<TruthTransition> fbSelfAsym(const GeneratedSignal& sig, const SignalParams& p, float sw, float asym) {
+        int n; auto env=frontEnvelope(sig,p,n); if(n<8)return {};
+        cw::ModelFitScorer sc; auto f=sc.score(env.data(),n); if(f.muHi-f.muLo<1e-6f)return {};
+        float vf=0.2f*(f.muHi-f.muLo);vf*=vf;
+        return fbDecodeAsym(env,n,f.muLo,f.muHi,std::max(f.vLo,vf),std::max(f.vHi,vf),sw,asym);
+    }
+}
+
+TEST_CASE("fb runaway fix v2: asymmetric prior (§52.7b #42)", "[cw][.][softdet-asym]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; bool win; };
+    auto nz=[](float dit,float amp){auto p=profileClean(dit);p.noiseAmp=amp;return p;};
+    const Prof profs[] = {
+        {"15wpm-n2",nz(80,2),true},{"25wpm-n3",nz(48,3),true},{"30wpm-n3",nz(40,3),true},
+        {"15wpm-n3",nz(80,3),false},{"15wpm-n4",nz(80,4),false},
+    };
+    const float asyms[] = {1.0f, 0.3f, 0.1f, 0.03f};
+    auto mk=[](SignalParams p,float sw,float a){return [p,sw,a](const GeneratedSignal& sig){return std::unique_ptr<cw::IDecodeCore>(std::make_unique<cw::StagedCore>(std::make_unique<cw::EnvelopeFrontEnd>(),std::make_unique<OracleDetector>(fbSelfAsym(sig,p,sw,a)),std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),std::make_unique<cw::BeamSymbolDecoder>()));};};
+    printf("\n=== §52.7b fb asymmetric prior (sw=0.01, n=%d) ===\n", SEEDS);
+    printf("%-10s %8s %5s", "profile","legacy","win?");
+    for(float a:asyms) printf("  asym=%.2f",a);
+    printf("\n");
+    for(auto& pr:profs){
+        float leg=runCell("legacy",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean;
+        printf("%-10s %8.4f %5s", pr.name, leg, pr.win?"WIN":"run");
+        for(float a:asyms){float h=runCellWith(mk(pr.params,0.01f,a),"a",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean;printf(" %9.4f",h);}
+        printf("\n");
+    }
+    printf("\nGoal: asym<1 drops runaway cells to <=legacy while wins stay <legacy.\n");
+}

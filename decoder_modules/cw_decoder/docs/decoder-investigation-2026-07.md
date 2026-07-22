@@ -4930,3 +4930,34 @@ several regimes and beats legacy; the remaining work is the slow+heavy runaway. 
 the first evidence in the campaign that the noise wall is partially movable. Next:
 fix the runaway (conservative at low SNR), then a full paired adjudication vs legacy —
 and if it survives, the first shippable attack on the noise wall.
+
+### 52.7 #42 runaway — information-theoretic, not detector-fixable; needs routing (2026-07-22)
+
+The slow+heavy runaway (15wpm-n3/n4, CER>1) is INSERTION (spurious marks): fb/truth
+transition ratio 1.70x (n3) / 2.61x (n4) vs 1.08–1.36x on the win cells. Two principled
+fixes, both measured, both no effect:
+- Posterior hysteresis (enter mark only at gamma>hi): `[softdet-runaway]` — WORSE
+  (spurious marks have high confident posterior; thresholding cannot reject them).
+- Asymmetric transition prior (P(space->mark)=switchProb*asym, asym down to 0.03):
+  `[softdet-asym]` — no change (emission likelihood over a sustained excursion
+  compounds and overwhelms the prior).
+
+**Diagnosis: emission-limited, not decode-limited.** At −10 dB + slow speed a sustained
+40-sample noise excursion and a 40-sample dit have identical envelope statistics — the
+information to reject spurious marks is not present. Separation cannot gate it either:
+25wpm-n3 (sep 2.03) WINS while 15wpm-n3 (sep 2.07) runs away — same separation, opposite
+outcome, so the axis is SPEED×length (slow = longer message + longer gaps = more
+accumulated insertions), not SNR.
+
+**Consequence for shipping.** fb cannot decode 15wpm-n3/n4 (nor can anything — legacy is
+0.82/0.91 there, also garbage), but it fails by INSERTION (CER>1) where legacy fails by
+DELETION (CER->1). For a clean paired adjudication fb must not be WORSE than legacy in
+that regime. The runaway is not removable inside the detector, so the shipping path is
+REGIME-ROUTING: use fb where it wins (moderate noise; fast+heavy, where it captures
+32–51% and beats legacy AND beats LR), fall back to the Schmitt detector at slow+heavy.
+That is the `select` pattern at the detector level — a real next-phase design (the
+routing signal needs speed+SNR, since separation alone cannot separate the regimes).
+
+**Status: fb validated, wins real, runaway understood (not a bug — information limit).**
+#42 is partially reachable and the first genuine movement of the noise wall; a shippable
+version is a detector-routing build, not a runaway "fix".
