@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -110,7 +111,21 @@ namespace {
         for (char c : t) { if (!std::isdigit((unsigned char)c)) { return false; } }
         return true;
     }
-    struct Plaus { int chars = 0; int tokens = 0; int good = 0; };
+    // Distinct callsigns decoded >=2x. A near-truth correctness signal: token
+    // plausibility can be inflated by a chatty decoder, but the SAME callsign
+    // appearing repeatedly is extremely unlikely from noise — in a QSO/pileup a
+    // real station sends its call several times, so this counts genuine copy.
+    int repeatedCallsigns(const std::string& text) {
+        std::map<std::string,int> freq;
+        std::istringstream ss(text); std::string tok;
+        while (ss >> tok) {
+            std::string u; for (char c : tok) { u += (char)std::toupper((unsigned char)c); }
+            if (isCallsign(u)) { freq[u]++; }
+        }
+        int rep = 0; for (auto& kv : freq) { if (kv.second >= 2) { rep++; } }
+        return rep;
+    }
+    struct Plaus { int chars = 0; int tokens = 0; int good = 0; int rpt = 0; };
     Plaus plausibility(const std::string& text) {
         Plaus p; p.chars = (int)text.size();
         std::istringstream ss(text); std::string tok;
@@ -119,6 +134,7 @@ namespace {
             p.tokens++;
             if (isCallsign(u) || isCode(u) || isNumeric(u)) { p.good++; }
         }
+        p.rpt = repeatedCallsigns(text);
         return p;
     }
 
@@ -151,22 +167,26 @@ TEST_CASE("real 40m pileup — truthless core benchmark", "[cw][.][realpileup]")
     printf("%-22s %5s", "fixture", "dB");
     for (auto& c : cores) { printf(" | %-16s", c.c_str()); }
     printf("\n%-22s %5s", "", "");
-    for (size_t i = 0; i < cores.size(); i++) { printf(" | %4s %4s %5s", "good", "tok", "rate"); }
+    for (size_t i = 0; i < cores.size(); i++) { printf(" | %4s %5s %3s", "good", "rate", "rpt"); }
     printf("\n");
 
+    std::vector<int> sumGood(cores.size(), 0), sumRpt(cores.size(), 0);
     for (auto& fx : fixtures) {
         int rate = 0;
         auto iq = loadIqWav(dir + "/" + fx.name, rate);
         if (iq.empty()) { WARN("unreadable fixture: " << fx.name); continue; }
         printf("%-22s %5.0f", fx.name.c_str(), fx.snr);
-        for (auto& c : cores) {
-            Plaus p = plausibility(decode(iq, fx.pitch, c));
+        for (size_t ci = 0; ci < cores.size(); ci++) {
+            Plaus p = plausibility(decode(iq, fx.pitch, cores[ci]));
             float goodRate = p.tokens ? (float)p.good / p.tokens : 0.0f;
-            printf(" | %4d %4d %5.2f", p.good, p.tokens, goodRate);
+            printf(" | %4d %5.2f %3d", p.good, goodRate, p.rpt);
+            sumGood[ci] += p.good; sumRpt[ci] += p.rpt;
         }
         printf("\n");
     }
-    printf("\nStrong signals (>=25dB) anchor correctness; ranking = plausible-token yield down the gradient.\n");
+    printf("%-22s %5s", "TOTAL", "");
+    for (size_t ci = 0; ci < cores.size(); ci++) { printf(" | %4d %5s %3d", sumGood[ci], "", sumRpt[ci]); }
+    printf("\n\nrpt = distinct callsigns copied >=2x (near-truth). good = plausible tokens. Rank by rpt then good.\n");
 }
 
 TEST_CASE("real pileup — strong-signal decoded text (eyeball anchor)", "[cw][.][realpileup-text]") {
