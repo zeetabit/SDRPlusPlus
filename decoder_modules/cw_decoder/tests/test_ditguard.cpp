@@ -2061,6 +2061,96 @@ TEST_CASE("streaming online fb + matched filter (§52 step 2)", "[cw][.][softdet
     printf("\nFull streaming stack. Clean gate first; then W1200 should beat legacy where batchNarr does.\n");
 }
 
+// §52 step 4b — see what the fb core actually decodes on clean (diagnosis).
+TEST_CASE("fb core clean text dump (§52 step 4b)", "[cw][.][fbtext]") {
+    auto p = profileClean(80.0f); p.seed = 1234;
+    auto sig = generateMessage(MSG_FULL(), p);
+    printf("\n=== §52 step 4b clean text (truth vs cores) ===\n");
+    printf("truth : %s\n", std::string(MSG_FULL()).c_str());
+    for (const char* core : {"legacy", "legacy+fb", "legacy+fb+wide"}) {
+        cw::Channel ch; ch.init(0, p.toneFreq, core);
+        for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+            int n = std::min(512, (int)sig.samples.size() - off);
+            ch.process(n, &sig.samples[off]);
+        }
+        printf("%-14s: %s  (snr=%.1f wpm=%.1f)\n", core, ch.text.getText().c_str(), ch.snr, ch.wpm);
+    }
+    printf("\n");
+}
+
+// §52 step 4a — isolate the FBDetector CLASS: feed the batch probe's exact
+// envelope block-by-block through the real streaming detector and compare its
+// transitions to fbStreamOnline. If they match, any core failure is in the
+// StagedCore pipeline (boxcar mf / sqFactor gate), not the detector.
+TEST_CASE("FBDetector class vs batch fbStreamOnline (§52 step 4a)", "[cw][.][fbclass]") {
+    auto p = profileClean(80.0f);       // clean 15wpm
+    p.seed = 1234;
+    auto sig = generateMessage(MSG_FULL(), p);
+    int n; auto env = frontEnvelope(sig, p, n);
+    REQUIRE(n > 100);
+
+    auto batch = fbStreamOnline(env, n, 0.01f, 48, 1200, 128);   // W=1200 like the core
+
+    cw::FBDetector det; det.init(1000.0f);
+    std::vector<TruthTransition> streamTr; long long absBase = 0;
+    const int BLK = 64;
+    for (int off = 0; off < n; off += BLK) {
+        int c = std::min(BLK, n - off);
+        auto evs = det.process(env.data() + off, c);
+        for (auto& e : evs) { streamTr.push_back({absBase + e.sampleOffset, e.keyDown}); }
+        absBase += c;
+    }
+    printf("\n=== §52 step 4a FBDetector class vs batch (clean 15wpm) ===\n");
+    printf("batch transitions: %d   stream transitions: %d\n", (int)batch.size(), (int)streamTr.size());
+
+    // Decode BOTH via the same Oracle+StagedCore path (isolates transitions from
+    // the live getSNR/timing path). If stream ~= batch here but the live fb core
+    // garbles, the bug is the SNR/sqFactor path, not the detector output.
+    auto decodeTr = [&](std::vector<TruthTransition> tr){
+        cw::Channel ch;
+        ch.initWithCore(0, p.toneFreq, std::make_unique<cw::StagedCore>(
+            std::make_unique<cw::EnvelopeFrontEnd>(),
+            std::make_unique<OracleDetector>(tr),
+            std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),
+            std::make_unique<cw::BeamSymbolDecoder>()));
+        for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+            int cc = std::min(512, (int)sig.samples.size() - off);
+            ch.process(cc, &sig.samples[off]);
+        }
+        return ch.text.getText();
+    };
+    printf("truth : %s\n", std::string(MSG_FULL()).c_str());
+    printf("batch : %s\n", decodeTr(batch).c_str());
+    printf("stream: %s\n", decodeTr(streamTr).c_str());
+    printf("\nStream should match batch (~perfect on clean) bar the first warmup char.\n");
+}
+
+// §52 step 4 — the REGISTERED fb core (streaming FBDetector, src/) vs legacy.
+// Clean is the hard gate (must reproduce the probe's ~0). Then the win cells must
+// beat legacy as the batch/streaming probes predicted. This exercises the real
+// online detector through the full StagedCore, not the batch probe.
+TEST_CASE("registered fb core vs legacy (§52 step 4)", "[cw][.][fbcore]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; bool cleanGate; };
+    auto nz=[](float dit,float amp){auto p=profileClean(dit);p.noiseAmp=amp;return p;};
+    const Prof profs[] = {
+        {"clean-15", profileClean(80.0f), true}, {"clean-25", profileClean(48.0f), true},
+        {"clean-40", profileClean(30.0f), true},
+        {"15wpm-n2",nz(80,2),false},{"25wpm-n3",nz(48,3),false},{"30wpm-n3",nz(40,3),false},
+        {"15wpm-n3",nz(80,3),false},{"15wpm-n4",nz(80,4),false},
+    };
+    printf("\n=== §52 step 4 registered fb core (n=%d) — clean is a hard gate ===\n", SEEDS);
+    printf("%-10s %8s %8s %8s  %s\n", "profile", "legacy", "fb", "fb+wide", "note");
+    for (auto& pr : profs) {
+        float leg = runCell("legacy",         pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float fb  = runCell("legacy+fb",      pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float fbw = runCell("legacy+fb+wide", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        const char* note = pr.cleanGate ? (fb < 0.05f ? "CLEAN-OK" : "CLEAN-FAIL!") : "";
+        printf("%-10s %8.4f %8.4f %8.4f  %s\n", pr.name, leg, fb, fbw, note);
+    }
+    printf("\nfb uses adaptive narrow BPF; fb+wide is fixed 100Hz. Clean must be ~0 before trusting noise.\n");
+}
+
 // §52 step 3 — squelch on the model-fit LLR (#41). The full streaming stack runs
 // away at 15wpm-n4 because noise-only gap windows get split into a spurious mixture.
 // The bimodal-vs-null LLR is ~0 for noise-only and high (~1.8) for real keyed CW, so

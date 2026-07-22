@@ -2,6 +2,7 @@
 #include "core.h"
 #include "dsp.h"
 #include "tone_detector.h"
+#include "fb_detector.h"
 #include "timing.h"
 #include "morse_tree.h"
 
@@ -142,6 +143,26 @@ namespace cw {
         float _theta, _boundHi, _boundLo;
         bool _soft, _adaptive;
         float _externalDitMs = 0.0f;
+    };
+
+    // Streaming forward-backward soft detector (docs §52 #42). Same IDetector
+    // role, different decision rule again: marginal HMM posterior with fixed-lag
+    // smoothing and online windowed emission params. Rejects noise by evidence
+    // duration and copies fast+heavy where the LR detector failed (§25).
+    class ForwardBackwardDetector : public IDetector {
+    public:
+        void init(float internalRate) override { det.init(internalRate); }
+        void reset() override { det.reset(); }
+        std::vector<KeyEvent> process(const float* env, int count) override {
+            return det.process(env, count);
+        }
+        float getSNR() const override { return det.getSNR(); }
+        bool isKeyDown() const override { return det.isKeyDown(); }
+        void preseed(float level, int count) override { det.preseed(level, count); }
+        const char* name() const override { return "fb"; }
+
+    private:
+        FBDetector det;
     };
 
     // ── Stage 3: timing ─────────────────────────────────────────

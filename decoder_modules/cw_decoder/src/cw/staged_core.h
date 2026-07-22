@@ -3,6 +3,7 @@
 #include "stages.h"
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 
 // StagedCore — the classic pipeline as a composition of swappable stages:
 //
@@ -42,12 +43,13 @@ namespace cw {
                    float minElemScale = 1.0f,
                    bool adaptiveBpf = false,
                    bool bpfGarbageRevert = false,
-                   bool bpfReeval = false)
+                   bool bpfReeval = false,
+                   bool matchedFilter = true)
             : frontEnd(std::move(fe)), detector(std::move(det)),
               timing(std::move(tim)), symbols(std::move(sym)),
               mfResizePolicy(mfResize), minElementScale(minElemScale),
               adaptiveBpf(adaptiveBpf), bpfGarbageRevert(bpfGarbageRevert),
-              bpfReeval(bpfReeval) {}
+              bpfReeval(bpfReeval), _mfEnabled(matchedFilter) {}
 
         // Runtime noise-aware BPF geometry (docs §29–33), from the locked WPM
         // (dit, ms) and the INPUT-referred SNR (dB, pre-BPF; frontEnd
@@ -398,6 +400,9 @@ namespace cw {
         static constexpr int CORE_MAX_ENVELOPE = 65536;
 
         void applyMatchedFilter(const float* in, float* out, int count) {
+            // The fb detector does its own fixed-lag smoothing; a boxcar in front of
+            // it corrupts its emission fit (§52 step 4). Pass through when disabled.
+            if (!_mfEnabled) { std::memcpy(out, in, count * sizeof(float)); return; }
             int targetW = computeFilterWindow();
             if (targetW != mfCurrentW) {
                 float fill = 0.0f;
@@ -536,6 +541,7 @@ namespace cw {
         bool bpfGarbageRevert = false;
         bool bpfReeval = false;
         bool bpfNarrowed = false;
+        bool _mfEnabled = true;   // §52: fb core disables the boxcar matched filter
         bool bpfGaveUp = false;
         long long narrowStartSample = 0;
         long long keyDownsAtNarrow = 0;

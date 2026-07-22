@@ -31,6 +31,22 @@ namespace cw {
                 mfResize, 1.0f, adaptiveBpf, bpfGarbageRevert, bpfReeval);
         }
 
+        // Streaming forward-backward detector (docs §52 #42). adaptiveBpf pairs it
+        // with the narrow speed-matched pre-detection filter (#31) that was
+        // variance-blocked on the Schmitt trigger — the robust detector is the
+        // missing partner. bpfCutoff defaults wide; the adaptive path narrows it.
+        inline std::unique_ptr<IDecodeCore> makeFB(
+                TimingStrategy timing, bool adaptiveBpf = false,
+                float bpfCutoff = 40.0f, float bpfTrans = 40.0f,
+                float smoothCutoff = 25.0f, float smoothTrans = 25.0f) {
+            return std::make_unique<StagedCore>(
+                std::make_unique<EnvelopeFrontEnd>(bpfCutoff, bpfTrans, smoothCutoff, smoothTrans),
+                std::make_unique<ForwardBackwardDetector>(),
+                std::make_unique<AdaptiveTimingStage>(timing),
+                std::make_unique<BeamSymbolDecoder>(),
+                MF_RESET, 1.0f, adaptiveBpf, false, false, /*matchedFilter=*/false);
+        }
+
         // Likelihood-ratio detector (docs §24). Its own factory: the CUSUM
         // parameters are specific to this detector. Timing is a parameter so the
         // headline test (does a better detector rescue log?) is one line.
@@ -126,6 +142,19 @@ namespace cw {
             //    not magnitude — the discriminator §20.8 showed timing lacks.
             //    legacy+lr+log is the headline test: does a spike-resistant
             //    detector rescue log's runaway? ──
+            // ── Streaming forward-backward soft detector (docs §52 #42). The
+            //    HMM posterior + fixed-lag smoothing that copies fast+heavy where
+            //    LR failed. +fb pairs it with the adaptive narrow BPF; +fb+fixed
+            //    is a plain wide front end for the batch-reproduction probe. ──
+            {"legacy+fb", "Forward-backward soft detector + fixed 40Hz matched BPF + Kalman timing",
+             []{ return detail::makeFB(TIMING_KALMAN, false, 40.0f, 40.0f, 25.0f, 25.0f); }},
+
+            {"legacy+fb+wide", "Forward-backward soft detector, fixed wide 100Hz BPF + Kalman timing",
+             []{ return detail::makeFB(TIMING_KALMAN, false, 100.0f, 100.0f, 80.0f, 80.0f); }},
+
+            {"legacy+fb+adapt", "Forward-backward soft detector + adaptive BPF + Kalman timing",
+             []{ return detail::makeFB(TIMING_KALMAN, true, 100.0f, 100.0f); }},
+
             {"legacy+lr", "Likelihood-ratio detector + Kalman timing",
              []{ return detail::makeLR(TIMING_KALMAN); }},
 
