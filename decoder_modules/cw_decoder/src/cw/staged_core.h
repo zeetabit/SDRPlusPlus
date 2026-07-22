@@ -140,22 +140,27 @@ namespace cw {
             // narrow so heavy noise never gets a wide warmup that floods the detector
             // into a runaway; clean widens the moment inputSnr reads high. Hysteresis
             // on the threshold band avoids hunting on a marginal estimate.
-            if (_fbBpf && frontEnd->inputSnrReadyFast()) {
+            // Decide ONCE at the fast gate, then commit — re-evaluating every block
+            // makes a fading (QSB) signal hunt across the threshold, and per-seed jitter
+            // straddles it. The narrow START already protects the [0, gate] window on
+            // AWGN, so a single decision at ~0.5s is both stable and timely.
+            if (_fbBpf && !_fbDecided && frontEnd->inputSnrReadyFast()) {
                 const float in = frontEnd->getInputSnrDb();
-                // Widen for genuinely clean signal. At the fast 0.5s gate inputSnr is
-                // not fully converged (clean reads ~30, not its 65 steady state), so
-                // the threshold is 25, not 40 — higher would fail to widen clean in
-                // time. A consequence: the very strongest real signals (which read
-                // ~25-30 at the fast gate) also widen; their fb copy is a touch worse
-                // than narrow, but net token yield is highest here. Hysteresis [15,25].
-                const bool wantWide = (in > 25.0f) || (in > 15.0f && _fbCurBpf > 80.0f);
-                const float bpf = wantWide ? 140.0f : 32.0f;
+                // Narrow ONLY for genuine broadband (AWGN) noise. Fast-gate calibration
+                // (§52 step 4): AWGN reads ~6 dB, but hand-keyed/QRN read ~10 dB
+                // (jitter/impulses are NOT broadband) — and for those narrowing HURTS
+                // (fb+wide ~ legacy) while the detector copes wide. Widen above ~8 dB:
+                // AWGN stays narrow (keeps the fast-noise wins), hand-keyed/QRN stay
+                // wide (match legacy). QRM reads below AWGN (unfixable here); QSB/
+                // Farnsworth are detector limits.
+                const float bpf = (in > 8.0f) ? 140.0f : 32.0f;
                 if (bpf != _fbCurBpf) {
                     const float sm = 0.625f * bpf;
                     frontEnd->setBandwidth(bpf, bpf);
                     frontEnd->setSmoothing(sm, std::max(sm, 25.0f));
                     _fbCurBpf = bpf;
                 }
+                _fbDecided = true;
             }
             timing->setSnr(_snr);   // §48: SNR-gated regime selection (no-op for other timings)
             // B: smoothed getSNR, started only AFTER the estimate has converged.
@@ -388,6 +393,7 @@ namespace cw {
             timing->reset();
             symbols->reset();
             totalSamples = 0;
+            _fbDecided = false; _fbCurBpf = 1e9f;
             lastKeyDown = -1;
             lastKeyUp = -1;
             flushed = false;
@@ -574,6 +580,7 @@ namespace cw {
         bool bpfNarrowed = false;
         bool _mfEnabled = true;   // §52: fb core disables the boxcar matched filter
         bool _fbBpf = false;      // §52 step 2: SNR-adaptive BPF+smoothing for fb
+        bool _fbDecided = false;  // fb geometry committed (decide-once, no hunting)
         float _fbCurBpf = 1e9f;   // last applied fb bpf cutoff (init "unset")
         bool bpfGaveUp = false;
         long long narrowStartSample = 0;

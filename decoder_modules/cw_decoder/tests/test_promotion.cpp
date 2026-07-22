@@ -133,6 +133,20 @@ TEST_CASE("comparePaired: verdicts and edge cases", "[cw][stats]") {
     }
 }
 
+// §52 step 4 — the fb core through the full paired adjudication (n=96 here for
+// speed; the promotion rule is zero harmful profiles + some better). Runs the
+// shipped default (select) alongside so fb can be compared per-profile against
+// BOTH legacy and the current default.
+TEST_CASE("Promotion: fb core adjudication (§52 step 4)", "[cw][.][fb-adjudicate]") {
+    const auto profiles = standardProfiles();
+    std::vector<MatrixCell> baselines;
+    for (const auto& pr : profiles) {
+        baselines.push_back(runCell("legacy", pr.name, pr.message, pr.params, PSEEDS));
+    }
+    adjudicate("legacy+select", baselines);   // current shipped default
+    adjudicate("legacy+fb",     baselines);   // candidate
+}
+
 TEST_CASE("Promotion: paired adjudication vs legacy", "[cw][.][promotion]") {
     const auto profiles = standardProfiles();
 

@@ -2125,34 +2125,63 @@ TEST_CASE("FBDetector class vs batch fbStreamOnline (§52 step 4a)", "[cw][.][fb
     printf("\nStream should match batch (~perfect on clean) bar the first warmup char.\n");
 }
 
+// §52 step 4 — isolate WHY fb fails non-AWGN profiles: filter (adaptive narrowing
+// them wrongly) or detector? Compare fb (adaptive) vs fb+wide (never narrows) vs
+// fb+narrow (always) vs legacy on the failing profiles. If fb+wide ~ legacy, the
+// filter is the culprit (easy); if fb+wide also fails, it's the detector (hard).
+TEST_CASE("fb non-AWGN failure isolation (§52 step 4)", "[cw][.][fb-diag]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; };
+    const Prof profs[] = {
+        {"handkeyed-25", profileHandKeyed(48.0f)}, {"handkeyed-40", profileHandKeyed(30.0f)},
+        {"qsb", profileQSB(80.0f)}, {"qrm", profileQRM(80.0f)}, {"qrn", profileQRN(80.0f)},
+        {"farnsworth", profileFarnsworth(80.0f, 2.0f)},
+    };
+    printf("\n=== §52 step 4 fb non-AWGN isolation (n=%d) ===\n", SEEDS);
+    printf("%-14s %8s %8s %9s %9s\n", "profile", "legacy", "fb", "fb+wide", "fb+narrow");
+    for (auto& pr : profs) {
+        float leg = runCell("legacy",           pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float fb  = runCell("legacy+fb",        pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float fbw = runCell("legacy+fb+wide",   pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float fbn = runCell("legacy+fb+narrow", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        printf("%-14s %8.4f %8.4f %9.4f %9.4f\n", pr.name, leg, fb, fbw, fbn);
+    }
+    printf("\nfb+wide ~ legacy => filter is the culprit (fixable); fb+wide fails => detector.\n");
+}
+
 // §52 step 2 — measure getInputSnrDb per profile to calibrate the fb adaptive
 // BPF thresholds. inputSnr is pre-BPF so it is independent of the filter setting.
 TEST_CASE("fb inputSnr per profile (§52 step 2 calibration)", "[cw][.][fb-insnr]") {
     struct Prof { const char* name; SignalParams params; };
     auto nz=[](float dit,float amp){auto p=profileClean(dit);p.noiseAmp=amp;return p;};
     const Prof profs[] = {
-        {"clean-15", profileClean(80.0f)}, {"clean-25", profileClean(48.0f)}, {"clean-40", profileClean(30.0f)},
-        {"15wpm-n2", nz(80,2)}, {"15wpm-n3", nz(80,3)}, {"15wpm-n4", nz(80,4)},
-        {"25wpm-n3", nz(48,3)}, {"30wpm-n3", nz(40,3)},
+        {"clean-15", profileClean(80.0f)}, {"clean-40", profileClean(30.0f)},
+        {"15wpm-n2", nz(80,2)}, {"25wpm-n3", nz(48,3)}, {"30wpm-n3", nz(40,3)},
+        {"handkeyed-25", profileHandKeyed(48.0f)}, {"handkeyed-40", profileHandKeyed(30.0f)},
+        {"qsb", profileQSB(80.0f)}, {"qrm", profileQRM(80.0f)}, {"qrn", profileQRN(80.0f)},
+        {"farnsworth", profileFarnsworth(80.0f, 2.0f)},
     };
-    printf("\n=== §52 step 2 getInputSnrDb per profile (mean of 24 seeds) ===\n");
+    printf("\n=== getInputSnrDb per profile — fast(0.5s) vs full(2s) gate ===\n");
+    printf("%-14s %10s %10s\n", "profile", "fast", "full");
     for (auto& pr : profs) {
-        double sum = 0; int cnt = 0;
+        double sumF = 0, sumS = 0; int cntF = 0, cntS = 0;
         for (int s = 0; s < 24; s++) {
             SignalParams pp = pr.params; pp.seed = 1000u + (unsigned)s * 7919u;
             auto sig = generateMessage(MSG_FULL(), pp);
             cw::EnvelopeFrontEnd fe(140.0f, 140.0f, 88.0f, 100.0f);
             fe.init(pp.toneFreq, pp.sampleRate, 1000.0f);
-            std::vector<float> out(2048);
+            std::vector<float> out(2048); float fast = -99;
             for (int off = 0; off < (int)sig.samples.size(); off += 512) {
                 int n = std::min(512, (int)sig.samples.size() - off);
                 fe.process(n, &sig.samples[off], out.data());
+                if (fast < -50 && fe.inputSnrReadyFast()) { fast = fe.getInputSnrDb(); }
             }
-            if (fe.inputSnrReady()) { sum += fe.getInputSnrDb(); cnt++; }
+            if (fast > -50) { sumF += fast; cntF++; }
+            if (fe.inputSnrReady()) { sumS += fe.getInputSnrDb(); cntS++; }
         }
-        printf("  %-10s inputSnr = %.2f dB\n", pr.name, cnt ? (float)(sum/cnt) : -99.0f);
+        printf("  %-14s %10.2f %10.2f\n", pr.name, cntF?(float)(sumF/cntF):-99, cntS?(float)(sumS/cntS):-99);
     }
-    printf("\nCalibrate fb HI/LO: clean should map wide, noise-3 narrow.\n");
+    printf("\nFind a fast-gate threshold that narrows AWGN noise but keeps hand-keyed/qrm/qrn WIDE.\n");
 }
 
 // §52 step 2 — measure the fb core's clean/noise CER vs pre-detection BPF cutoff
