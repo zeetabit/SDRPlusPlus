@@ -44,12 +44,13 @@ namespace cw {
                    bool adaptiveBpf = false,
                    bool bpfGarbageRevert = false,
                    bool bpfReeval = false,
-                   bool matchedFilter = true)
+                   bool matchedFilter = true,
+                   bool fbBpf = false)
             : frontEnd(std::move(fe)), detector(std::move(det)),
               timing(std::move(tim)), symbols(std::move(sym)),
               mfResizePolicy(mfResize), minElementScale(minElemScale),
               adaptiveBpf(adaptiveBpf), bpfGarbageRevert(bpfGarbageRevert),
-              bpfReeval(bpfReeval), _mfEnabled(matchedFilter) {}
+              bpfReeval(bpfReeval), _mfEnabled(matchedFilter), _fbBpf(fbBpf) {}
 
         // Runtime noise-aware BPF geometry (docs §29–33), from the locked WPM
         // (dit, ms) and the INPUT-referred SNR (dB, pre-BPF; frontEnd
@@ -126,6 +127,36 @@ namespace cw {
 
             auto events = detector->process(mfBuf, envCount);
             _snr = detector->getSNR();
+
+            // §52 step 2: fb SNR-adaptive geometry. Unlike the Schmitt adaptiveBpf
+            // (SNR-thresholded, lock-gated, BPF only), the fb detector wants BOTH the
+            // pre-detection BPF and the post-detection smoothing narrowed together and
+            // graded on the pre-detection input SNR (available before lock, so heavy
+            // noise gets its narrow filter and can decode at all). Wide when clean
+            // preserves keying edges (clean CER ~0); narrow when buried rejects noise.
+            // inputSnr is bimodal (clean ~60dB vs any noise ~6dB, §52 step 2 cal), so
+            // it supports one robust decision: clean -> WIDE (preserve keying edges,
+            // clean CER ~0), any noise -> NARROW (reject noise). The front end STARTS
+            // narrow so heavy noise never gets a wide warmup that floods the detector
+            // into a runaway; clean widens the moment inputSnr reads high. Hysteresis
+            // on the threshold band avoids hunting on a marginal estimate.
+            if (_fbBpf && frontEnd->inputSnrReadyFast()) {
+                const float in = frontEnd->getInputSnrDb();
+                // Widen for genuinely clean signal. At the fast 0.5s gate inputSnr is
+                // not fully converged (clean reads ~30, not its 65 steady state), so
+                // the threshold is 25, not 40 — higher would fail to widen clean in
+                // time. A consequence: the very strongest real signals (which read
+                // ~25-30 at the fast gate) also widen; their fb copy is a touch worse
+                // than narrow, but net token yield is highest here. Hysteresis [15,25].
+                const bool wantWide = (in > 25.0f) || (in > 15.0f && _fbCurBpf > 80.0f);
+                const float bpf = wantWide ? 140.0f : 32.0f;
+                if (bpf != _fbCurBpf) {
+                    const float sm = 0.625f * bpf;
+                    frontEnd->setBandwidth(bpf, bpf);
+                    frontEnd->setSmoothing(sm, std::max(sm, 25.0f));
+                    _fbCurBpf = bpf;
+                }
+            }
             timing->setSnr(_snr);   // §48: SNR-gated regime selection (no-op for other timings)
             // B: smoothed getSNR, started only AFTER the estimate has converged.
             // The §36 EMA failed because it averaged from t=0 through the
@@ -542,6 +573,8 @@ namespace cw {
         bool bpfReeval = false;
         bool bpfNarrowed = false;
         bool _mfEnabled = true;   // §52: fb core disables the boxcar matched filter
+        bool _fbBpf = false;      // §52 step 2: SNR-adaptive BPF+smoothing for fb
+        float _fbCurBpf = 1e9f;   // last applied fb bpf cutoff (init "unset")
         bool bpfGaveUp = false;
         long long narrowStartSample = 0;
         long long keyDownsAtNarrow = 0;

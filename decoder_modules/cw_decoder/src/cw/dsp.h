@@ -202,6 +202,30 @@ namespace cw {
             bpfBufStart = &bpfBuffer[bpfBufSize];
         }
 
+        // Rebuild the post-detection envelope-smoothing LPF at runtime (docs §52
+        // step 2). The fb detector's optimal geometry narrows BOTH the pre-detection
+        // BPF and this smoothing filter together under noise; setBandwidth moves only
+        // the former, so this is its post-detection twin. Preserves the smoothing
+        // history (real magnitude samples) across the tap change to avoid a dropout.
+        void setSmoothing(float smoothCutoff, float smoothTrans) {
+            std::vector<float> hist;
+            if (smoothBuffer && smoothBufSize > 0) {
+                hist.assign(smoothBuffer, smoothBuffer + smoothBufSize);
+            }
+            if (smoothTaps.taps) { dsp::taps::free(smoothTaps); }
+            if (smoothBuffer) { dsp::buffer::free(smoothBuffer); }
+            smoothTaps = dsp::taps::lowPass(smoothCutoff, smoothTrans, _internalRate);
+            smoothBufSize = smoothTaps.size - 1;
+            smoothBuffer = dsp::buffer::alloc<float>(smoothBufSize + 65536);
+            dsp::buffer::clear(smoothBuffer, smoothBufSize);
+            const int keep = std::min((int)hist.size(), smoothBufSize);
+            if (keep > 0) {
+                memcpy(&smoothBuffer[smoothBufSize - keep], &hist[hist.size() - keep],
+                       keep * sizeof(float));
+            }
+            smoothBufStart = &smoothBuffer[smoothBufSize];
+        }
+
         float getToneFreq() const { return _toneFreq; }
 
         // Input-referred SNR (dB), measured before the narrow BPF (docs §32/§33).
@@ -219,6 +243,12 @@ namespace cw {
         // (floor still near its initial value), which is why the retune must wait
         // for this, not just for lock (docs §33).
         bool inputSnrReady() const { return wideNoiseCount >= wideNoiseSize; }
+
+        // Provisional readiness (~0.5 s) for the fb adaptive switch (docs §52 step 2).
+        // The full 2 s gate is for STABILITY (avoid false narrowing on a transient);
+        // the initial clean-vs-noise call is bimodal (clean ~60 dB vs noise ~6 dB) and
+        // safe to make on a coarser floor estimate long before the window fills.
+        bool inputSnrReadyFast() const { return wideNoiseCount >= 60; }
 
     private:
         float _sampleRate = 8000;

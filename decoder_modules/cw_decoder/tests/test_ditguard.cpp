@@ -2125,6 +2125,69 @@ TEST_CASE("FBDetector class vs batch fbStreamOnline (§52 step 4a)", "[cw][.][fb
     printf("\nStream should match batch (~perfect on clean) bar the first warmup char.\n");
 }
 
+// §52 step 2 — measure getInputSnrDb per profile to calibrate the fb adaptive
+// BPF thresholds. inputSnr is pre-BPF so it is independent of the filter setting.
+TEST_CASE("fb inputSnr per profile (§52 step 2 calibration)", "[cw][.][fb-insnr]") {
+    struct Prof { const char* name; SignalParams params; };
+    auto nz=[](float dit,float amp){auto p=profileClean(dit);p.noiseAmp=amp;return p;};
+    const Prof profs[] = {
+        {"clean-15", profileClean(80.0f)}, {"clean-25", profileClean(48.0f)}, {"clean-40", profileClean(30.0f)},
+        {"15wpm-n2", nz(80,2)}, {"15wpm-n3", nz(80,3)}, {"15wpm-n4", nz(80,4)},
+        {"25wpm-n3", nz(48,3)}, {"30wpm-n3", nz(40,3)},
+    };
+    printf("\n=== §52 step 2 getInputSnrDb per profile (mean of 24 seeds) ===\n");
+    for (auto& pr : profs) {
+        double sum = 0; int cnt = 0;
+        for (int s = 0; s < 24; s++) {
+            SignalParams pp = pr.params; pp.seed = 1000u + (unsigned)s * 7919u;
+            auto sig = generateMessage(MSG_FULL(), pp);
+            cw::EnvelopeFrontEnd fe(140.0f, 140.0f, 88.0f, 100.0f);
+            fe.init(pp.toneFreq, pp.sampleRate, 1000.0f);
+            std::vector<float> out(2048);
+            for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+                int n = std::min(512, (int)sig.samples.size() - off);
+                fe.process(n, &sig.samples[off], out.data());
+            }
+            if (fe.inputSnrReady()) { sum += fe.getInputSnrDb(); cnt++; }
+        }
+        printf("  %-10s inputSnr = %.2f dB\n", pr.name, cnt ? (float)(sum/cnt) : -99.0f);
+    }
+    printf("\nCalibrate fb HI/LO: clean should map wide, noise-3 narrow.\n");
+}
+
+// §52 step 2 — measure the fb core's clean/noise CER vs pre-detection BPF cutoff
+// across speeds, to derive the speed-matched bandwidth law. The fixed-40Hz core
+// clean-fails 15/25wpm but passes 40wpm — counterintuitive, so measure before
+// fitting a formula. smooth cutoff tied to bpf (0.625x, the 40/25 probe ratio).
+TEST_CASE("fb speed-matched BPF sweep (§52 step 2)", "[cw][.][fb-bwsweep]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; };
+    auto nz=[](float dit,float amp){auto p=profileClean(dit);p.noiseAmp=amp;return p;};
+    const Prof profs[] = {
+        {"clean-15", profileClean(80.0f)}, {"clean-25", profileClean(48.0f)}, {"clean-40", profileClean(30.0f)},
+        {"15wpm-n3", nz(80,3)}, {"25wpm-n3", nz(48,3)}, {"30wpm-n3", nz(40,3)},
+    };
+    const float bpfs[] = {30, 40, 60, 100, 150};
+    // smooth FIXED at 80 (default) — setBandwidth only controls the BPF cutoff, so
+    // the adaptive path can only move bpf; the sweep must isolate bpf's effect.
+    auto mk=[](float bpf){ return [bpf](const GeneratedSignal&){ return cw::detail::makeFB(cw::TIMING_KALMAN, false, bpf, bpf, 80.0f, 100.0f); }; };
+    printf("\n=== §52 step 2 fb BPF sweep (n=%d) — CER vs cutoff ===\n", SEEDS);
+    printf("%-10s %8s", "profile", "legacy");
+    for (float b : bpfs) printf("   bpf%3.0f", b);
+    printf("  optimal(WPMx2.5)\n");
+    for (auto& pr : profs) {
+        float leg = runCell("legacy", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        printf("%-10s %8.4f", pr.name, leg);
+        for (float b : bpfs) {
+            float c = runCellWith(mk(b), "f", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+            printf(" %6.3f", c);
+        }
+        float ditMs = pr.params.ditMs; float optBw = (1200.0f/ditMs)*2.5f;
+        printf("   %.0fHz\n", optBw);
+    }
+    printf("\nClean must be ~0 at the matched cutoff; find the bpf(dit) law that holds clean AND wins noise.\n");
+}
+
 // §52 step 4 — the REGISTERED fb core (streaming FBDetector, src/) vs legacy.
 // Clean is the hard gate (must reproduce the probe's ~0). Then the win cells must
 // beat legacy as the batch/streaming probes predicted. This exercises the real
@@ -2137,18 +2200,19 @@ TEST_CASE("registered fb core vs legacy (§52 step 4)", "[cw][.][fbcore]") {
         {"clean-15", profileClean(80.0f), true}, {"clean-25", profileClean(48.0f), true},
         {"clean-40", profileClean(30.0f), true},
         {"15wpm-n2",nz(80,2),false},{"25wpm-n3",nz(48,3),false},{"30wpm-n3",nz(40,3),false},
-        {"15wpm-n3",nz(80,3),false},{"15wpm-n4",nz(80,4),false},
+        {"15wpm-n3",nz(80,3),false},{"15wpm-n4",nz(80,4),false},{"25wpm-n2",nz(48,2),false},
     };
     printf("\n=== §52 step 4 registered fb core (n=%d) — clean is a hard gate ===\n", SEEDS);
-    printf("%-10s %8s %8s %8s  %s\n", "profile", "legacy", "fb", "fb+wide", "note");
+    printf("%-10s %8s %8s %8s  %s\n", "profile", "legacy", "fb", "fb+narrow", "note");
     for (auto& pr : profs) {
-        float leg = runCell("legacy",         pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
-        float fb  = runCell("legacy+fb",      pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
-        float fbw = runCell("legacy+fb+wide", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
-        const char* note = pr.cleanGate ? (fb < 0.05f ? "CLEAN-OK" : "CLEAN-FAIL!") : "";
-        printf("%-10s %8.4f %8.4f %8.4f  %s\n", pr.name, leg, fb, fbw, note);
+        float leg = runCell("legacy",           pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float fb  = runCell("legacy+fb",        pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float fbn = runCell("legacy+fb+narrow", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        const char* note = pr.cleanGate ? (fb < 0.05f ? "CLEAN-OK" : "CLEAN-FAIL!")
+                                        : (fb < leg ? "win" : "");
+        printf("%-10s %8.4f %8.4f %8.4f  %s\n", pr.name, leg, fb, fbn, note);
     }
-    printf("\nfb uses adaptive narrow BPF; fb+wide is fixed 100Hz. Clean must be ~0 before trusting noise.\n");
+    printf("\nfb = adaptive (narrow start, widen for clean); fb+narrow = fixed 32Hz. Clean must be ~0.\n");
 }
 
 // §52 step 3 — squelch on the model-fit LLR (#41). The full streaming stack runs

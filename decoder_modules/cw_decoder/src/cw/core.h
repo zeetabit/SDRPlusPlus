@@ -93,6 +93,8 @@ namespace cw {
         // for front ends without a settable filter, so a fixed-geometry core is
         // unaffected.
         virtual void setBandwidth(float cutoff, float trans) { (void)cutoff; (void)trans; }
+        // Post-detection envelope-smoothing cutoff (docs §52 step 2). Default no-op.
+        virtual void setSmoothing(float cutoff, float trans) { (void)cutoff; (void)trans; }
         // Optional: input-referred SNR (dB), measured before the narrow filter
         // (docs §32/§33) — the trigger for adaptive bandwidth. Default 99 (very
         // high ⇒ never narrow) for front ends without the estimator.
@@ -100,6 +102,8 @@ namespace cw {
         // Whether getInputSnrDb has converged (its noise window has filled).
         // Default true so cores without the estimator are unaffected.
         virtual bool inputSnrReady() const { return true; }
+        // Provisional (~0.5s) readiness for the fb adaptive filter (docs §52 step 2).
+        virtual bool inputSnrReadyFast() const { return inputSnrReady(); }
     };
 
     // Stage 2: envelope → key up/down events.
