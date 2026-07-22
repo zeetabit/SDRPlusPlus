@@ -161,7 +161,7 @@ TEST_CASE("real 40m pileup — truthless core benchmark", "[cw][.][realpileup]")
     auto fixtures = loadManifest(dir);
     REQUIRE_FALSE(fixtures.empty());
 
-    const std::vector<std::string> cores = {"legacy", "legacy+select", "legacy+mf", "legacy+bpfauto+ab"};
+    const std::vector<std::string> cores = {"legacy", "legacy+select", "legacy+fb", "legacy+fb+wide"};
 
     printf("\n=== real 40m pileup — plausible-token yield (truthless) ===\n");
     printf("%-22s %5s", "fixture", "dB");
