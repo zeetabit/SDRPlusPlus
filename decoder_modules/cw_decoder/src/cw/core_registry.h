@@ -37,13 +37,14 @@ namespace cw {
         // missing partner. bpfCutoff defaults wide; the adaptive path narrows it.
         inline std::unique_ptr<IDecodeCore> makeFB(
                 TimingStrategy timing, bool fbBpf = true,
-                float bpfCutoff = 32.0f, float bpfTrans = 32.0f,
-                float smoothCutoff = 20.0f, float smoothTrans = 25.0f) {
-            // Start NARROW so heavy noise never gets a wide warmup that floods the
-            // detector; the fb SNR-adaptive path (fbBpf) widens (~0.5s, fast gate)
-            // only when inputSnr reads genuinely clean, before clean's slow first
-            // char is lost. matchedFilter=false: the fb detector does its own
-            // smoothing, so the boxcar is bypassed (§52 step 4).
+                float bpfCutoff = 140.0f, float bpfTrans = 140.0f,
+                float smoothCutoff = 88.0f, float smoothTrans = 100.0f) {
+            // Start WIDE: the forward-only detector no longer runs away on a wide
+            // warmup (§52 step 4), so starting wide avoids the narrow->wide switch
+            // transient on clean AND keeps high-SNR non-AWGN (hand-keyed) wide. The fb
+            // adaptive path (fbBpf) narrows only for confirmed broadband noise
+            // (inputSnr < 8 at the fast gate). matchedFilter=false: the fb detector
+            // does its own smoothing, so the boxcar is bypassed (§52 step 4).
             return std::make_unique<StagedCore>(
                 std::make_unique<EnvelopeFrontEnd>(bpfCutoff, bpfTrans, smoothCutoff, smoothTrans),
                 std::make_unique<ForwardBackwardDetector>(),
