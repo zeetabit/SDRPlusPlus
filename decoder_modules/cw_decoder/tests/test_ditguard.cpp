@@ -1359,6 +1359,68 @@ namespace {
         return out;
     }
 
+    // §52 step 1b — ONLINE emission params. Instead of one whole-signal EM fit,
+    // re-fit ModelFitScorer over a trailing window [t-W+1, t] every `stride` samples
+    // and hold between refits (piecewise-constant) — the throttled pattern
+    // Channel.modelFit already uses (#41). Params at sample u depend only on data
+    // at/before u, so they are causal within the fixed lag. Everything else matches
+    // step 1a (fixed-lag backward), isolating the emission change.
+    std::vector<TruthTransition> fbStreamOnline(const std::vector<float>& env, int n,
+                                                float switchProb, int lag, int W, int stride) {
+        if (n < 8) { return {}; }
+        std::vector<float> muLoA(n), muHiA(n), vLoA(n), vHiA(n);
+        cw::ModelFitScorer sc;
+        float pMuLo = 0, pMuHi = 0, pVLo = 1, pVHi = 1; bool have = false;
+        for (int t = 0; t < n; t++) {
+            if (t % stride == 0 || !have) {
+                int lo = std::max(0, t - W + 1), cnt = t - lo + 1;
+                if (cnt >= 32) {
+                    auto f = sc.score(env.data() + lo, cnt);
+                    if (f.muHi - f.muLo > 1e-6f) {
+                        float vf = 0.2f * (f.muHi - f.muLo); vf *= vf;
+                        pMuLo = f.muLo; pMuHi = f.muHi;
+                        pVLo = std::max(f.vLo, vf); pVHi = std::max(f.vHi, vf); have = true;
+                    }
+                }
+            }
+            muLoA[t] = pMuLo; muHiA[t] = pMuHi; vLoA[t] = pVLo; vHiA[t] = pVHi;
+        }
+        if (!have) { return {}; }
+        auto emitLL = [&](int t, double& lb0, double& lb1) {
+            double d0 = env[t] - muLoA[t], d1 = env[t] - muHiA[t];
+            lb0 = -0.5 * (d0*d0 / vLoA[t] + std::log(vLoA[t]));
+            lb1 = -0.5 * (d1*d1 / vHiA[t] + std::log(vHiA[t]));
+        };
+        const double stay = 1.0 - switchProb, cross = switchProb;
+        std::vector<double> a0(n), a1(n); double lb0, lb1;
+        emitLL(0, lb0, lb1); { double m = std::max(lb0, lb1);
+            double x0 = 0.5*std::exp(lb0-m), x1 = 0.5*std::exp(lb1-m);
+            double s = 1.0/(x0+x1+1e-300); a0[0]=x0*s; a1[0]=x1*s; }
+        for (int t = 1; t < n; t++) {
+            emitLL(t, lb0, lb1); double m = std::max(lb0, lb1);
+            double e0 = std::exp(lb0-m), e1 = std::exp(lb1-m);
+            double x0 = (a0[t-1]*stay + a1[t-1]*cross) * e0;
+            double x1 = (a1[t-1]*stay + a0[t-1]*cross) * e1;
+            double s = 1.0/(x0+x1+1e-300); a0[t]=x0*s; a1[t]=x1*s;
+        }
+        std::vector<uint8_t> path(n);
+        for (int t = 0; t < n; t++) {
+            int hi = std::min(n-1, t+lag); double bb0 = 1.0, bb1 = 1.0;
+            for (int u = hi; u > t; u--) {
+                emitLL(u, lb0, lb1); double m = std::max(lb0, lb1);
+                double e0 = std::exp(lb0-m), e1 = std::exp(lb1-m);
+                double nb0 = stay*e0*bb0 + cross*e1*bb1, nb1 = stay*e1*bb1 + cross*e0*bb0;
+                double s = 1.0/(nb0+nb1+1e-300); bb0=nb0*s; bb1=nb1*s;
+            }
+            path[t] = (a1[t]*bb1 > a0[t]*bb0) ? 1 : 0;
+        }
+        const int minRun = 12;
+        for (int pass = 0; pass < 3; pass++) { int i=0; while(i<n){int j=i;while(j<n&&path[j]==path[i])j++;if(j-i<minRun&&i>0)for(int k=i;k<j;k++)path[k]=path[i-1];i=j;} }
+        std::vector<TruthTransition> out; uint8_t prev = 0;
+        for (int t = 0; t < n; t++) { if (path[t]!=prev){out.push_back({(long long)t,path[t]==1});prev=path[t];} }
+        return out;
+    }
+
     std::vector<float> frontEnvelope(const GeneratedSignal& sig, const SignalParams& p, int& n) {
         cw::EnvelopeFrontEnd fe; fe.init(p.toneFreq, p.sampleRate, 1000.0f);
         // Feed in blocks like the real core does: a single whole-signal process()
@@ -1666,6 +1728,53 @@ TEST_CASE("streaming fixed-lag fb reproduces batch (§52 step 1a)", "[cw][.][sof
         printf("%-10s %8.4f %8.4f %9.4f %9.4f %9.4f  %s\n", pr.name, leg, bat, st[0], st[1], st[2], note);
     }
     printf("\nStreaming must hit batch clean ~0 FIRST; then L48 should track batch on noise.\n");
+}
+
+// §52 step 1b — ONLINE (trailing-window) emission params vs whole-signal batch.
+// Same fixed lag (L=48) as step 1a, so this isolates the emission change. Clean is
+// the hard gate: windowed EM must still separate mark/space at ~0 CER before any
+// noise number counts. Sweeps window width W; stride held at 128.
+namespace {
+    std::vector<TruthTransition> fbOnline(const GeneratedSignal& sig, const SignalParams& p, float sw, int W) {
+        int n; auto env = frontEnvelope(sig, p, n);
+        if (n < 8) return {};
+        return fbStreamOnline(env, n, sw, 48, W, 128);
+    }
+}
+
+TEST_CASE("online windowed emission fb (§52 step 1b)", "[cw][.][softdet-online]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; bool cleanGate; };
+    auto nz = [](float dit, float amp){ auto p=profileClean(dit); p.noiseAmp=amp; return p; };
+    const Prof profs[] = {
+        {"clean-15", profileClean(80.0f), true}, {"clean-25", profileClean(48.0f), true},
+        {"15wpm-n2", nz(80,2), false}, {"15wpm-n3", nz(80,3), false},
+        {"25wpm-n3", nz(48,3), false}, {"30wpm-n3", nz(40,3), false},
+    };
+    const float sw[] = {0.005f, 0.010f, 0.020f};
+    const int Ws[] = {400, 700, 1200};   // trailing-window widths in 1 kHz samples
+    auto mkBatch = [](SignalParams p, float s){
+        return [p,s](const GeneratedSignal& sig){ return std::unique_ptr<cw::IDecodeCore>(std::make_unique<cw::StagedCore>(
+            std::make_unique<cw::EnvelopeFrontEnd>(), std::make_unique<OracleDetector>(fbSelf(sig,p,s)),
+            std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN), std::make_unique<cw::BeamSymbolDecoder>())); }; };
+    auto mkOnline = [](SignalParams p, float s, int W){
+        return [p,s,W](const GeneratedSignal& sig){ return std::unique_ptr<cw::IDecodeCore>(std::make_unique<cw::StagedCore>(
+            std::make_unique<cw::EnvelopeFrontEnd>(), std::make_unique<OracleDetector>(fbOnline(sig,p,s,W)),
+            std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN), std::make_unique<cw::BeamSymbolDecoder>())); }; };
+
+    printf("\n=== §52 step 1b online windowed emission (n=%d) — clean is a hard gate ===\n", SEEDS);
+    printf("%-10s %8s %8s %9s %9s %9s  %s\n", "profile", "legacy", "batch", "W=400", "W=700", "W=1200", "note");
+    for (auto& pr : profs) {
+        float leg = runCell("legacy", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float bat = 1e9f; for (float s : sw) bat = std::min(bat, runCellWith(mkBatch(pr.params,s),"b",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean);
+        float on[3];
+        for (int wi = 0; wi < 3; wi++) { on[wi]=1e9f; for (float s : sw) on[wi]=std::min(on[wi],runCellWith(mkOnline(pr.params,s,Ws[wi]),"o",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean); }
+        const char* note = "";
+        if (pr.cleanGate) note = (on[1] < 0.05f) ? "CLEAN-OK" : "CLEAN-FAIL!";
+        else { static char b[40]; snprintf(b,sizeof b,"W700 vs batch %+.3f", on[1]-bat); note=b; }
+        printf("%-10s %8.4f %8.4f %9.4f %9.4f %9.4f  %s\n", pr.name, leg, bat, on[0], on[1], on[2], note);
+    }
+    printf("\nWindowed EM must hold clean ~0 FIRST; then W700 should track batch on noise.\n");
 }
 
 // §52.7 #42 runaway fix — posterior hysteresis. The slow+heavy runaway (CER>1) is
