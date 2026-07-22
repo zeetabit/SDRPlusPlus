@@ -28,8 +28,17 @@
 >
 > ### Work completed since (the campaign's first standing promotion landed — §51)
 >
+> **SparkGap line (§52, 2026-07-22) — READ `### §52 SparkGap line — FINAL STATE &
+> FORWARD BUILD PLAN` below for the full handoff.** SHIPPED: **#40b** (select routes
+> mid-speed hand-keyed to bimodal, −22%/−35%) and **#41** (model-fit channel keep-alive
+> gate). **#42 BREAKTHROUGH (validated, build pending):** the noise wall is a
+> filter-bandwidth problem — a 40 Hz per-channel matched filter + a forward-backward
+> soft detector turns heavy-noise garbage into copy (15wpm-n3 1.09→0.35, 25wpm-n3
+> 0.96→0.27). All pieces measured in probes; remaining work is a streaming detector +
+> speed-matched front end + squelch + adjudication. Detail: investigation §52–52.9c.
+>
 > **Current default: `legacy+select` (regime timing selector), promoted 2026-07-22
-> (§48–51).** It routes each signal to log (jittered good-SNR hand-keyed), a V2/V1
+> (§48–51), now with the #40b 3-way routing.** It routes each signal to log (jittered good-SNR hand-keyed), a V2/V1
 > kalman (heavy/light noise, SNR-graded), gated on jitter + getSNR with a re-armable
 > dit-drift latch for operator changes. Paired n=384: 13 better, 0 significant worse
 > — log's hand-keyed win + kalman2s's noise robustness (worstcase 0.60→0.37) + V1's
@@ -428,7 +437,7 @@ Key finding: **filter bandwidth is the dominant factor** — 35 Hz vs 68 Hz = 20
 | 36 | SNR (noise-side) LR bound scaling | Medium | High | Low | **Refuted by the bound curve (§28)** — `[lr-snr]`. Fast+heavy noise wants a *small* bound (lag dominates), slow+heavy a *large* one (rejection dominates); SNR is low for both and cannot separate them, so a noise-side rule hurts the target. Even the floor bound leaves fast+heavy above legacy: the residual is intrinsic, not a tuning miss |
 | 40 | Speed marginalisation over WPM bins (SparkGap ITILA) | High | Low | Medium | **Probe done (§52.1); cheap-win half LANDED as #40b (§52.2).** `[speedmarg-headroom]` decomposed select vs best-existing vs the timing-oracle. **Finding: `select` mis-routed mid-speed hand-keyed** — bimodal beats log in a dit window ~[40,55] ms (22–30 wpm; log wins slower AND at 40 wpm). Fixed in §52.2 (`selectUseBimodal`, 3-way router) — strict improvement, hk-25/30 −22%/−35%, 0 significant worse at n=384. The genuine speedmarg `margGap` (best-existing→oracle) that REMAINS is only +0.04–0.06, a fraction achievable — real but SECOND-order, a new-algorithm build now competing for the residual after the routing fix already took the free part |
 | 41 | Model-fit log-evidence as a decode-quality metric (SparkGap) | N/A | N/A | Medium | **Stage 0/1 DONE (§52.1) — `src/cw/model_fit.h`, `[modelfit]`.** `ModelFitScorer`: two-component Gaussian-mixture EM on the envelope, scored as a per-sample LLR vs a composite unimodal null (better-of Gaussian/Rayleigh, arrived at by two measured corrections). **Proven orthogonal to SNR:** a 22 dB loud het (sails past `snr > 6.0`) scores LLR 0.0004 while 12 dB CW scores 0.29 — a single threshold separates usable CW from all loud non-Morse. **Honest limit:** at 6 dB weak CW hits the floor, so it is a **carrier/het VETO at usable SNR, not a weak-signal detector** (recall stays SNR's job; used AND-ed with SNR). Passive, decode-path byte-identical (suite 1674/227). **Remaining:** Stage 2 (compute per-channel on the real front-end envelope, surface in `getMarkers`), Stage 3 (replace the `snr > 6.0` spawn/prune gate behind a config flag, `test_channel_manager` harness). Cross-*receiver* RBN consensus is the one SparkGap idea that does NOT transfer |
-| 42 | Soft-posterior (forward-backward HMM) detector — SparkGap ITILA | Medium | High | Very High | **Future — measure detector headroom first (§52).** Replace the `SchmittDetector` hard threshold (`v > onThresh`) with forward-backward soft posteriors `P(mark\|obs)` under a Rayleigh/Rician envelope model, EM-fit per window, **quantised only at the end** after the beam consumes timing log-likelihoods. This is the ONLY lever that attacks `detectHR` (§44: +0.28 CER on worstcase, the loss the detector destroys before any decoder sees it, explicitly NOT addressable on hard durations). Subsumes #24 (LR/CUSUM is its sequential approximation) and #27 (the cleaner modern instance of the Bell trellis). Cost = a joint detector+timing+symbol core ("Bell cannot be a stage", investigation §"Why Bell cannot be a stage"). Independent real-40m validation exists (SparkGap 92.9% recall vs SkimSrv). ⚠ Rician model still validated against its own noise assumptions; §44's headroom table does NOT bound it (it replaces the detector), so the detectHR-capture fraction is unmeasured and is the gate before any build |
+| 42 | Soft-posterior fb detector + matched filter — SparkGap ITILA | **High** | **Very High** | Very High | **BREAKTHROUGH, validated in probes; build pending (§52.5–52.9).** The noise wall is a **detector** problem (§52.5: a perfect detector drives noise2/3/4 to CER 0.0000, +0.8/+0.9 ceiling, robust across the WPM×noise grid §52.5b), and the detector fails because the **pre-detection filter is 4–5× too wide** (§52.9): our EnvelopeFrontEnd BPF is ~100–200 Hz, optimal is ~WPM×2.5 ≈ 40 Hz. A validated forward-backward soft detector (§52.6, clean-gate-passing) on a **40 Hz matched filter** transforms the wall (§52.9b): 15wpm-n3 1.09(runaway)→**0.345** (beats legacy 0.82), 25wpm-n3 0.96→**0.27**, 15wpm-n2 →**0.007**. Speed marginalisation (§52.8, evidence-selected prior) makes it speed-agnostic. The runaway was NOT information-theoretic (§52.7 was wrong) — it was out-of-band noise. **Architecture (all pieces validated): IQ → per-channel speed-matched BPF (`setBandwidth`, the #31 hook) → speed-marginalised fb detector → squelch below human-copy SNR → decode.** Matched filter is per-channel (§52.9c — multi-channel is the ideal vehicle). Remaining: streaming fb `IDetector` + speed-matched front end + squelch + paired adjudication. ⚠ validated on synthetic AWGN; CW Skimmer's CER<0.02 @ −10 dB (matched filter) is the external corroboration. Supersedes #24/#27/#31 |
 
 ### Reprioritized leftovers (2026-07-21, after §28)
 
@@ -466,14 +475,102 @@ win**, not by gain — the same discipline that ranked §44.
 |---|---|---|
 | A0 | **#40b select routing fix (bimodal for mid-speed hand-keyed)** | **DONE — landed as a strict improvement of the shipping default (§52.2).** select extended to a 3-way router (kalman2s/log/bimodal), bimodal chosen inside the hand-keyed branch for dit∈[35,57] ms (22–30 wpm — a WINDOW, not a threshold; log recovers at 40 wpm). Confined by construction so every non-hand-keyed profile is byte-identical to old select. Paired n=384: 13 better, 0 significant worse, 6 ns-HARM (all pre-existing) — hk-25 0.102→0.079 (−22%, t=−8.94), hk-30 0.128→0.083 (−35%, t=−11.20). Suite 1674/227 green |
 | A | **#41 model-fit quality metric** | **DONE through Stage 3 (§52.3/52.4).** Scorer built + orthogonal to SNR; validated on the REAL front-end envelope (CW 2.51 vs carrier/noise ~0); wired into `Channel.modelFit` (passive, byte-identical). **Stage 3 measurement overturned the premise:** getSNR (keying-contrast) already rejects hets, so the real defect is RECALL — `snr>6` drops real CW under moderate noise. Benchmarked both gate directions: recall(OR) at T=0.25 strictly dominates (CW-kept 1/4→3/4, 0 junk); precision(AND)≡baseline. Shipped as `channel_manager` keep-alive `snr>6 OR modelFit>0.25` (config `modelFitGate`/`modelFitKeep`, default on). Amplitude-only fit can't separate heaviest-noise CW from a warble — the measured #42 boundary. Suite 1683/230 |
-| B | **#40 speed marginalisation (residual)** | **Demoted to second-order by its own probe.** True `margGap` over best-existing is only +0.04–0.06, a fraction achievable — competes for the residual AFTER A0's routing fix, not before |
-| C | **#42 soft-posterior detector** | **UNRESOLVED (§52.5g RETRACTS the earlier "no").** Ceiling real (§52.5/b, oracle-based — the detector IS the noise wall). But my prototype soft detectors (§52.5c/d/f) were found buggy on review — they fail even a CLEAN signal (48 vs 104 transitions), so their noise numbers are INVALID evidence. Only the shipped LR grid (§52.5e, 2–14% capture) survives, and LR is CUSUM (weaker than forward-backward), so it does not settle it. Encouraging: aligned per-sample emission separates 100/95/84% at n0/n2/n3 — the info IS in the envelope. Settling #42 needs a soft detector that PASSES CLEAN VALIDATION FIRST, then the noise ladder — a real validated build. Superseded verdict (now retracted): ~~7-detector benchmark says unreachable~~. Supersedes #24/#27 Ceiling real (+0.8, detector is the wall) but the best of 7 soft detectors (3 prototypes + 4 shipped lr variants) captures only 2–14% at heavy noise and REGRESSES fast CW (−108%); works only in the slow+moderate corner (76%) where headroom is small and legacy already covers it. Reaching the wall would require reproducing SparkGap in full (Rician+I0, per-window EM, semi-Markov duration, 16-bin speed marg) AND betting our noise4.0 is more pessimistic than real air. Recommend NOT building. Earlier line kept for context: **Both gates DONE — ceiling huge (§52.5) but NOT cheaply reachable (§52.5c).** Ceiling: a perfect DETECTOR drives noise2/3/4 to CER **0.0000** (mean+worst across the WPM×noise grid, §52.5b) — the entire noise wall is a detector failure, +0.82/+0.91, the largest headroom in the campaign. BUT the achievable-fraction probe (`[softdet-achievable]`, a real batch Viterbi HMM on the noisy envelope) captures **<15%** and is WORSE than legacy on moderate noise — the SAME poor capture as the LR detector. Naive soft detectors flicker on noise; capturing the ceiling needs SparkGap-level sophistication (Rician emission, EM variances, duration/HMM structure, speed marg). Recommend NOT starting on the ceiling alone — it is a build-and-see commitment (SparkGap 92.9% real-air is the only positive evidence). If pursued: scope a real detector with an early noise-ladder kill-gate. Supersedes #24/#27 |
+| B | **#40 speed marginalisation (residual)** | **Absorbed into #42 (§52.8).** Evidence-selected transition prior WORKS (speed-agnostic detector; clean-15 AND clean-40 both perfect). The standalone timing-layer `margGap` over best-existing was only +0.04–0.06; the mechanism's real home is the #42 fb detector's speed selection, where it also sets the matched-filter bandwidth. No separate build |
+| C | **#42 fb detector + matched filter** | **BREAKTHROUGH — validated in probes, build pending (§52.5–52.9).** See the rewritten matrix row #42 and the dedicated forward-build section below. One-line: the noise wall is a filter-bandwidth problem; a 40 Hz per-channel matched filter + a clean-gate-passing forward-backward detector turns heavy-noise garbage into copy (15wpm-n3 runaway→0.35 beats legacy; 25wpm-n3 0.96→0.27). All pieces validated; the streaming-detector build is the remaining work. The earlier §52.5g "unresolved/don't build" is RETRACTED — it rested on a truncated-envelope bug (§52.6) |
 
 **Cross-receiver (RBN peer-skimmer) consensus is explicitly excluded** — it needs
 independent physical receivers; our N channels share one antenna/IQ stream and
 dedup guarantees one station = one channel (`channel_manager.h:202`). Adaptive
 *frequency* consensus, by contrast, we already implement (StableTone hysteresis,
 `:144`) and #41 upgrades its gating signal.
+
+### §52 SparkGap line — FINAL STATE & FORWARD BUILD PLAN (self-contained, 2026-07-22)
+
+> This block is a clean-context handoff: everything below is enough to resume #42
+> without the originating conversation. Full detail: investigation doc §52–52.9c.
+
+**SHIPPED (default, committed):**
+- **#40b** — `select` is a 3-way router (kalman2s/log/**bimodal**); mid-speed hand-keyed
+  (dit∈[35,57] ms) routes to bimodal. Strict win: hk-25 −22%, hk-30 −35%, 0 sig-worse
+  at n=384. Files: `src/cw/timing.h`. Gates ratcheted (never loosened): multiseed
+  hand-keyed 0.055/0.135/0.081 + hk-30 0.096; `[select-verify]` absolute ratchets.
+- **#41** — `ModelFitScorer` (`src/cw/model_fit.h`), wired into `Channel.modelFit`
+  (passive). Channel-manager keep-alive is now `snr>6 OR modelFit>0.25` (config
+  `modelFitGate`/`modelFitKeep`, default on) — rescues marginal real CW the SNR gate
+  dropped. `dsp.h` exposes `setBandwidth()` (per-channel BPF, the #31 hook).
+
+**#42 — THE BREAKTHROUGH (validated in probes, NOT yet a shippable core):**
+
+The whole-campaign noise wall is a **detector** problem, and the detector fails because
+the **pre-detection filter is 4–5× too wide**. Chain of evidence:
+1. Perfect detector → CER 0.0000 on noise2/3/4 (mean+worst, all speeds) — §52.5/52.5b.
+   The info survives our filter; a real detector drowns in out-of-band noise.
+2. A **forward-backward soft detector** (marginal posterior γ, EM emission params from
+   `ModelFitScorer`) on the REAL envelope, once a truncation bug was fixed (§52.6 — a
+   single whole-signal `process()` overflowed the front end's 8192 buffer; MUST feed in
+   blocks), PASSES the clean gate and beats legacy: 15wpm-n2 0.12→0.076, 25wpm-n3
+   0.96→0.62, 30wpm-n3 0.91→0.56 — including fast+heavy where LR failed (§25).
+3. **Speed marginalisation** (§52.8): run the forward pass at several transition priors,
+   pick by log-evidence (Σ log pre-norm forward mass — no ground truth). Makes the
+   detector speed-agnostic (clean-15 AND clean-40 both 0.000, wins preserved, no cheating).
+4. The slow+heavy **runaway** (CER>1) was NOT information-theoretic (§52.7 wrong) — it was
+   out-of-band noise. A **40 Hz matched filter** (§52.9/52.9b) fixes it: 15wpm-n3
+   1.09→**0.345** (beats legacy 0.82), 25wpm-n3 0.96→**0.27**, 15wpm-n2→**0.007**;
+   clean-30 stays 0.000. Optimal BW ≈ **WPM×2.5 Hz**; CW Skimmer copies CER<0.02 @ −10 dB
+   this way. Coherent/phase detection does NOT help at low SNR (energy detection is
+   Bayes-optimal there) — the lever is BANDWIDTH, not coherence.
+5. The matched filter is **per-channel** (§52.9c): each channel already tone-shifts to DC
+   and BPFs around its own tone (`dsp.h`). Multi-channel is the ideal vehicle — per-channel
+   speed → per-channel matched BW via `setBandwidth()`. Bonus: 40 Hz filters sit inside the
+   120 Hz dedup spacing → less inter-channel bleed.
+
+**Validated architecture (every piece measured, assembled only in probes):**
+```
+IQ → per-channel tone→DC → speed-matched BPF (~WPM×2.5 Hz, via setBandwidth)
+   → speed-marginalised forward-backward soft detector
+   → squelch below human-copy SNR (emit deletions, never insertion runaway)
+   → timing/beam decode
+```
+
+**FORWARD BUILD (the remaining work, in order; clean-gate discipline throughout):**
+1. **Streaming fb `IDetector`** — the probes are BATCH (buffer whole envelope). Real core
+   needs an online forward-backward with fixed lag (or online-forward + short backward
+   window). Validate: reproduces the batch probe's clean CER (~0) FIRST, then noise.
+2. **Speed-matched front end** — drive `setBandwidth()` per channel from the §52.8
+   evidence-selected speed (narrow for slow, wider for fast). Reuses #31 (built,
+   real-audio ~5× win, was variance-blocked on the fragile Schmitt — the robust fb
+   detector is the missing partner).
+3. **Squelch** — below the human-copy SNR floor, suppress marks (deletion) instead of
+   running away. Gate on the fitted separation / evidence.
+4. **Register a core** (`legacy+fb` or `fbmatch+...`), run the **full paired adjudication
+   vs legacy** at n=384 with the clean-first gate; ratchet gains, never loosen.
+
+**Probe inventory (hidden `[.]`, in `tests/test_ditguard.cpp` unless noted):**
+`[softdet-headroom]` `[softdet-grid]` (ceiling), `[softdet-v2]` (validated fb),
+`[softdet-marg]` (speed marginalisation), `[softdet-bw]` (matched-filter — the headline),
+`[clean-char]` `[fb-map]` `[fb-validate]` (clean-gate diagnostics),
+`[softdet-runaway]` `[softdet-asym]` `[runaway-diag]` (runaway, refuted fixes),
+`[modelfit]` (`tests/test_modelfit.cpp`, #41 scorer). Key helper: `frontEnvelope` /
+`frontEnvelopeBw` (BLOCK-FED — the truncation-bug fix), `fbDecode`, `fbMultiSpeed`.
+
+**Wide-VFO scaling (supported today up to 8 kHz):** the VFO auto-tracks the radio's BW
+clamped to [3000, `CW_SAMPLERATE`=8000] (`main.cpp:89,134`). Wider than 8 kHz needs:
+raise `CW_SAMPLERATE`, grow the scanner FFT (keep ~8 Hz bins: 24 kHz→~3072), raise
+`CW_MAX_CHANNELS_HARD` (20). Per-channel decode is rate-agnostic (decimates to 1 kHz →
+constant cost/channel). The scaling wall: N independent tone-shifts cost N×rate; a full
+skimmer (hundreds of channels) wants FFT/polyphase channelisation instead. The 40 Hz
+matched filter makes a wide VFO valuable — ~8 isolated channels/kHz.
+
+**DISCIPLINE LESSONS (must survive — they cost real rework this session):**
+- **Validate on the EASY case FIRST.** Four soft-detector prototypes "proved" the wall
+  unreachable; all were truncated-envelope bugs. A negative result from a pipeline that
+  can't decode a clean signal is worth nothing. Always: clean CER ≈ 0 before trusting any
+  noise number.
+- **Never loosen a gate to admit a change** — ratchet DOWN to measured mean+2·stderr.
+  ([[never-loosen-quality-gates]] memory.)
+- **Headroom (ceiling) ≠ achievable.** Measure both; a green ceiling can still be
+  unreachable by a naive build (§44 trellis) OR reachable once the real blocker (filter
+  BW) is found (§52.9). Don't conclude "can't" from a buggy/underpowered attempt.
 
 ### Results of 2026-07 work (24 seeds, MSG_FULL, mean CER)
 
