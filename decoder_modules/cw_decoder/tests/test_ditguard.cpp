@@ -2006,3 +2006,50 @@ TEST_CASE("fb + narrow matched filter (§52.9b #42)", "[cw][.][softdet-bw]") {
     }
     printf("\nDoes a narrower (matched) filter fix the runaway + improve wins (research §52.9)?\n");
 }
+
+// §52 step 2 — the DECISIVE integration: the online streaming detector (fixed-lag
+// L=48 + windowed emission, steps 1a/1b) running on the matched-filter envelope.
+// Must reproduce the §52.9b batch+narrow wins (15wpm-n3 -> ~0.345, 25wpm-n3 ->
+// ~0.27) AND close part of the step-1b online penalty via the cleaner bimodal a
+// narrow filter yields. Fixed sw=0.01 (matches §52.9b; speed marg is separate).
+namespace {
+    std::vector<TruthTransition> fbOnlineBw(const GeneratedSignal& sig, const SignalParams& p,
+                                            float bpf, float sm, float sw, int W) {
+        int n; auto env = frontEnvelopeBw(sig, p, bpf, sm, n); if (n < 8) return {};
+        return fbStreamOnline(env, n, sw, 48, W, 128);
+    }
+}
+
+TEST_CASE("streaming online fb + matched filter (§52 step 2)", "[cw][.][softdet-stream-bw]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; bool cleanGate; };
+    auto nz=[](float dit,float amp){auto p=profileClean(dit);p.noiseAmp=amp;return p;};
+    const Prof profs[] = {
+        {"clean-30", profileClean(40.0f), true},
+        {"15wpm-n2",nz(80,2),false},{"25wpm-n3",nz(48,3),false},{"30wpm-n3",nz(40,3),false},
+        {"15wpm-n3",nz(80,3),false},{"15wpm-n4",nz(80,4),false},
+    };
+    const float bpf = 40, sm = 25;   // the §52.9b matched (narrow) filter
+    auto mkBatch = [](SignalParams p){
+        return [p](const GeneratedSignal& sig){ return std::unique_ptr<cw::IDecodeCore>(std::make_unique<cw::StagedCore>(
+            std::make_unique<cw::EnvelopeFrontEnd>(40,40,25,25), std::make_unique<OracleDetector>(fbSelfBw(sig,p,40,25,0.01f)),
+            std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN), std::make_unique<cw::BeamSymbolDecoder>())); }; };
+    auto mkOnline = [](SignalParams p, int W){
+        return [p,W](const GeneratedSignal& sig){ return std::unique_ptr<cw::IDecodeCore>(std::make_unique<cw::StagedCore>(
+            std::make_unique<cw::EnvelopeFrontEnd>(40,40,25,25), std::make_unique<OracleDetector>(fbOnlineBw(sig,p,40,25,0.01f,W)),
+            std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN), std::make_unique<cw::BeamSymbolDecoder>())); }; };
+
+    printf("\n=== §52 step 2 streaming online fb + matched filter (n=%d, bpf=%.0f sm=%.0f) ===\n", SEEDS, bpf, sm);
+    printf("%-10s %8s %10s %10s %10s  %s\n", "profile", "legacy", "batchNarr", "onlineW700", "onlineW1200", "note");
+    for (auto& pr : profs) {
+        float leg = runCell("legacy", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float bat = runCellWith(mkBatch(pr.params),"b",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean;
+        float o7  = runCellWith(mkOnline(pr.params,700),"o",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean;
+        float o12 = runCellWith(mkOnline(pr.params,1200),"o",pr.name,MSG_FULL(),pr.params,SEEDS).cerMean;
+        const char* note = "";
+        if (pr.cleanGate) note = (o12 < 0.05f) ? "CLEAN-OK" : "CLEAN-FAIL!";
+        else { static char b[48]; snprintf(b,sizeof b,"W1200 vs legacy %+.3f", o12-leg); note=b; }
+        printf("%-10s %8.4f %10.4f %10.4f %10.4f  %s\n", pr.name, leg, bat, o7, o12, note);
+    }
+    printf("\nFull streaming stack. Clean gate first; then W1200 should beat legacy where batchNarr does.\n");
+}
