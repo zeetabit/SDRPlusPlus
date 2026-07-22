@@ -4764,3 +4764,44 @@ not the noisy envelope), so the value is the CONTRAST: the same timing/decoder f
 0.8-0.9 with the real Schmitt detector and is perfect with oracle transitions — 100% of
 the noise-wall CER is detector transition error, at every speed. The build-#42 verdict
 is robust to the §43 multi-condition coverage that reverted earlier candidates.
+
+### 52.5c #42 achievable fraction — the ceiling is NOT cheaply reachable (2026-07-22)
+
+detOracle (§52.5) uses ground truth, so +0.8 is a CEILING. This probe measures a REAL
+non-oracle soft detector: a batch 2-Gaussian Viterbi HMM over the actual front-end
+envelope (`hmmTransitions`), replayed through the same timing/decoder, swept over the
+transition prior at n=96. `[softdet-achievable]`:
+
+| profile | legacy | detOracle | hmm best | fraction captured |
+|---|---|---|---|---|
+| 15wpm-n2 | 0.1227 | 0.0000 | 0.9027 | **−636%** (WORSE than legacy) |
+| 15wpm-n3 | 0.8173 | 0.0000 | 0.8423 | −3% |
+| 15wpm-n4 | 0.9108 | 0.0000 | 0.8295 | +9% |
+| 25wpm-n3 | 0.9567 | 0.0000 | 0.8226 | +14% |
+| 30wpm-n3 | 0.9123 | 0.0000 | 0.8248 | +10% |
+
+**The minimal HMM captures <15% of the ceiling and is catastrophically worse than
+legacy on moderate noise** (0.90 vs 0.12 at 15wpm-n2). Diagnosed (`[hmm-diag]`): on
+CLEAN it matches truth durations (a constant front-end-latency offset that cancels
+downstream), but on noise it flickers — spurious sub-dit elements (14 ms / 9 ms where
+a dit is 48 ms) from per-sample mark/space crossings the transition prior can't hold.
+Two good-faith fixes failed: a variance floor (0.86→0.86) and a 12 ms minimum-dwell
+merge (0.86→0.90, slightly worse). It also misses ~24 % of transitions even on clean.
+
+**This is the SAME poor capture as the LR detector (§52.5, +0.02–0.06).** Every cheap
+soft detector we can build — sequential CUSUM or minimal batch Viterbi — captures
+almost none of the +0.8 ceiling. The ceiling is real and robust (§52.5b), but a NAIVE
+implementation does not reach it; capturing it needs SparkGap-level sophistication
+(proper Rician emission, EM-fit variances, explicit element-duration/HMM structure,
+speed marginalisation) — hundreds of lines of tuned detector, not a probe.
+
+**Verdict — tempered from §52.5.** #42 has the largest ceiling in the campaign, but the
+achievable fraction CANNOT be cheaply estimated: naive soft detectors capture <15% and
+regress easy signals. #42 is therefore HIGH-CEILING / HIGH-EFFORT / HIGH-RISK — its
+payoff hinges entirely on implementation quality matching SparkGap's, whose only
+positive evidence is its real-40 m 92.9 % recall (a mature ~1400-line core). This is a
+build-and-see commitment, not an automatic go: the cheap achievable gate came back
+negative, exactly as it was designed to (cf. §44 saving the trellis effort). Recommend
+NOT starting the full build on the ceiling alone; if pursued, scope it as a real
+SparkGap-quality detector with an early kill-gate on the noise ladder, accepting that
+the minimal-prototype evidence is discouraging.

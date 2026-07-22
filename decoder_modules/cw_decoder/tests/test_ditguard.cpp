@@ -936,3 +936,136 @@ TEST_CASE("soft-detector headroom grid: WPM x noise, mean+worst (§52.5b #42)", 
         }
     }
 }
+
+// §52.5c #42 achievable-fraction probe — how much of the +0.8 detector ceiling does
+// a REAL (non-oracle) batch soft detector capture? detOracle uses ground truth, so
+// +0.8 is a ceiling; this measures a genuine 2-state Viterbi HMM on the NOISY
+// envelope (front end's real output), replayed through the same timing/decoder.
+// Sweeps the transition prior over multi-seed means (no single-seed tuning).
+namespace {
+    // Batch 2-Gaussian Viterbi over the real front-end envelope -> key transitions
+    // (internal-rate sample coords, matching truthTransitions).
+    std::vector<TruthTransition> hmmTransitions(const GeneratedSignal& sig,
+                                                const SignalParams& p, float switchProb,
+                                                float internalRate = 1000.0f) {
+        cw::EnvelopeFrontEnd fe;
+        fe.init(p.toneFreq, p.sampleRate, internalRate);
+        std::vector<float> env(sig.samples.size() + 8);
+        int n = fe.process((int)sig.samples.size(), sig.samples.data(), env.data());
+        if (n < 8) { return {}; }
+        env.resize(n);
+
+        std::vector<float> s(env);
+        std::sort(s.begin(), s.end());
+        auto pct = [&](float f){ return s[std::min(n - 1, std::max(0, (int)(f * n))) ]; };
+        const float muLo = pct(0.25f), muHi = pct(0.90f);
+        auto varOf = [&](int lo, int hi, float mu){
+            double sv = 0; for (int i = lo; i < hi; i++) { double d = s[i] - mu; sv += d * d; }
+            return std::max((float)(sv / std::max(1, hi - lo)), 1e-9f);
+        };
+        if (muHi - muLo < 1e-6f) { return {}; }
+        // Floor variances to a fraction of the mark/space separation: percentile
+        // bands over warmup silence + gaps collapse to near-zero spread, which makes
+        // the emission Gaussians hyper-confident and flip states on any noise spike.
+        const float vFloor = (0.30f * (muHi - muLo)) * (0.30f * (muHi - muLo));
+        const float vLo = std::max(varOf(0, (int)(0.40f * n), muLo), vFloor);
+        const float vHi = std::max(varOf((int)(0.80f * n), n, muHi), vFloor);
+
+        auto em = [](float v, float mu, float var){ double d = v - mu; return -0.5 * (std::log(var) + d * d / var); };
+        const double stay = std::log(1.0 - switchProb), cross = std::log(switchProb);
+        std::vector<uint8_t> back(2 * n, 0);
+        double d0 = em(env[0], muLo, vLo), d1 = em(env[0], muHi, vHi);
+        for (int t = 1; t < n; t++) {
+            double n0s = d0 + stay, n0c = d1 + cross;     // -> space
+            double n1s = d1 + stay, n1c = d0 + cross;     // -> mark
+            double a0 = n0s >= n0c ? n0s : n0c; back[2*t]   = n0s >= n0c ? 0 : 1;
+            double a1 = n1s >= n1c ? n1s : n1c; back[2*t+1] = n1s >= n1c ? 1 : 0;
+            d0 = a0 + em(env[t], muLo, vLo);
+            d1 = a1 + em(env[t], muHi, vHi);
+        }
+        std::vector<uint8_t> path(n);
+        path[n-1] = d1 >= d0 ? 1 : 0;
+        for (int t = n - 1; t > 0; t--) { path[t-1] = back[2*t + path[t]]; }
+
+        // Minimum-dwell anti-flicker: merge runs shorter than minRun (ms==samples at
+        // 1 kHz) into the previous state. Sub-dit runs are noise flicker, not real
+        // elements — the duration constraint a bare per-sample Viterbi lacks. 12 ms
+        // is shorter than any real dit (40 wpm dit = 30 ms), so it removes only flicker.
+        const int minRun = 12;
+        for (int pass = 0; pass < 3; pass++) {
+            int i = 0;
+            while (i < n) {
+                int j = i; while (j < n && path[j] == path[i]) { j++; }
+                if (j - i < minRun && i > 0) { for (int k = i; k < j; k++) { path[k] = path[i-1]; } }
+                i = j;
+            }
+        }
+
+        std::vector<TruthTransition> out;
+        uint8_t prev = 0;
+        for (int t = 0; t < n; t++) {
+            if (path[t] != prev) { out.push_back({(long long)t, path[t] == 1}); prev = path[t]; }
+        }
+        return out;
+    }
+}
+
+TEST_CASE("HMM achievable fraction vs detector ceiling (§52.5c #42)", "[cw][.][softdet-achievable]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; };
+    auto n = [](float dit, float amp){ auto p = profileClean(dit); p.noiseAmp = amp; return p; };
+    const Prof profs[] = {
+        {"15wpm-n2", n(80.0f,2.0f)}, {"15wpm-n3", n(80.0f,3.0f)}, {"15wpm-n4", n(80.0f,4.0f)},
+        {"25wpm-n3", n(48.0f,3.0f)}, {"30wpm-n3", n(40.0f,3.0f)},
+    };
+    const float switches[] = {0.005f, 0.010f, 0.020f, 0.040f};
+
+    auto detOracle = [](SignalParams p){ return [p](const GeneratedSignal& sig){
+        return makeOracleCore(sig, p, OracleConfig{true, false}); }; };
+    auto hmmCore = [](SignalParams p, float sw){ return [p, sw](const GeneratedSignal& sig){
+        return std::unique_ptr<cw::IDecodeCore>(std::make_unique<cw::StagedCore>(
+            std::make_unique<cw::EnvelopeFrontEnd>(),
+            std::make_unique<OracleDetector>(hmmTransitions(sig, p, sw)),
+            std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),
+            std::make_unique<cw::BeamSymbolDecoder>())); }; };
+
+    printf("\n=== §52.5c #42 achievable fraction (batch Viterbi HMM, real envelope, n=%d) ===\n", SEEDS);
+    printf("fraction = (legacy - hmmBest) / (legacy - detOracle) = captured / ceiling\n");
+    printf("%-11s %8s %9s", "profile", "legacy", "detOrac");
+    for (float sw : switches) { printf("  hmm@%.3f", sw); }
+    printf("  %8s %9s\n", "hmmBest", "fraction");
+    for (const auto& pr : profs) {
+        float leg = runCell("legacy", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float dO  = runCellWith(detOracle(pr.params), "dO", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        printf("%-11s %8.4f %9.4f", pr.name, leg, dO);
+        float best = 1e9f;
+        for (float sw : switches) {
+            float h = runCellWith(hmmCore(pr.params, sw), "hmm", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+            printf("  %8.4f", h);
+            best = std::min(best, h);
+        }
+        float frac = (leg - dO) > 1e-6f ? (leg - best) / (leg - dO) : 0.0f;
+        printf("  %8.4f %8.1f%%\n", best, 100.0f * frac);
+    }
+    printf("\nHigh fraction => a real soft detector captures the ceiling -> build the full HMM.\n");
+    printf("Low fraction  => even batch Viterbi stalls like LR -> the ceiling is not reachable.\n");
+}
+
+// §52.5c diagnostic — why is the HMM garbage even on clean? Compare its transition
+// list to ground truth on clean/moderate signals. A correct HMM on a clean envelope
+// should nearly match truth; a wild count mismatch localises the bug.
+TEST_CASE("HMM transition diagnostic (§52.5c)", "[cw][.][hmm-diag]") {
+    struct C { const char* nm; float amp; };
+    for (C c : {C{"clean", 0.0f}, C{"n1.0", 1.0f}, C{"n2.0", 2.0f}}) {
+        auto p = profileClean(48.0f); p.noiseAmp = c.amp; p.seed = 42;
+        auto sig = generateMessage("CQ CQ DE W1AW W1AW TEST", p);
+        auto tt = truthTransitions(sig, p.sampleRate, 1000.0f);
+        auto ht = hmmTransitions(sig, p, 0.01f);
+        printf("\n[%s] truth trans=%d  hmm trans=%d\n", c.nm, (int)tt.size(), (int)ht.size());
+        printf("  truth first8:");
+        for (int i = 0; i < 8 && i < (int)tt.size(); i++) printf(" %lld/%d", tt[i].sample, tt[i].keyDown);
+        printf("\n  hmm   first8:");
+        for (int i = 0; i < 8 && i < (int)ht.size(); i++) printf(" %lld/%d", ht[i].sample, ht[i].keyDown);
+        printf("\n");
+    }
+}
