@@ -218,3 +218,120 @@ TEST_CASE("Channel.modelFit is populated and discriminates (§52.3 #41)", "[cw][
     CHECK(fitCW > 0.1f);        // real CW populates a clear positive fit
     CHECK(fitCW > fitCar);      // carrier does not
 }
+
+// §52.3 Stage 3a — joint (getSNR, modelFit) for real CW across SNR vs a het, to
+// design a SAFE channel-manager gate. Risk: weak CW near the SNR gate also has low
+// modelFit, so a naive `snr>t AND fit>t` would drop real weak CW. Goal: confirm a
+// het is (high SNR, low fit) while real CW is (SNR-tracks-fit), so the veto can fire
+// ONLY on high-SNR-low-fit and never touch low-SNR channels.
+TEST_CASE("model-fit gate design: joint SNR x fit (§52.3 #41)", "[cw][.][modelfit-gate]") {
+    auto measure = [](const std::vector<dsp::complex_t>& iq) {
+        cw::Channel ch; ch.init(0, 700.0f);
+        int off = 0, chunk = 4096;
+        while (off < (int)iq.size()) {
+            int n = std::min(chunk, (int)iq.size() - off);
+            ch.process(n, iq.data() + off);
+            off += n;
+        }
+        return std::make_pair(ch.snr, ch.modelFit);
+    };
+
+    printf("\n=== §52.3 gate design: getSNR vs modelFit ===\n");
+    printf("%-14s %8s %10s\n", "signal", "snr", "modelFit");
+    for (float amp : {0.0f, 1.0f, 1.5f, 2.0f, 3.0f}) {
+        auto p = cw_test::profileClean(48.0f); p.noiseAmp = amp;
+        auto sig = cw_test::generateMessage("CQ CQ DE W1AW W1AW TEST", p);
+        auto r = measure(sig.samples);
+        char nm[24]; snprintf(nm, sizeof(nm), "cw-n%.1f", amp);
+        printf("%-14s %8.2f %10.4f\n", nm, r.first, r.second);
+    }
+    auto het = measure(continuousTone(true, (int)(3.0f * 8000.0f)));
+    printf("%-14s %8.2f %10.4f\n", "het",   het.first, het.second);
+    // Real noise-only (key-up with additive noise): the actual false-positive case —
+    // amplitude contrast passes getSNR, but there is no keyed two-level structure.
+    for (float amp : {1.0f, 2.0f, 3.0f}) {
+        cw_test::SignalParams p = cw_test::profileClean(80.0f); p.noiseAmp = amp;
+        cw_test::CWSignalGenerator gen; gen.init(p);
+        std::vector<dsp::complex_t> buf((int)(3.0f * 8000.0f));
+        gen.generate(buf.data(), (int)buf.size(), false);   // key-up: noise only
+        auto r = measure(buf);
+        char nm[24]; snprintf(nm, sizeof(nm), "noise-n%.1f", amp);
+        printf("%-14s %8.2f %10.4f\n", nm, r.first, r.second);
+    }
+    printf("\nSafe gate: veto only high-SNR + low-fit (non-CW contrast). Low-SNR to SNR.\n");
+}
+
+// §52.3 Stage 3 — benchmark BOTH gate directions before wiring either. Policies as
+// pure decisions over the measured (getSNR, modelFit) of labeled signals:
+//   snr-only   : keep if snr > 6            (current channel_manager)
+//   recall(OR) : keep if snr > 6 OR fit > t (rescue marginal real CW)
+//   prec(AND)  : keep if snr > 6 AND fit > t(drop non-CW-but-loud faster)
+// Ground truth: real CW at usable SNR should be KEPT; het/noise/non-CW DROPPED.
+namespace {
+    // Non-CW interferer with amplitude CONTRAST but no keyed two-level structure:
+    // a tone under slow sinusoidal AM (a warble/fluttery carrier). It is the signal
+    // a precision gate targets — contrast passes getSNR, structure isn't Morse.
+    std::vector<dsp::complex_t> warbleTone(int samples, float amHz) {
+        cw_test::SignalParams p = cw_test::profileClean(80.0f);
+        std::vector<dsp::complex_t> buf(samples);
+        const float w = 2.0f * M_PI * 700.0f / p.sampleRate;
+        const float wm = 2.0f * M_PI * amHz / p.sampleRate;
+        for (int i = 0; i < samples; i++) {
+            float am = 0.55f + 0.45f * sinf(wm * i);   // 0.1..1.0 amplitude, never off
+            buf[i] = { am * cosf(w * i), am * sinf(w * i) };
+        }
+        return buf;
+    }
+}
+
+TEST_CASE("channel-gate policy benchmark: recall vs precision (§52.3 #41)", "[cw][.][modelfit-gate-bench]") {
+    auto measure = [](const std::vector<dsp::complex_t>& iq) {
+        cw::Channel ch; ch.init(0, 700.0f);
+        int off = 0, chunk = 4096;
+        while (off < (int)iq.size()) {
+            int n = std::min(chunk, (int)iq.size() - off);
+            ch.process(n, iq.data() + off); off += n;
+        }
+        return std::make_pair(ch.snr, ch.modelFit);
+    };
+    const int SAMP = (int)(3.0f * 8000.0f);
+
+    struct Case { const char* name; std::vector<dsp::complex_t> iq; bool isCW; };
+    std::vector<Case> cases;
+    for (float amp : {0.0f, 1.0f, 1.5f, 2.0f}) {
+        auto p = cw_test::profileClean(48.0f); p.noiseAmp = amp;
+        char nm[24]; snprintf(nm, sizeof(nm), "cw-n%.1f", amp);
+        cases.push_back({strdup(nm), cw_test::generateMessage("CQ CQ DE W1AW W1AW TEST", p).samples, true});
+    }
+    cases.push_back({"het", continuousTone(true, SAMP), false});
+    { cw_test::SignalParams p = cw_test::profileClean(80.0f); p.noiseAmp = 2.0f;
+      cw_test::CWSignalGenerator gen; gen.init(p);
+      std::vector<dsp::complex_t> b(SAMP); gen.generate(b.data(), SAMP, false);
+      cases.push_back({"noise", b, false}); }
+    cases.push_back({"warble-3hz", warbleTone(SAMP, 3.0f), false});
+    cases.push_back({"warble-1hz", warbleTone(SAMP, 1.0f), false});
+
+    printf("\n=== §52.3 gate policy benchmark ===\n");
+    printf("%-12s %5s %8s %9s\n", "signal", "isCW", "snr", "modelFit");
+    std::vector<std::pair<bool,std::pair<float,float>>> meas;
+    for (auto& c : cases) {
+        auto r = measure(c.iq);
+        printf("%-12s %5d %8.2f %9.4f\n", c.name, c.isCW, r.first, r.second);
+        meas.push_back({c.isCW, r});
+    }
+    // Recall(OR) gate tradeoff vs fit threshold: rescue marginal CW without
+    // admitting non-CW contrast (warble). The CW-vs-warble margin is thin because
+    // the scorer is amplitude-only (no timing) — a warble's amplitude histogram
+    // matches marginal CW. This is the #42 (temporal HMM) boundary, measured.
+    printf("\nrecall(OR) gate: keep if snr>6 OR fit>T\n");
+    printf("%-6s  %-14s  %-12s\n", "T", "CW-kept(recall)", "junk-kept(FP)");
+    for (float T : {0.05f, 0.10f, 0.25f, 0.40f}) {
+        int kCW=0, kJunk=0, nCW=0, nJunk=0;
+        for (auto& m : meas) {
+            bool keep = m.second.first > 6.0f || m.second.second > T;
+            if (m.first) { nCW++; kCW+=keep; } else { nJunk++; kJunk+=keep; }
+        }
+        printf("%-6.2f  %d/%d             %d/%d\n", T, kCW,nCW, kJunk,nJunk);
+    }
+    printf("snr-only baseline: CW-kept 1/4, junk-kept 0/4 (drops real noisy CW).\n");
+}

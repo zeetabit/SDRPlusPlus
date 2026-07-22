@@ -4647,3 +4647,47 @@ reads the envelope and writes a separate field, never touching the decode path.
 decisions (replace/augment the `snr > 6.0` gate, `:182`) behind a config flag, plus
 surface it in `getMarkers`; validated with the `test_channel_manager` harness on a
 carrier+CW multi-tone. The behavior change, gated and reversible.
+
+### 52.4 #41 Stage 3 — model-fit keep-alive gate; the premise shifted (2026-07-22)
+
+**Stage 3a overturned the SparkGap premise.** Measured the joint (getSNR, modelFit)
+of labeled signals through the real front end (`[modelfit-gate]`):
+
+| signal | getSNR | modelFit |
+|---|---|---|
+| cw clean | 74.6 | 2.51 |
+| cw-n1.0 | 5.37 | 0.795 |
+| cw-n1.5 | 4.20 | 0.344 |
+| cw-n2.0 | 3.52 | 0.118 |
+| het | 0.00 | −0.001 |
+| noise-n* | 2.59 | 0.023 |
+
+`getSNR` here is a **keying-contrast** ratio (10·log10 signalPeak/noiseFloor), so a
+steady carrier already scores 0 and noise 2.6 — both below the `snr>6` gate. The
+"reject loud non-Morse" premise is empirically MOOT in this codebase. The real defect
+is the opposite: `snr>6` **drops real CW under moderate noise** (n1.0/n1.5 report
+snr 4-5). modelFit tracks CW down further (0.34-0.80) — a recall lever, not precision.
+
+**Benchmarked BOTH gate directions (`[modelfit-gate-bench]`), incl. a non-CW-contrast
+warble (slow-AM carrier — passes getSNR, isn't Morse):**
+
+| recall(OR) T | CW-kept | junk-kept |
+|---|---|---|
+| snr-only | 1/4 | 0/4 |
+| 0.10 | 4/4 | 2/4 (admits warbles) |
+| **0.25** | **3/4** | **0/4** |
+| 0.40 | 2/4 | 0/4 |
+
+precision(AND) ≡ snr-only (no junk clears snr>6, so it never differs). recall(OR) at
+**T=0.25 strictly dominates** snr-only — 3/4 CW vs 1/4, 0 junk — rescuing n1.0/n1.5
+while rejecting warble/noise/het. It loses only cw-n2.0 (snr 3.5): amplitude-only fit
+cannot separate the heaviest-noise CW from a warble (warble-3hz fit 0.191 > cw-n2.0
+0.118 — same amplitude histogram, different TIMING). **That convergence is the #42
+(temporal HMM) boundary, now measured, not assumed.**
+
+**Shipped:** `channel_manager` idle keep-alive becomes `snr>6 OR (modelFitGate &&
+modelFit>modelFitKeep)`, `modelFitGate=true`, `modelFitKeep=0.25` (config-exposed). OR
+form can never drop what snr>6 keeps. Integration test: marginal CW survives with the
+gate, idles out without (`[manager]`). Decode byte-identical (registry 38), suite
+1683/230 green. #41 complete through Stage 3; robustness to exotic contrast
+interference is deferred to #42's temporal model.

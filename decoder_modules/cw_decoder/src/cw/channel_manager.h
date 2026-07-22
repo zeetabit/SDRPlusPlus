@@ -177,9 +177,18 @@ namespace cw {
             }
 
             // ── Step 2: Update idle counters on existing channels ──
+            // §52.3 #41: the keying-contrast SNR idles out real CW under moderate
+            // noise (n1.0-1.5 report snr 4-5 < 6) — a recall bug, not precision.
+            // The model-fit gate rescues those: keep alive if EITHER the SNR is high
+            // OR the envelope has clear keyed two-level structure (modelFit > keep).
+            // Measured [modelfit-gate-bench]: recall 1/4->3/4 at 0 junk cost; the
+            // OR form can never drop what snr>6 already keeps. Amplitude-only fit
+            // cannot separate the heaviest-noise CW from a warble (the #42 boundary).
             for (auto& e : entries) {
                 if (e.pinned) { continue; }
-                if (e.channel->snr > 6.0f) { e.idleFrames = 0; }
+                const bool active = e.channel->snr > 6.0f ||
+                                    (modelFitGate && e.channel->modelFit > modelFitKeep);
+                if (active) { e.idleFrames = 0; }
                 else { e.idleFrames++; }
             }
 
@@ -260,6 +269,8 @@ namespace cw {
                 if (maxChannels > CW_MAX_CHANNELS_HARD) { maxChannels = CW_MAX_CHANNELS_HARD; }
                 autoDetect = c.value("autoDetect", true);
                 scanThreshold = c.value("scanThreshold", 10.0f);
+                modelFitGate = c.value("modelFitGate", true);          // §52.3 #41
+                modelFitKeep = c.value("modelFitKeep", 0.25f);
                 if (c.contains("pinnedChannels") && c["pinnedChannels"].is_array()) {
                     pinnedTones.clear();
                     for (auto& ch : c["pinnedChannels"]) {
@@ -275,6 +286,8 @@ namespace cw {
                 conf["maxChannels"] = maxChannels;
                 conf["autoDetect"] = autoDetect;
                 conf["scanThreshold"] = scanThreshold;
+                conf["modelFitGate"] = modelFitGate;       // §52.3 #41
+                conf["modelFitKeep"] = modelFitKeep;
                 json pinned = json::array();
                 for (auto& t : pinnedTones) { pinned.push_back({{"tone", t}}); }
                 conf["pinnedChannels"] = pinned;
@@ -320,6 +333,8 @@ namespace cw {
         int maxChannels = CW_MAX_CHANNELS_DEFAULT;
         bool autoDetect = true;
         float scanThreshold = 10.0f;
+        bool modelFitGate = true;      // §52.3 #41: keep marginal real CW alive on model fit
+        float modelFitKeep = 0.25f;    // fit threshold for the OR keep-alive (measured)
         std::vector<ChannelEntry> entries;     // Modified ONLY under mtx
         std::vector<StableTone> stableTones;   // Modified ONLY under mtx
         std::vector<float> pinnedTones;

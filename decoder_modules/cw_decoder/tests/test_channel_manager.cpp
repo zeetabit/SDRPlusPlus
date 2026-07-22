@@ -260,3 +260,37 @@ TEST_CASE("ChannelManager rebuildPinnedList", "[cw][manager]") {
     REQUIRE(mgr.pinnedTones[0] == Approx(700.0f));
     REQUIRE(mgr.pinnedTones[1] == Approx(900.0f));
 }
+
+// §52.3 #41 — the model-fit keep-alive gate: a marginal real CW channel (snr<6 but
+// high modelFit) survives idle timeout when the gate is ON, and is removed when it
+// is OFF. Isolates the idle decision by feeding silence (so the scanner never
+// refreshes the channel) and overriding snr/modelFit to the marginal-CW case each
+// frame. Ground truth from [modelfit-gate-bench]: real CW at n1.0-1.5 sits here.
+namespace {
+    bool marginalCwSurvives(bool gateOn) {
+        cw::ChannelManager mgr;
+        mgr.init(8000.0f);
+        mgr.autoDetect = true;
+        mgr.scanThreshold = 6.0f;
+        mgr.modelFitGate = gateOn;
+        mgr.addChannel(700.0f, false);   // one auto (non-pinned) channel
+
+        dsp::complex_t buf[1024];
+        for (int i = 0; i < CW_IDLE_TIMEOUT_ACTIVE + 80; i++) {
+            for (int j = 0; j < 1024; j++) { buf[j].re = 0.0f; buf[j].im = 0.0f; }
+            mgr.process(buf, 1024);                 // silence: scanner finds nothing
+            for (auto& e : mgr.entries) {           // marginal real CW: snr<6, fit high
+                e.channel->snr = 4.0f;
+                e.channel->modelFit = 0.5f;
+            }
+            mgr.updateChannels();
+        }
+        for (auto& e : mgr.entries) { if (!e.pinned) return true; }
+        return false;
+    }
+}
+
+TEST_CASE("ChannelManager model-fit gate rescues marginal CW (§52.3 #41)", "[cw][manager]") {
+    CHECK(marginalCwSurvives(true));    // gate ON: kept alive on model fit
+    CHECK_FALSE(marginalCwSurvives(false));  // gate OFF: snr<6 idles it out
+}
