@@ -23,6 +23,8 @@ namespace cw {
         float muLo  = 0.0f;   // fitted noise-floor mean
         float muHi  = 0.0f;   // fitted mark-level mean
         float wHi   = 0.0f;   // fitted mark occupancy (duty-cycle estimate)
+        float vLo   = 0.0f;   // fitted noise-floor variance (§52.5d: HMM emission)
+        float vHi   = 0.0f;   // fitted mark-level variance
     };
 
     class ModelFitScorer {
@@ -100,6 +102,8 @@ namespace cw {
             r.muLo = (float)muLo;
             r.muHi = (float)muHi;
             r.wHi  = (float)wHi;
+            r.vLo  = (float)vLo;
+            r.vHi  = (float)vHi;
             return r;
         }
 

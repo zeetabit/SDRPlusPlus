@@ -4805,3 +4805,49 @@ negative, exactly as it was designed to (cf. §44 saving the trellis effort). Re
 NOT starting the full build on the ceiling alone; if pursued, scope it as a real
 SparkGap-quality detector with an early kill-gate on the noise ladder, accepting that
 the minimal-prototype evidence is discouraging.
+
+### 52.5d/e #42 proper soft-detector benchmark — the wall is unreachable by soft detection (2026-07-22)
+
+Answering "let's do a proper benchmark for the soft detector" — 7 detectors (3 built
+prototypes + 4 shipped variants), multi-seed n=96, WPM x noise grid, vs legacy and the
+detOracle ceiling.
+
+**§52.5d — a PROPER forward-backward prototype also fails, localised to the detector.**
+Replaced the §52.5c Viterbi (hard MAP) with forward-backward (marginal posterior
+gamma, what SparkGap uses) + EM-fit emission params (`ModelFitScorer`, vLo/vHi exposed).
+Still ~0.87 CER on 15wpm-n2 (legacy 0.12). Localised (`[softdet-fb-diag]`): fb+kalman
+and fb+**clairvoyant** (perfect timing) give the SAME CER — so it is NOT timing/seed
+corruption, the transitions themselves are bad. Counts: fb emits 48 transitions vs 104
+truth on 15wpm-n2 — MISSING half the marks. EM params make it under-detect; percentile
+params (§52.5c) over-flicker. Neither regime is right without a proper duration model.
+
+**§52.5e — the shipped soft-detector variants across the grid (`[softdet-existing]`):**
+
+| wpm | noise | legacy | detOracle | best real soft | fraction |
+|---|---|---|---|---|---|
+| 15 | 2.0 | 0.1227 | 0 | 0.0289 (lr+log) | **76.4%** |
+| 15 | 3.0 | 0.8173 | 0 | 0.7060 | 13.6% |
+| 15 | 4.0 | 0.9108 | 0 | 0.8904 | 2.2% |
+| 25 | 2.0 | 0.1843 | 0 | 0.3826 | **−108%** |
+| 25 | 3.0 | 0.9567 | 0 | 0.9093 | 5.0% |
+| 30 | 2.0 | 0.2868 | 0 | 0.5957 | **−108%** |
+| 30 | 3/4 | 0.91/0.89 | 0 | ~0.92/0.89 | ~0% |
+
+**The definitive map.** The +0.8 ceiling lives at HEAVY noise (n3/n4). There, the best
+REAL tuned soft detector captures 2–14%. Soft detection works in exactly ONE corner —
+slow + moderate noise (15wpm-n2, 76%) — but that corner's absolute headroom is small
+(0.12) and legacy already handles it. On fast CW it is actively WORSE (−108%, the §25
+LR-revert regression). Seven detectors, none reach the wall.
+
+**Final #42 verdict.** The noise wall is a detector problem (§52.5, robust §52.5b), but
+it is NOT reachable by soft detection as we can implement it — real and prototype soft
+detectors capture ~0–14% at heavy noise and regress fast CW. The one working regime has
+small headroom legacy already covers. SparkGap's 92.9% real-40 m recall does not
+contradict this: real-air fades are less extreme than noise4.0 (~−10 dB AWGN), and its
+full model (Rician emission with I0, per-window EM warm-start, semi-Markov duration,
+16-bin speed marginalisation) is far beyond any of these 7 detectors. **Recommend: do
+NOT build #42.** The ceiling is real but the benchmark evidence is that reaching it at
+the wall is not achievable without essentially reproducing SparkGap in full and betting
+our heavy-noise regime is more pessimistic than real air — a Very-High-effort,
+evidence-against bet. Bank the finding; #42 stays measured-and-deferred, now with a
+7-detector benchmark behind the deferral (the §44 discipline, applied to the detector).

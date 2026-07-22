@@ -5,6 +5,7 @@
 #include "cw_oracle.h"
 #include "cw_snr.h"
 #include "cw_detector_score.h"
+#include <cw/model_fit.h>
 
 using namespace cw_test;
 
@@ -1068,4 +1069,186 @@ TEST_CASE("HMM transition diagnostic (§52.5c)", "[cw][.][hmm-diag]") {
         for (int i = 0; i < 8 && i < (int)ht.size(); i++) printf(" %lld/%d", ht[i].sample, ht[i].keyDown);
         printf("\n");
     }
+}
+
+// §52.5d #42 PROPER soft detector — forward-backward (marginal posterior) instead
+// of Viterbi (hard MAP), with EM-fit emission params (ModelFitScorer). The §52.5c
+// Viterbi flickered because a hard path flips on any noise sample; the FB posterior
+// gamma_t integrates BOTH past and future, so a brief noise spike is pulled back by
+// its neighbours. This is what SparkGap actually uses ("never thresholded inside").
+namespace {
+    std::vector<TruthTransition> fbTransitions(const GeneratedSignal& sig,
+                                               const SignalParams& p, float switchProb,
+                                               float internalRate = 1000.0f) {
+        cw::EnvelopeFrontEnd fe;
+        fe.init(p.toneFreq, p.sampleRate, internalRate);
+        std::vector<float> env(sig.samples.size() + 8);
+        int n = fe.process((int)sig.samples.size(), sig.samples.data(), env.data());
+        if (n < 8) { return {}; }
+        env.resize(n);
+
+        cw::ModelFitScorer sc;
+        auto f = sc.score(env.data(), n);
+        float muLo = f.muLo, muHi = f.muHi;
+        if (muHi - muLo < 1e-6f) { return {}; }
+        float vf = 0.25f * (muHi - muLo); vf *= vf;
+        float vLo = std::max(f.vLo, vf), vHi = std::max(f.vHi, vf);
+
+        auto emit = [&](int t, double& e0, double& e1) {
+            double d0 = env[t] - muLo, d1 = env[t] - muHi;
+            double lb0 = -0.5 * (d0 * d0 / vLo + std::log(vLo));
+            double lb1 = -0.5 * (d1 * d1 / vHi + std::log(vHi));
+            double m = std::max(lb0, lb1); e0 = std::exp(lb0 - m); e1 = std::exp(lb1 - m);
+        };
+        const double stay = 1.0 - switchProb, cross = switchProb;
+        std::vector<double> a0(n), a1(n), b0(n), b1(n), c(n);
+        double e0, e1;
+        emit(0, e0, e1);
+        a0[0] = 0.5 * e0; a1[0] = 0.5 * e1;
+        c[0] = 1.0 / (a0[0] + a1[0] + 1e-300); a0[0] *= c[0]; a1[0] *= c[0];
+        for (int t = 1; t < n; t++) {
+            emit(t, e0, e1);
+            double x0 = (a0[t-1] * stay + a1[t-1] * cross) * e0;
+            double x1 = (a1[t-1] * stay + a0[t-1] * cross) * e1;
+            c[t] = 1.0 / (x0 + x1 + 1e-300); a0[t] = x0 * c[t]; a1[t] = x1 * c[t];
+        }
+        b0[n-1] = 1.0; b1[n-1] = 1.0;
+        for (int t = n - 2; t >= 0; t--) {
+            emit(t + 1, e0, e1);
+            b0[t] = (stay * e0 * b0[t+1] + cross * e1 * b1[t+1]) * c[t];
+            b1[t] = (stay * e1 * b1[t+1] + cross * e0 * b0[t+1]) * c[t];
+        }
+        std::vector<uint8_t> path(n);
+        for (int t = 0; t < n; t++) { path[t] = (a1[t] * b1[t] > a0[t] * b0[t]) ? 1 : 0; }
+        const int minRun = 12;
+        for (int pass = 0; pass < 3; pass++) {
+            int i = 0;
+            while (i < n) {
+                int j = i; while (j < n && path[j] == path[i]) { j++; }
+                if (j - i < minRun && i > 0) { for (int k = i; k < j; k++) { path[k] = path[i-1]; } }
+                i = j;
+            }
+        }
+        std::vector<TruthTransition> out; uint8_t prev = 0;
+        for (int t = 0; t < n; t++) { if (path[t] != prev) { out.push_back({(long long)t, path[t]==1}); prev = path[t]; } }
+        return out;
+    }
+}
+
+TEST_CASE("forward-backward soft detector benchmark (§52.5d #42)", "[cw][.][softdet-fb]") {
+    constexpr int SEEDS = 96;
+    struct Prof { const char* name; SignalParams params; };
+    auto n = [](float dit, float amp){ auto p = profileClean(dit); p.noiseAmp = amp; return p; };
+    const Prof profs[] = {
+        {"15wpm-n2", n(80.0f,2.0f)}, {"15wpm-n3", n(80.0f,3.0f)}, {"15wpm-n4", n(80.0f,4.0f)},
+        {"25wpm-n2", n(48.0f,2.0f)}, {"25wpm-n3", n(48.0f,3.0f)},
+        {"30wpm-n2", n(40.0f,2.0f)}, {"30wpm-n3", n(40.0f,3.0f)},
+    };
+    const float switches[] = {0.005f, 0.010f, 0.020f};
+
+    auto detOracle = [](SignalParams p){ return [p](const GeneratedSignal& sig){
+        return makeOracleCore(sig, p, OracleConfig{true, false}); }; };
+    auto fbCore = [](SignalParams p, float sw){ return [p, sw](const GeneratedSignal& sig){
+        return std::unique_ptr<cw::IDecodeCore>(std::make_unique<cw::StagedCore>(
+            std::make_unique<cw::EnvelopeFrontEnd>(),
+            std::make_unique<OracleDetector>(fbTransitions(sig, p, sw)),
+            std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),
+            std::make_unique<cw::BeamSymbolDecoder>())); }; };
+
+    printf("\n=== §52.5d #42 forward-backward soft detector (real envelope, n=%d) ===\n", SEEDS);
+    printf("%-11s %8s %9s", "profile", "legacy", "detOrac");
+    for (float sw : switches) { printf("   fb@%.3f", sw); }
+    printf("  %8s %9s\n", "fbBest", "fraction");
+    for (const auto& pr : profs) {
+        float leg = runCell("legacy", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float dO  = runCellWith(detOracle(pr.params), "dO", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        printf("%-11s %8.4f %9.4f", pr.name, leg, dO);
+        float best = 1e9f;
+        for (float sw : switches) {
+            float h = runCellWith(fbCore(pr.params, sw), "fb", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+            printf("  %8.4f", h); best = std::min(best, h);
+        }
+        float frac = (leg - dO) > 1e-6f ? (leg - best) / (leg - dO) : 0.0f;
+        printf("  %8.4f %8.1f%%\n", best, 100.0f * frac);
+    }
+    printf("\nfb should beat the §52.5c Viterbi: posterior smoothing suppresses gap flicker.\n");
+    printf("If fb ALSO stalls, even the right method fails without SparkGap's full model.\n");
+}
+
+// §52.5d diag — WHERE does fb fail? Same detector, two timings:
+//   fb+kalman     : real timing (seeds dit from early elements)
+//   fb+clairvoyant: PERFECT timing (knows the true dit)
+// If fb+clairvoyant decodes well, the fb TRANSITIONS are fine and the failure is
+// Kalman seed corruption (early flicker poisons the dit estimate -> cascade). If
+// fb+clairvoyant also fails, the transitions themselves are bad. Also prints the
+// fitted params + transition count vs truth.
+TEST_CASE("fb failure localisation (§52.5d)", "[cw][.][softdet-fb-diag]") {
+    constexpr int SEEDS = 48;
+    struct Prof { const char* name; SignalParams params; };
+    auto n = [](float dit, float amp){ auto p = profileClean(dit); p.noiseAmp = amp; return p; };
+    const Prof profs[] = { {"25wpm-n2", n(48.0f,2.0f)}, {"15wpm-n2", n(80.0f,2.0f)} };
+
+    auto fbKal = [](SignalParams p){ return [p](const GeneratedSignal& sig){
+        return std::unique_ptr<cw::IDecodeCore>(std::make_unique<cw::StagedCore>(
+            std::make_unique<cw::EnvelopeFrontEnd>(),
+            std::make_unique<OracleDetector>(fbTransitions(sig, p, 0.01f)),
+            std::make_unique<cw::AdaptiveTimingStage>(cw::TIMING_KALMAN),
+            std::make_unique<cw::BeamSymbolDecoder>())); }; };
+    auto fbClairv = [](SignalParams p){ return [p](const GeneratedSignal& sig){
+        return std::unique_ptr<cw::IDecodeCore>(std::make_unique<cw::StagedCore>(
+            std::make_unique<cw::EnvelopeFrontEnd>(),
+            std::make_unique<OracleDetector>(fbTransitions(sig, p, 0.01f)),
+            std::make_unique<ClairvoyantTiming>(sig.model),
+            std::make_unique<cw::BeamSymbolDecoder>())); }; };
+
+    printf("\n=== §52.5d fb failure localisation (n=%d) ===\n", SEEDS);
+    printf("%-11s %10s %14s   %s\n", "profile", "fb+kalman", "fb+clairvoyant", "params/counts (seed42)");
+    for (auto& pr : profs) {
+        float k = runCellWith(fbKal(pr.params),    "k", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        float c = runCellWith(fbClairv(pr.params), "c", pr.name, MSG_FULL(), pr.params, SEEDS).cerMean;
+        auto p2 = pr.params; p2.seed = 42;
+        auto sig = generateMessage("CQ CQ DE W1AW W1AW TEST", p2);
+        auto tt = truthTransitions(sig, p2.sampleRate, 1000.0f);
+        auto ft = fbTransitions(sig, p2, 0.01f);
+        printf("%-11s %10.4f %14.4f   truth=%d fb=%d\n",
+               pr.name, k, c, (int)tt.size(), (int)ft.size());
+    }
+    printf("\nfb+clairvoyant low => transitions OK, Kalman seed poisoned (fixable).\n");
+    printf("fb+clairvoyant high => transitions genuinely bad.\n");
+}
+
+// §52.5e #42 PROPER benchmark of the EXISTING soft-detector variants (validated,
+// tuned implementations in the registry, not my prototypes) across the WPM x noise
+// grid vs legacy and the detOracle ceiling. Answers: what does the best REAL soft
+// detector we already ship capture of the +0.8 detector headroom, everywhere?
+TEST_CASE("existing soft-detector grid benchmark (§52.5e #42)", "[cw][.][softdet-existing]") {
+    constexpr int SEEDS = 96;
+    const float dits[] = {80.0f, 48.0f, 40.0f};   // 15, 25, 30 wpm
+    const int   wpms[] = {15, 25, 30};
+    const float amps[] = {2.0f, 3.0f, 4.0f};
+    const char* soft[] = {"legacy+lr", "legacy+lr+soft", "legacy+lr+log", "legacy+lr+soft+log"};
+
+    auto detOracle = [](SignalParams p){ return [p](const GeneratedSignal& sig){
+        return makeOracleCore(sig, p, OracleConfig{true, false}); }; };
+
+    printf("\n=== §52.5e existing soft-detector grid (n=%d) ===\n", SEEDS);
+    printf("%5s %6s %8s %8s %9s %9s %9s %9s %9s  %s\n", "wpm", "noise", "legacy",
+           "detOrac", "lr", "lr+soft", "lr+log", "lr+sf+lg", "bestSoft", "fraction");
+    for (size_t i = 0; i < 3; i++) {
+        for (float amp : amps) {
+            SignalParams p = profileClean(dits[i]); p.noiseAmp = amp;
+            char nm[24]; snprintf(nm, sizeof(nm), "%dwpm-n%.0f", wpms[i], amp);
+            float leg = runCell("legacy", nm, MSG_FULL(), p, SEEDS).cerMean;
+            float dO  = runCellWith(detOracle(p), "dO", nm, MSG_FULL(), p, SEEDS).cerMean;
+            printf("%5d %6.1f %8.4f %8.4f", wpms[i], amp, leg, dO);
+            float best = 1e9f;
+            for (const char* c : soft) {
+                float h = runCell(c, nm, MSG_FULL(), p, SEEDS).cerMean;
+                printf(" %9.4f", h); best = std::min(best, h);
+            }
+            float frac = (leg - dO) > 1e-6f ? (leg - best) / (leg - dO) : 0.0f;
+            printf(" %9.4f %8.1f%%\n", best, 100.0f * frac);
+        }
+    }
+    printf("\nfraction = (legacy - bestSoft) / (legacy - detOracle) = ceiling captured.\n");
 }
