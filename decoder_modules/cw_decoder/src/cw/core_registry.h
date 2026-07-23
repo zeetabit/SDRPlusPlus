@@ -316,18 +316,19 @@ namespace cw {
     // is real. Unlike the reverted LR promotion, the gate coverage is complete
     // (fast×heavy §43, weak-hand-keyed §48, and the recalibrated artifacts §51).
     //
-    // legacy+route (§52 step 4B) is a SELECTABLE regime router — NOT the default, a
-    // deliberate deferral (see docs `### §52 step 4`). It runs legacy+select and the
-    // forward-only online-EM fb detector in parallel and, at a 6s commit, hands off to
-    // fb ONLY where select genuinely fails AND fb is itself clearly copying (selGood<=0,
-    // fbGood>=3, inputSnr<8). That gate-safe arbitration is required: the aggressive
-    // "fb if it out-tokens select" version regressed the exact-decode gates (mild-noise,
-    // contest — caught by test_benchmark_multiseed), so it was tightened until PROMOTABLE
-    // vs select (paired n=96: 3 better / 0 worse / 22 ns / 0 harm), which shrank the
-    // headline win (noise3-25wpm 0.98→0.84, was 0.36 aggressive). Given that reduced gain
-    // plus the ~2x decode during acquisition, the default stays the fast single-core
-    // select. To promote: change the string below to "legacy+route" (one line; it
-    // dominates select). fb detector: src/cw/fb_detector.h (forward-only `_fwdOnly`,
-    // online-EM `updateEmission`); router: src/cw/regime_route.h.
-    inline constexpr const char* DEFAULT_CORE = "legacy+select";
+    // legacy+route PROMOTED 2026-07-23 (§53). The regime router runs legacy+select and
+    // the forward-only online-EM fb detector in parallel and, at a 12s commit, hands off
+    // to fb where the DECODE-PLAUSIBILITY signal says fb copies a buried AWGN signal that
+    // select cannot: select's valid/total token RATIO is low (garbage), fb's ratio beats
+    // it by a margin, fb's keying CONTRAST is low (buried, not strong-hand-keyed), and the
+    // pre-BPF inputSnr is broadband. Paired n=96 vs select: 6 better / 0 worse / 0 harm
+    // (noise3-25wpm 0.98→0.41, noise3-30wpm 0.92→0.53, +4 more cells); full default gate
+    // suite green. This SUPERSEDES the earlier deferral: the deferred version used a raw
+    // token-COUNT gate (selGood<=0 && fbGood>=3) that stalled on select's 1-2 garbage
+    // tokens and only reached 0.84 with 3 improved cells. Two §53 fixes unlocked it: the
+    // staged_core idle-flush no longer misclassifies stretched gaps (farnsworth 0.155→
+    // 0.014, so fb's router branch is clean), and the ratio+contrast arbitration replaced
+    // the count. Cost: ~2x decode for the 12s commit window, 1x after (winner only).
+    // fb detector: src/cw/fb_detector.h; router+arbitration: src/cw/regime_route.h.
+    inline constexpr const char* DEFAULT_CORE = "legacy+route";
 }

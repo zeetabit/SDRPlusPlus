@@ -2154,6 +2154,120 @@ TEST_CASE("fb char-split duration dump (§52 step 4)", "[cw][.][fb-durs]") {
     printf("\n(element-gap ~80ms, char-gap ~240ms; if narrow inflates gaps, splits follow)\n");
 }
 
+// §53 — WHY fb loses farnsworth deterministically (+0.14). Dump fb's online event
+// durations on the CLEAN farnsworth signal (fb core geometry, bpf140/smooth88), and
+// legacy's Schmitt on the SAME envelope, annotated elem/CHAR/WORD. If fb's gap
+// durations are clean and well-separated, the bug is downstream (gap classification);
+// if jittery/inflated, it is the detector. Internal rate 1kHz => 1 sample = 1 ms.
+// farnsworth ratio 2.0 @ dit=80ms: element-gap ~80, char-gap ~480, word-gap ~1120.
+TEST_CASE("fb farnsworth char-split diagnosis (§53)", "[cw][.][fb-farns]") {
+    auto p = profileFarnsworth(80.0f, 2.0f); p.seed = 4242;
+    auto sig = generateMessage(MSG_FULL(), p);
+    // Run the ACTUAL cores with debugLog so gap classifications, dit estimate and
+    // lock behaviour are visible. detail:: cores are plain StagedCore -> dynamic_cast.
+    struct RawSink : public cw::CharSink {
+        std::string s; bool log = false;
+        void emitChar(char c, float) override { s += c; if (log) fprintf(stderr, "   >>emitChar '%c'\n", c); }
+        void flushWord() override {}
+        void emitWordGap() override { s += ' '; if (log) fprintf(stderr, "   >>emitWordGap\n"); }
+        void clearEmitted() override { s.clear(); if (log) fprintf(stderr, "   >>clearEmitted\n"); }
+    };
+    auto run = [&](const char* tag, std::unique_ptr<cw::IDecodeCore> core){
+        auto* staged = dynamic_cast<cw::StagedCore*>(core.get());
+        REQUIRE(staged);
+        staged->debugLog = false; staged->id = 0;
+        core->init(8000.0f, 1000.0f, p.toneFreq);
+        RawSink raw;                   // no corrector/TextBuffer
+        cw::Channel ch; ch.init(0, p.toneFreq, tag[0]=='L' ? "legacy" : "legacy+fb+wide");
+        for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+            int n = std::min(512, (int)sig.samples.size() - off);
+            core->process(n, &sig.samples[off], raw);
+        }
+        // and the corrected path for comparison
+        for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+            int n = std::min(512, (int)sig.samples.size() - off);
+            ch.process(n, &sig.samples[off]);
+        }
+        printf("  %-7s RAW: [%s]\n", tag, raw.s.c_str());
+        printf("  %-7s COR: [%s]\n", tag, ch.text.getText().c_str());
+    };
+    printf("\n=== §53 farnsworth raw-vs-corrected ===\n");
+    run("LEGACY", cw::detail::makeStaged(cw::TIMING_KALMAN));
+    run("FBWIDE", cw::detail::makeFB(cw::TIMING_KALMAN, /*fbBpf=*/false, 140.0f, 140.0f, 88.0f, 100.0f));
+}
+
+// §53 — fast small-scope adjudication for iterating on the fb-as-default work.
+// Curated profiles: fb's win regime (noise), fb's weak regimes (farnsworth/qsb/qrm/
+// hand-keyed), and regression guards (clean/mild/contest). n=24 for speed; the full
+// standardProfiles n=96 gate ([fb-adjudicate]) is the confirm step. select is the
+// shipped default: it must NOT regress (shared staged_core change), fb must improve
+// its weak regimes without losing its noise wins.
+TEST_CASE("fb small-scope adjudication (§53)", "[cw][.][fb-small]") {
+    constexpr int N = 24;
+    struct Prof { const char* name; SignalParams params; };
+    auto nz=[](float dit,float amp){auto p=profileClean(dit);p.noiseAmp=amp;return p;};
+    const Prof profs[] = {
+        {"clean-15",     profileClean(80.0f)},
+        {"clean-25",     profileClean(48.0f)},
+        {"mild-noise",   nz(80,1)},
+        {"contest",      profileContest(60.0f)},
+        {"handkeyed-25", profileHandKeyed(48.0f)},
+        {"handkeyed-40", profileHandKeyed(30.0f)},
+        {"qsb",          profileQSB(80.0f)},
+        {"qrm",          profileQRM(80.0f)},
+        {"qrn",          profileQRN(80.0f)},
+        {"farnsworth1.5",profileFarnsworth(80.0f, 1.5f)},
+        {"farnsworth2.0",profileFarnsworth(80.0f, 2.0f)},
+        {"worstcase",    profileWorstCase(80.0f)},
+        {"noise2.0",     nz(80,2)},
+        {"noise3.0",     nz(80,3)},
+        {"noise3-25wpm", nz(48,3)},
+        {"noise3-30wpm", nz(40,3)},
+    };
+    printf("\n=== §53 fb small-scope (n=%d): CER mean ===\n", N);
+    printf("%-15s %9s %9s %9s %9s\n", "profile", "legacy", "select", "fb", "fb+wide");
+    for (auto& pr : profs) {
+        float leg = runCell("legacy",       pr.name, MSG_FULL(), pr.params, N).cerMean;
+        float sel = runCell("legacy+select",pr.name, MSG_FULL(), pr.params, N).cerMean;
+        float fb  = runCell("legacy+fb",    pr.name, MSG_FULL(), pr.params, N).cerMean;
+        float fbw = runCell("legacy+fb+wide",pr.name, MSG_FULL(), pr.params, N).cerMean;
+        const char* flag = (fb < sel - 0.005f) ? " <fb wins" : (fb > sel + 0.005f ? " >fb loses" : "");
+        printf("%-15s %9.4f %9.4f %9.4f %9.4f%s\n", pr.name, leg, sel, fb, fbw, flag);
+    }
+}
+
+// §53 — WHY the router misses fb's noise wins. For each noise cell, dump the
+// arbitration (selGood/fbGood/inputSnr -> decision) on a few seeds, so the fix
+// (relax the gate) is data-driven. fb copies these (see [fb-small]) but the router
+// keeps select where the gate (selGood<=0 && fbGood>=3 && inputSnr<8) doesn't fire.
+TEST_CASE("router arbitration misses (§53)", "[cw][.][route-why]") {
+    struct Prof { const char* name; SignalParams params; };
+    auto nz=[](float dit,float amp){auto p=profileClean(dit);p.noiseAmp=amp;return p;};
+    const Prof profs[] = {
+        {"noise2.0",     nz(80,2)}, {"noise2-25wpm", nz(48,2)},
+        {"noise3.0",     nz(80,3)}, {"noise3-25wpm", nz(48,3)}, {"noise3-30wpm", nz(40,3)},
+        {"noise4.0",     nz(80,4)}, {"noise4-25wpm", nz(48,4)},
+        {"mild-noise",   nz(80,1)}, {"contest", profileContest(60.0f)},
+        {"qsb", profileQSB(80.0f)}, {"qrm", profileQRM(80.0f)},
+        {"hk25-n1.5", [](){auto p=profileHandKeyed(48.0f); p.noiseAmp=1.5f; return p;}()},
+        {"hk30-n1.5", [](){auto p=profileHandKeyed(40.0f); p.noiseAmp=1.5f; return p;}()},
+    };
+    cw::RegimeRouteCore::debug = true;
+    for (auto& pr : profs) {
+        fprintf(stderr, "--- %s ---\n", pr.name);
+        for (unsigned s = 0; s < 4; s++) {
+            SignalParams pp = pr.params; pp.seed = 1000u + s * 7919u;
+            auto sig = generateMessage(MSG_FULL(), pp);
+            cw::Channel ch; ch.init(0, pp.toneFreq, "legacy+route");
+            for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+                int n = std::min(512, (int)sig.samples.size() - off);
+                ch.process(n, &sig.samples[off]);
+            }
+        }
+    }
+    cw::RegimeRouteCore::debug = false;
+}
+
 // §52 step 4 — decouple the two filters. Root cause: narrow SMOOTHING over-rounds
 // edges -> char-splitting on high-SNR signals; narrow BPF is the harmless matched
 // filter. Test narrow-bpf + wide-smooth: should fix clean/qrm/hand-keyed AND keep

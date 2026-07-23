@@ -28,22 +28,27 @@
 >
 > ### Work completed since (the campaign's first standing promotion landed — §51)
 >
-> **SparkGap line (§52) — READ `### §52 step 4 — BUILT, and it became a REGIME ROUTER`
-> below for the current handoff.** SHIPPED: **#40b** (select→bimodal mid-speed hand-keyed)
-> and **#41** (model-fit channel keep-alive). **#42 IS BUILT (2026-07-23):** the noise wall
-> was a filter-bandwidth problem AND a detector problem. The streaming fb detector is
-> **forward-only** (the backward/lag pass HURT — removed) with **online-EM emission** (the
-> fixed window HURT — removed), both surfaced by user design questions. fb is a
-> fast+heavy-AWGN specialist (noise3-25wpm −0.74, the §25/§43 wall), so the shippable product
-> is **`legacy+route`** (RegimeRouteCore): runs select+fb, hands off to fb only where select
-> fails and fb clearly copies. Gate-safe arbitration (mild-noise/contest gates forced it) is
-> **PROMOTABLE vs select (3 better/0 worse/0 harm)** but conservative, so the headline shrank
-> to noise3-25wpm −0.14. **Promotion DEFERRED** (reduced gain + ~2x acquisition cost): default
-> stays fast single-core `legacy+select`; `legacy+route` ships SELECTABLE. Promote later = one
-> line (`DEFAULT_CORE`). Detail: §52 step-4 block below + investigation §52.10+.
+> **SparkGap line (§52–§53) — READ `### §53 — router PROMOTED` below for the current
+> handoff.** SHIPPED: **#40b** (select→bimodal mid-speed hand-keyed) and **#41** (model-fit
+> channel keep-alive). **#42 IS BUILT (2026-07-23):** the noise wall was a filter-bandwidth
+> problem AND a detector problem. The streaming fb detector is **forward-only** + **online-EM
+> emission** (both HURT-when-added pieces removed via user design questions). fb is a
+> fast+heavy-AWGN specialist, so the product is **`legacy+route`** (RegimeRouteCore): runs
+> select+fb, hands off to fb only where select produces garbage and fb copies a buried signal.
 >
-> **Current default: `legacy+select` (regime timing selector), promoted 2026-07-22
-> (§48–51), now with the #40b 3-way routing.** It routes each signal to log (jittered good-SNR hand-keyed), a V2/V1
+> **§53 (2026-07-23) — `legacy+route` PROMOTED to DEFAULT_CORE.** The earlier deferral was
+> because the token-COUNT arbitration was conservative (noise3-25wpm only 0.84, 3 cells). Two
+> fixes unlocked it: (1) a shared-code **idle-flush bug** in `staged_core` that misclassified
+> stretched (Farnsworth) gaps as word-gaps was fixed (farnsworth 0.155→0.014) — it decided
+> word/char from PARTIAL block-boundary silence; now only `classifyOff` (complete gap) classifies;
+> (2) the arbitration was rebuilt on **valid/total token RATIO + fb keying CONTRAST** (buried
+> AWGN ~4dB vs strong hand-keyed ~6dB — the discriminator inputSnr couldn't make). Result:
+> **route vs select 6 better / 0 worse / 0 harm** (noise3-25wpm 0.98→**0.41**, noise3-30wpm
+> 0.92→**0.53**, +4 cells), full default gate suite green. Cost: ~2x decode for a 12s commit
+> window, 1x after. Detail: §52 step-4 block + §53 block below.
+>
+> **Current default: `legacy+route` (regime router over select+fb), promoted 2026-07-23 (§53).**
+> Pre-commit it runs the `legacy+select` timing selector (below), which routes each signal to log (jittered good-SNR hand-keyed), a V2/V1
 > kalman (heavy/light noise, SNR-graded), gated on jitter + getSNR with a re-armable
 > dit-drift latch for operator changes. Paired n=384: 13 better, 0 significant worse
 > — log's hand-keyed win + kalman2s's noise robustness (worstcase 0.60→0.37) + V1's
@@ -626,14 +631,9 @@ depending on config; the 0-harm-vs-legacy gate is unreachable for any select-fal
 because SELECT itself fails it (6 harm) — so route-vs-select is the operative bar, and route
 dominates select there WITHOUT loosening any gate. Real pileup: route 55 = select 55.
 
-**DECISION: promotion DEFERRED — default stays `legacy+select`.** When the user first said
-"promote", route-vs-select was 7-better/−0.62; gate-safety shrank that to 3-better/−0.14, and
-the router adds ~2x decode during the 6s acquisition window per channel. A −0.14 deep-noise
-gain at 2x acquisition cost is marginal for a default swap, so `legacy+route` ships as a
-validated SELECTABLE core and the fast single-core `select` remains default (no regression,
-suite 6.8s green). **To promote later: change `DEFAULT_CORE` to `"legacy+route"`
-(core_registry.h, one line — it dominates select).** Campaign has promoted-then-reverted
-before (§21/§25), so this caution is deliberate.
+**DECISION (§52): promotion DEFERRED — SUPERSEDED by §53 below.** The −0.14 gate-safe gain
+was marginal, so the router shipped SELECTABLE. **§53 (2026-07-23) reworked the arbitration
+and PROMOTED it — see the `### §53` block below.**
 
 **LOOSE ENDS (independent of promotion):** (a) dead backward path (`_fwdOnly=false` branch +
 `finalize` + ring buffers + LAG) is removable — forward-only is strictly better; (b)
@@ -657,6 +657,68 @@ this session. Run individual probes by their exact tag (e.g. `[fb-adjudicate]`) 
 beat tuning around its symptoms — twice. Synthetic adjudication can overfit (wide-start won
 synthetic, lost the real pileup); validate on real data. A router lets a specialist ship
 safely: dominate the incumbent, don't chase a gate the incumbent itself fails.
+
+### §53 — router PROMOTED to default (2026-07-23, self-contained)
+
+User goal: "better quality of decoding, general purpose for the whole skimmer." Debugged
+"why it became worse" → it did NOT: `legacy+select` is byte-identical across the whole #42
+line (verified from the diff), its heavy-noise CER (0.7–0.9) was always there; the §52 router
+delivered only ~15% of fb's proven win. Fixed BOTH the fb weak regime and the router, then
+promoted.
+
+**FIX 1 — Farnsworth (a shared-code streaming bug, not a detector limit).** fb lost
+farnsworth deterministically (+0.14, `QTH`→`QT H`, double-spaces). Root cause was NOT the
+detector: fb's gap durations are pristine (80/480/1120 ms clusters), gaps classify correctly.
+The bug is the **idle-flush in `staged_core.h`** (the post-lock `silenceMs > dit*4` block): it
+decided word-vs-char from PARTIAL block-boundary silence, before the gap ended — so a stretched
+farnsworth char gap (6·dit = 480ms) crossed its `silenceMs > dit*6` word test and (a) promoted
+a char gap to a word gap, (b) double-emitted with the subsequent `classifyOff`. Legacy dodged
+it only because its looser dit (~85) kept `dit*6` above the char gap; fb's exact dit=80 walked
+onto the threshold. Fix: the idle-flush now only flushes the pending CHARACTER (`flushWord`,
+no word gap); `classifyOff` (complete gap) owns word/char classification; FREEZE (dit*30) still
+gives the EOT word gap. **farnsworth 0.155→0.014, zero regression to any core** (shared code —
+verified full suite green). This corrected the §52 label of farnsworth/qsb/qrm as "detector-
+caused, unfixable" — at least farnsworth was a streaming artifact.
+
+**Structural finding — fb cannot be a universal default by filter tuning.** [fb-decouple] /
+[fb-small]: fb+wide fixes qrm (0.029→0.007) but DESTROYS noise (noise3.0 0.26→0.94); narrow is
+essential for AWGN. Narrow-BPF + wide-smooth fixes qrm/clean/qrn and keeps fast+heavy noise but
+loses 15wpm-n3 (slow+heavy needs narrow smoothing) and hand-keyed jitter loses at EVERY
+geometry. No single fb geometry wins everywhere → the **regime router is the correct
+architecture** (fb runs its aggressive narrow geometry for AWGN, select handles the rest).
+
+**FIX 2 — ratio+contrast arbitration (the router's real lever).** The §52 token-COUNT gate
+(`selGood<=0 && fbGood>=3`) stalled: at 6s both cores decode only 1–3 tokens, and select emits
+1–2 garbage tokens that look like callsigns/numbers → `selGood<=0` rarely true → fb blocked
+even where it copies. Two better signals ([route-why] instrumentation, `RegimeRouteCore::debug`):
+(1) **valid/total token RATIO** — heavy AWGN collapses select's ratio to 0.0–0.5 (many words,
+few valid) while fb copies clean (0.5–0.8); where select COPES (mild/qsb/qrm/contest) its ratio
+is 0.75–1.0. (2) **fb keying CONTRAST** (`_fb->stats().snr`, muHi/muLo dB) — buried AWGN reads
+~4 dB, strong-but-jittered hand-keyed ~6 dB; the discriminator inputSnr (both ~6 dB pre-BPF)
+cannot make, but the narrow matched filter exposes post-detection. Gate:
+`fbGood>=3 && selRatio<0.6 && fbRatio>selRatio+0.25 && fbContrast<5.5 && inputSnr<8`. Commit
+window 6s→**12s** (ratio needs more decoded text). The contrast term was the key: it cleared
+the 2 hk-n1.5 ns-harm cells (fb's few clean tokens fooled the ratio; low-contrast gate excludes
+strong hand-keyed).
+
+**RESULT — route vs select (paired n=96): 6 better / 0 worse / 0 harm → PROMOTED.**
+noise3-25wpm 0.98→**0.41** (was 0.84 deferred), noise3-30wpm 0.92→**0.53**, +noise2-30/25,
+noise3-15, noise4-25. Full default gate suite green with `DEFAULT_CORE="legacy+route"` (the
+exact-decode multiseed gates that blocked the aggressive §52 config now pass). Cost: ~2x decode
+for the 12s commit window, 1x after (winner only, `RegimeRouteCore::process` runs only the
+committed core post-commit). `COMMIT_SEC`/`CONTRAST_MAX`/`SEL_RATIO_MAX`/`RATIO_MARGIN` are the
+tunables in `regime_route.h`.
+
+**§53 probes (hidden `[.]`):** `[fb-farns]` (farnsworth raw-vs-corrected decode + the
+staged_core fix), `[fb-small]` (fast n=24 select/fb/fb+wide small-scope), `[route-why]`
+(arbitration dump: selRatio/fbRatio/contrast/inputSnr per profile — uses
+`RegimeRouteCore::debug`).
+
+**REMAINING fb weak regimes (handled by routing to select, not yet fixed IN fb):** qsb (fade
+below noise floor → spurious elements), qrm (adaptive narrowing misroutes it — fb+wide is
+clean), hand-keyed jitter. Fixing these IN fb would let the router be even more aggressive
+(harmless misroutes) — the A+B synergy. Not required for the current promotion (the gate keeps
+them on select).
 
 ---
 

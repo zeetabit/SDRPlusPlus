@@ -9,17 +9,18 @@
 namespace cw {
 
     // Regime router (docs §52 step 4, option B). Runs `select` and `fb` in parallel
-    // and commits to one after a short measurement window, by the input-referred SNR.
+    // and commits to one after a measurement window, by DECODE PLAUSIBILITY (§53).
     //
     // fb (forward-only HMM + online-EM + matched filter) wins DECISIVELY in heavy
     // broadband noise — the fast+heavy-AWGN regime nothing else copies (noise3-25wpm
-    // -0.74 vs legacy). select wins on clean, hand-keyed, fading, interference and
-    // Farnsworth — where fb's remaining harm sits. inputSnr is bimodal (clean/
-    // hand-keyed/Farnsworth read high, broadband noise reads ~6 dB, §52 step 2 cal),
-    // so routing on it captures fb's AWGN wins while sending fb's weak regimes to
-    // select — the standing default. Pre-commit, select drives the sink live and fb's
-    // output is buffered; if fb wins the commit, the provisional output is cleared and
-    // fb's buffer replayed, so no lead-in is lost. Cost is ~2x decode per channel.
+    // 0.98 -> 0.41 vs select). select wins on clean, hand-keyed, fading, interference
+    // and Farnsworth. The three inputs that separate them (§53): the valid/total token
+    // RATIO (select's collapses to garbage in AWGN, stays high where it copes), fb's
+    // keying CONTRAST (buried AWGN ~4 dB vs strong hand-keyed ~6 dB — the discriminator
+    // inputSnr cannot make), and the pre-BPF inputSnr (broadband gate). Pre-commit,
+    // select drives the sink live and fb's output is buffered; if fb wins the commit,
+    // the provisional output is cleared and fb's buffer replayed, so no lead-in is lost.
+    // Cost is ~2x decode per channel for the commit window, then 1x (winner only).
     class RegimeRouteCore : public IDecodeCore {
     public:
         RegimeRouteCore(std::unique_ptr<IDecodeCore> select, std::unique_ptr<IDecodeCore> fb)
@@ -55,18 +56,38 @@ namespace cw {
                 // Decide by DECODE PLAUSIBILITY, not raw SNR: fb and select both read as
                 // buried on qsb/qrm/weak-hand-keyed (low inputSnr), but select copies
                 // those well while fb only truly wins where select produces garbage
-                // (broadband noise). Adopt fb only when it decodes MORE real ham content
-                // than select — biased to select (the standing default) on ties.
-                const int fbGood = validTokens(_fbLog), selGood = validTokens(_selLog);
-                // fb takes over ONLY when BOTH hold: (a) select is genuinely FAILING
-                // (selGood <= SEL_FAIL, i.e. produced no real copy — so mild noise /
-                // contest / anything select handles keeps select, never inheriting fb's
-                // warmup error); AND (b) fb is ITSELF clearly copying (fbGood >= FB_ABS
-                // real tokens) — so on QRM/interference, where select fails BUT fb also
-                // fails, fb does NOT take over. That leaves only the case fb is built for:
-                // heavy broadband noise where select produces garbage and fb copies clean.
-                _useFb = (selGood <= SEL_FAIL) && (fbGood >= FB_ABS)
-                         && (_fb->stats().inputSnr < ROUTE_SNR);
+                // (broadband noise). The signal is the valid/total token RATIO plus fb's
+                // keying contrast — see the gate below (§53).
+                int fbTot = 0, selTot = 0;
+                const int fbGood = validTokens(_fbLog, &fbTot), selGood = validTokens(_selLog, &selTot);
+                const float inSnr = _fb->stats().inputSnr;
+                // Garbage discriminator: the valid/total RATIO, not the raw count. In
+                // heavy AWGN select emits many words but few valid (ratio -> 0) while fb
+                // copies clean (ratio ~0.5-0.8); where select COPES (mild noise, qsb,
+                // qrm, contest) its ratio stays 0.75-1.0. So route to fb only when select
+                // is producing garbage (selRatio low) AND fb is decisively cleaner
+                // (fbRatio margin) AND fb itself copies enough (fbGood) AND it is broad-
+                // band (inputSnr). This is gate-safe aggression: every select-wins regime
+                // has a high selRatio and is excluded, unlike the raw-count gate which
+                // stalled on select's 1-2 garbage tokens (§53).
+                const float selRatio = selTot > 0 ? (float)selGood / selTot : 1.0f;
+                const float fbRatio  = fbTot  > 0 ? (float)fbGood  / fbTot  : 0.0f;
+                // fbContrast (fb's keying-contrast SNR, muHi/muLo in dB) is the buried-
+                // vs-strong discriminator inputSnr cannot make: fb wins only on BURIED
+                // signals (contrast ~4 dB — muHi barely over the noise), and LOSES on
+                // strong-but-jittered hand-keyed (contrast ~6 dB, signal present but
+                // irregular). Both read ~6 dB inputSnr pre-BPF, but the narrow matched
+                // filter separates them post-detection. Gating contrast < CONTRAST_MAX
+                // keeps every AWGN win and excludes weak-hand-keyed, whose few clean
+                // tokens otherwise fool the valid/total ratio (§53).
+                const float fbContrast = _fb->stats().snr;
+                _useFb = (fbGood >= FB_ABS)
+                         && (selRatio < SEL_RATIO_MAX)
+                         && (fbRatio > selRatio + RATIO_MARGIN)
+                         && (fbContrast < CONTRAST_MAX)
+                         && (inSnr < ROUTE_SNR);
+                if (debug) fprintf(stderr, "[ROUTE] sel=%d/%d(%.2f) fb=%d/%d(%.2f) inputSnr=%.1f fbContrast=%.1f -> %s\n",
+                                   selGood, selTot, selRatio, fbGood, fbTot, fbRatio, inSnr, _fb->stats().snr, _useFb ? "FB" : "select");
                 _committed = true;
                 if (_useFb) { sink.clearEmitted(); replay(sink); }   // adopt fb's lead-in
                 _fbLog.clear(); _fbLog.shrink_to_fit();
@@ -81,11 +102,15 @@ namespace cw {
             return (_committed && _useFb ? _fb : _select)->diagnostic(n);
         }
 
+        inline static bool debug = false;   // §53 arbitration instrumentation (test-only)
+
     private:
         static constexpr float ROUTE_SNR = 8.0f;   // fb only considered below this
-        static constexpr float COMMIT_SEC = 6.0f;   // enough to tell "select failed" from "select slow"
-        static constexpr int   SEL_FAIL = 0;        // select is "failing" at <= this valid tokens
+        static constexpr float COMMIT_SEC = 12.0f;   // longer window: token counts separate AWGN (select fails) from qsb/qrm/mild (select copes)
         static constexpr int   FB_ABS  = 3;         // fb must ITSELF copy >= this valid tokens
+        static constexpr float SEL_RATIO_MAX = 0.6f;// select is "failing" below this valid/total ratio
+        static constexpr float RATIO_MARGIN  = 0.25f;// fb must beat select's ratio by this margin
+        static constexpr float CONTRAST_MAX  = 5.5f; // fb wins only BURIED signals; excludes strong hand-keyed
 
         struct Op { uint8_t type; char c; float conf; };  // 0=char 1=flushWord 2=wordGap 3=clear
 
@@ -106,15 +131,28 @@ namespace cw {
             if (allDigit) return t.size() >= 2;                                 // RST / serial
             return t.size() >= 3 && t.size() <= 7 && digits >= 1 && letters >= 2;   // callsign
         }
-        int validTokens(const std::vector<Op>& log) const {
-            int good = 0; std::string w;
-            auto flush = [&]{ std::string u; for (char c : w) u += (char)std::toupper((unsigned char)c); if (isValidToken(u)) good++; w.clear(); };
+        // Count valid ham tokens AND the total tokens emitted. The RATIO (valid/total)
+        // is the garbage discriminator the raw count misses: heavy-AWGN garbage emits
+        // MANY words with few valid (low ratio); real copy is mostly valid (high ratio).
+        // A word must have >= 2 chars to count toward the total (single-char noise
+        // fragments are not "words"); this matches isValidToken's own length floor.
+        int validTokens(const std::vector<Op>& log, int* totalOut = nullptr) const {
+            int good = 0, total = 0; std::string w;
+            auto flush = [&]{
+                if (w.size() >= 2) {
+                    total++;
+                    std::string u; for (char c : w) u += (char)std::toupper((unsigned char)c);
+                    if (isValidToken(u)) good++;
+                }
+                w.clear();
+            };
             for (const auto& op : log) {
                 if (op.type == 0) { if (op.c == ' ') flush(); else w += op.c; }
                 else if (op.type == 1 || op.type == 2) { flush(); }
-                else if (op.type == 3) { w.clear(); good = 0; }   // clearEmitted: reset
+                else if (op.type == 3) { w.clear(); good = 0; total = 0; }   // clearEmitted: reset
             }
             flush();
+            if (totalOut) *totalOut = total;
             return good;
         }
 

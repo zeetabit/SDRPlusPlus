@@ -371,13 +371,17 @@ namespace cw {
                 float dit = timing->getDitDuration();
                 float flushMs = dit * 4.0f;
                 if (silenceMs > flushMs && !flushed) {
+                    // Bound latency only: flush the completed character so it appears
+                    // promptly during a long gap. Do NOT decide word-vs-char here —
+                    // this fires on PARTIAL silence at a block boundary, before the gap
+                    // has ended, so a silenceMs > dit*6 test misreads a stretched
+                    // (Farnsworth) char gap (6*dit) as a word gap and double-emits with
+                    // the classifyOff below. The complete-gap classification at the next
+                    // key-down owns the boundary; true end-of-transmission is handled by
+                    // FREEZE (dit*30). flushWord ends the character without a space.
                     char c = symbols->characterBreak();
                     if (c) { sink.emitChar(c, _confidence); }
-                    if (silenceMs > dit * 6.0f) {
-                        sink.emitWordGap();
-                    } else {
-                        sink.flushWord();
-                    }
+                    sink.flushWord();
                     flushed = true;
                     if (debugLog) fprintf(stderr, "[CW ch%d] FLUSH silence=%.0fms\n", id, silenceMs);
                 }
