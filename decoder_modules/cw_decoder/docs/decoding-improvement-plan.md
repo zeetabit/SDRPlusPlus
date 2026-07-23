@@ -35,10 +35,12 @@
 > **forward-only** (the backward/lag pass HURT — removed) with **online-EM emission** (the
 > fixed window HURT — removed), both surfaced by user design questions. fb is a
 > fast+heavy-AWGN specialist (noise3-25wpm −0.74, the §25/§43 wall), so the shippable product
-> is **`legacy+route`** (RegimeRouteCore): runs select+fb, keeps whichever decodes more valid
-> ham tokens. **It DOMINATES the current default: route-vs-select 7 better / 0 worse / 18 ns.**
-> PENDING: user decision to promote `legacy+route` to DEFAULT_CORE. Detail: §52 step-4 block
-> below + investigation §52.10+.
+> is **`legacy+route`** (RegimeRouteCore): runs select+fb, hands off to fb only where select
+> fails and fb clearly copies. Gate-safe arbitration (mild-noise/contest gates forced it) is
+> **PROMOTABLE vs select (3 better/0 worse/0 harm)** but conservative, so the headline shrank
+> to noise3-25wpm −0.14. **Promotion DEFERRED** (reduced gain + ~2x acquisition cost): default
+> stays fast single-core `legacy+select`; `legacy+route` ships SELECTABLE. Promote later = one
+> line (`DEFAULT_CORE`). Detail: §52 step-4 block below + investigation §52.10+.
 >
 > **Current default: `legacy+select` (regime timing selector), promoted 2026-07-22
 > (§48–51), now with the #40b 3-way routing.** It routes each signal to log (jittered good-SNR hand-keyed), a V2/V1
@@ -597,30 +599,53 @@ QRN are FILTER-caused (fb+wide≈legacy), qsb/Farnsworth DETECTOR-caused. Real p
 standalone fb regressed 60→32 (wide-start overfit synthetic; real signals carry QRM).
 
 **THE DELIVERABLE — `legacy+route` (RegimeRouteCore, option B):** runs `select`+`fb` in
-parallel; at a 6s commit picks fb ONLY where it decodes MORE valid ham tokens than select
-(`fbGood>=selGood+1`; callsign/Q-abbr/numeric, len≥2 so noise single-chars don't score) AND
-`inputSnr<8`. Ties→select. Pre-commit select drives the sink live, fb buffers; if fb wins,
-`clearEmitted()`+replay fb's buffer (no lead-in lost). Post-commit ONLY the winner runs (2x
-cost confined to acquisition, steady-state 1x). **Decode-plausibility arbitration was the
-key** — raw inputSnr wrongly sent qsb/qrm/weak-hk (read as noise but select copes) to fb.
+parallel; at a 6s commit hands off to fb ONLY when select genuinely FAILS **and** fb is
+itself clearly copying: `selGood<=0 && fbGood>=3 && inputSnr<8` (valid ham tokens =
+callsign/Q-abbr/numeric, len≥2 so noise single-chars don't score). Ties/select-copes→select.
+Pre-commit select drives the sink live, fb buffers; if fb wins, `clearEmitted()`+replay fb's
+buffer (no lead-in lost). Post-commit ONLY the winner runs (2x cost confined to the 6s
+acquisition, steady-state 1x). **Decode-plausibility arbitration was the key** — raw inputSnr
+wrongly sent qsb/qrm/weak-hk (read as noise but select copes) to fb.
 
-**Adjudication (`[fb-adjudicate]`, n=96, 4 runs):** select-vs-legacy 12/1/6harm, fb-vs-legacy
-11/7/11, route-vs-legacy **16/0/3harm**, **route-vs-SELECT 7 better / 0 worse / 18 ns /
-3 ns-harm**. The strict 0-harm-vs-legacy gate CANNOT be cleared by any select-fallback core
-— SELECT (the default) itself fails it (6 harm) and route inherits its deep-noise ns-harm
-(noise4). So the operative bar is route-vs-select, where route STRICTLY DOMINATES (7 noise
-wins incl. noise3-25wpm −0.62; 18 identical; 0 worse; 3 microscopic ns-harm) WITHOUT loosening
-any gate. Real pileup: route 55 = select 55 (routes moderate-SNR real signals to select).
+**Arbitration was HARDENED by the gates (2026-07-23):** the first version
+(`fbGood>=selGood+1`, no absolute floor) adjudicated well on `standardProfiles()` but
+`test_benchmark_multiseed`'s EXACT-decode gates caught two regressions those profiles
+missed — **mild-noise** (0.0→0.0006) and **contest-20wpm** (→0.0185). Root causes: (a) on a
+signal select copes with (or is just slow in the first 6s), fb won the token count by one and
+injected its warmup error; (b) on QRM (contest) "select failed" did NOT imply "fb succeeds"
+(fb also fails QRM). Fix = the `selGood<=0 && fbGood>=3` double gate: hand off only where
+select produced NO real copy and fb produced clear real copy. Gates now pass.
 
-**PROPOSAL PENDING USER DECISION: promote `legacy+route` to `DEFAULT_CORE`** (currently
-`legacy+select`, `core_registry.h` ~line 288). It dominates the incumbent. Weigh: ~2x decode
-during the 6s window; campaign promoted-then-reverted same day before (§21/§25) so cautious.
-If not promoting → ships as a strong selectable core.
+**Adjudication (`[fb-adjudicate]` in test_promotion.cpp, n=96, 4 runs — includes route-vs-
+SELECT).** With the gate-safe arbitration: **route-vs-select = 3 better / 0 worse / 22 ns /
+0 harm → PROMOTABLE** (noise3-25wpm 0.98→0.84, noise3-30 →0.79, noise2-30 →0.27). The
+gate-safety is CONSERVATIVE so the headline shrank from the aggressive config's −0.62 to
+−0.14. (Aggressive config, for reference: route-vs-select 7 better/0 worse/3 ns-harm,
+noise3-25wpm→0.36 — but it fails the exact gates.) route-vs-legacy is 15–17/0/2–4harm
+depending on config; the 0-harm-vs-legacy gate is unreachable for any select-fallback core
+because SELECT itself fails it (6 harm) — so route-vs-select is the operative bar, and route
+dominates select there WITHOUT loosening any gate. Real pileup: route 55 = select 55.
 
-**LOOSE ENDS to clean before/independent of promotion:** (a) dead backward path
-(`_fwdOnly=false` branch + `finalize` + ring buffers + LAG) is removable — forward-only is
-strictly better; (b) `legacy+fb+narrow` diagnostic diverges (online-EM needs wide bootstrap)
-— fix or drop it; (c) many `[.]` step-4 probes in `test_ditguard.cpp` are scaffolding.
+**DECISION: promotion DEFERRED — default stays `legacy+select`.** When the user first said
+"promote", route-vs-select was 7-better/−0.62; gate-safety shrank that to 3-better/−0.14, and
+the router adds ~2x decode during the 6s acquisition window per channel. A −0.14 deep-noise
+gain at 2x acquisition cost is marginal for a default swap, so `legacy+route` ships as a
+validated SELECTABLE core and the fast single-core `select` remains default (no regression,
+suite 6.8s green). **To promote later: change `DEFAULT_CORE` to `"legacy+route"`
+(core_registry.h, one line — it dominates select).** Campaign has promoted-then-reverted
+before (§21/§25), so this caution is deliberate.
+
+**LOOSE ENDS (independent of promotion):** (a) dead backward path (`_fwdOnly=false` branch +
+`finalize` + ring buffers + LAG) is removable — forward-only is strictly better; (b)
+`legacy+fb+narrow` diagnostic diverges (online-EM needs wide bootstrap) — fix or drop it;
+(c) many `[.]` step-4 probes in `test_ditguard.cpp` are scaffolding.
+
+**RUNNING THE TESTS (learned the hard way):** the normal suite is bare `./cw_decoder_tests`
+(or `ctest`) — **no tag filter** — ~6–10s, ~5–7 cores, EXCLUDES hidden probes. Do NOT run the
+`[.]` wildcard or `[cw]` (both match the hidden probes): they run the 4× n=96 adjudications +
+the pileup decode + dozens of sweeps across all cores = many minutes, 1000%+ CPU. NEVER
+background a `[.]` run — one orphaned `./cw_decoder_tests [.]` pinned 12 cores for 2 hours
+this session. Run individual probes by their exact tag (e.g. `[fb-adjudicate]`) when needed.
 
 **Step-4 probes (hidden `[.]`):** `[fbclass]` (online==batch validation), `[fbcore]`
 (registered core gate), `[fb-diag]` (filter-vs-detector split), `[fb-root]`/`[fb-durs]`
