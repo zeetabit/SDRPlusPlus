@@ -58,13 +58,15 @@ namespace cw {
                 // (broadband noise). Adopt fb only when it decodes MORE real ham content
                 // than select — biased to select (the standing default) on ties.
                 const int fbGood = validTokens(_fbLog), selGood = validTokens(_selLog);
-                // fb only where it DECISIVELY out-decodes select (beats its valid-token
-                // count by FB_MARGIN) AND the channel reads as broadband noise. In heavy
-                // AWGN select produces garbage while fb copies cleanly, so fb wins by a
-                // wide margin; on hand-keyed-with-noise both copy, so fb is at most a
-                // token or two ahead -> stays with select. This margin is what separates
-                // "select failed" from "fb got lucky on a jittered signal".
-                _useFb = (fbGood >= selGood + FB_MARGIN) && (_fb->stats().inputSnr < ROUTE_SNR);
+                // fb takes over ONLY when BOTH hold: (a) select is genuinely FAILING
+                // (selGood <= SEL_FAIL, i.e. produced no real copy — so mild noise /
+                // contest / anything select handles keeps select, never inheriting fb's
+                // warmup error); AND (b) fb is ITSELF clearly copying (fbGood >= FB_ABS
+                // real tokens) — so on QRM/interference, where select fails BUT fb also
+                // fails, fb does NOT take over. That leaves only the case fb is built for:
+                // heavy broadband noise where select produces garbage and fb copies clean.
+                _useFb = (selGood <= SEL_FAIL) && (fbGood >= FB_ABS)
+                         && (_fb->stats().inputSnr < ROUTE_SNR);
                 _committed = true;
                 if (_useFb) { sink.clearEmitted(); replay(sink); }   // adopt fb's lead-in
                 _fbLog.clear(); _fbLog.shrink_to_fit();
@@ -81,8 +83,9 @@ namespace cw {
 
     private:
         static constexpr float ROUTE_SNR = 8.0f;   // fb only considered below this
-        static constexpr float COMMIT_SEC = 6.0f;   // enough decoded words for reliable counts
-        static constexpr int   FB_MARGIN = 1;       // fb must beat select's token count by this
+        static constexpr float COMMIT_SEC = 6.0f;   // enough to tell "select failed" from "select slow"
+        static constexpr int   SEL_FAIL = 0;        // select is "failing" at <= this valid tokens
+        static constexpr int   FB_ABS  = 3;         // fb must ITSELF copy >= this valid tokens
 
         struct Op { uint8_t type; char c; float conf; };  // 0=char 1=flushWord 2=wordGap 3=clear
 

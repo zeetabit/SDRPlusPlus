@@ -315,5 +315,19 @@ namespace cw {
     // (which handles them), V2 only below getSNR 6.5 where its heavy-noise advantage
     // is real. Unlike the reverted LR promotion, the gate coverage is complete
     // (fast×heavy §43, weak-hand-keyed §48, and the recalibrated artifacts §51).
+    //
+    // legacy+route (§52 step 4B) is a SELECTABLE regime router — NOT the default, a
+    // deliberate deferral (see docs `### §52 step 4`). It runs legacy+select and the
+    // forward-only online-EM fb detector in parallel and, at a 6s commit, hands off to
+    // fb ONLY where select genuinely fails AND fb is itself clearly copying (selGood<=0,
+    // fbGood>=3, inputSnr<8). That gate-safe arbitration is required: the aggressive
+    // "fb if it out-tokens select" version regressed the exact-decode gates (mild-noise,
+    // contest — caught by test_benchmark_multiseed), so it was tightened until PROMOTABLE
+    // vs select (paired n=96: 3 better / 0 worse / 22 ns / 0 harm), which shrank the
+    // headline win (noise3-25wpm 0.98→0.84, was 0.36 aggressive). Given that reduced gain
+    // plus the ~2x decode during acquisition, the default stays the fast single-core
+    // select. To promote: change the string below to "legacy+route" (one line; it
+    // dominates select). fb detector: src/cw/fb_detector.h (forward-only `_fwdOnly`,
+    // online-EM `updateEmission`); router: src/cw/regime_route.h.
     inline constexpr const char* DEFAULT_CORE = "legacy+select";
 }
