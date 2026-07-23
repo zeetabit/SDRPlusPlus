@@ -146,6 +146,16 @@ TEST_CASE("Promotion: fb core adjudication (§52 step 4)", "[cw][.][fb-adjudicat
     adjudicate("legacy+select", baselines);   // current shipped default
     adjudicate("legacy+fb",     baselines);   // fb standalone
     adjudicate("legacy+route",  baselines);   // §52 step 4B regime router (select | fb)
+
+    // The decisive promotion question is route vs the CURRENT DEFAULT (select), not
+    // vs legacy: select itself is ns-harmful vs legacy on deep noise, so the router
+    // inherits that where it routes to select. Domination over select is the bar.
+    std::vector<MatrixCell> selBaselines;
+    for (const auto& pr : profiles) {
+        selBaselines.push_back(runCell("legacy+select", pr.name, pr.message, pr.params, PSEEDS));
+    }
+    printf("\n########## route vs the DEFAULT (legacy+select) — 'legacy' column is select ##########\n");
+    adjudicate("legacy+route", selBaselines);
 }
 
 TEST_CASE("Promotion: paired adjudication vs legacy", "[cw][.][promotion]") {

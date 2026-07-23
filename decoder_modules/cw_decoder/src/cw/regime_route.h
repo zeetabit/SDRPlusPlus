@@ -56,9 +56,13 @@ namespace cw {
                 // (broadband noise). Adopt fb only when it decodes MORE real ham content
                 // than select — biased to select (the standing default) on ties.
                 const int fbGood = validTokens(_fbLog), selGood = validTokens(_selLog);
-                // fb only where it decodes MORE real ham content than select (i.e. select
-                // is failing) AND the channel reads as broadband noise. Ties -> select.
-                _useFb = (fbGood > selGood) && (_fb->stats().inputSnr < ROUTE_SNR);
+                // fb only where it DECISIVELY out-decodes select (beats its valid-token
+                // count by FB_MARGIN) AND the channel reads as broadband noise. In heavy
+                // AWGN select produces garbage while fb copies cleanly, so fb wins by a
+                // wide margin; on hand-keyed-with-noise both copy, so fb is at most a
+                // token or two ahead -> stays with select. This margin is what separates
+                // "select failed" from "fb got lucky on a jittered signal".
+                _useFb = (fbGood >= selGood + FB_MARGIN) && (_fb->stats().inputSnr < ROUTE_SNR);
                 _committed = true;
                 if (_useFb) { sink.clearEmitted(); replay(sink); }   // adopt fb's lead-in
                 _fbLog.clear(); _fbLog.shrink_to_fit();
@@ -76,6 +80,7 @@ namespace cw {
     private:
         static constexpr float ROUTE_SNR = 8.0f;   // fb only considered below this
         static constexpr float COMMIT_SEC = 6.0f;   // enough decoded words for reliable counts
+        static constexpr int   FB_MARGIN = 1;       // fb must beat select's token count by this
 
         struct Op { uint8_t type; char c; float conf; };  // 0=char 1=flushWord 2=wordGap 3=clear
 
