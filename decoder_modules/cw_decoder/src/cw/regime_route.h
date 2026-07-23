@@ -45,8 +45,10 @@ namespace cw {
             // decode quality); post-commit the winner drives the sink, loser discarded.
             _fbSink.bind((_committed && _useFb) ? &sink : nullptr, _committed ? nullptr : &_fbLog);
             _selSink.bind((!_committed || !_useFb) ? &sink : nullptr, _committed ? nullptr : &_selLog);
-            _fb->process(count, iq, _fbSink);
-            _select->process(count, iq, _selSink);
+            // Pre-commit both run (to score); post-commit only the winner runs, so the
+            // 2x cost is confined to the ~6s acquisition window, not steady state.
+            if (!_committed || _useFb)  { _fb->process(count, iq, _fbSink); }
+            if (!_committed || !_useFb) { _select->process(count, iq, _selSink); }
             _samples += count;
 
             if (!_committed && _samples >= (long long)(_sampleRate * COMMIT_SEC)) {
