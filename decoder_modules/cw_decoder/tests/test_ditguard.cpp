@@ -2187,8 +2187,8 @@ TEST_CASE("fb decouple bpf/smooth (§52 step 4)", "[cw][.][fb-decouple]") {
 TEST_CASE("fb narrow degradation root cause (§52 step 4)", "[cw][.][fb-root]") {
     struct Case { const char* name; SignalParams params; };
     const Case cases[] = {
-        {"handkeyed-40", profileHandKeyed(30.0f)}, {"handkeyed-15", profileHandKeyed(80.0f)},
-        {"qrm", profileQRM(80.0f)}, {"clean-15", profileClean(80.0f)},
+        {"qsb", profileQSB(80.0f)}, {"farnsworth", profileFarnsworth(80.0f, 2.0f)},
+        {"qrm", profileQRM(80.0f)}, {"qrn", profileQRN(80.0f)},
     };
     auto dump = [](const char* core, const SignalParams& p, const GeneratedSignal& sig){
         cw::Channel ch; ch.init(0, p.toneFreq, core);

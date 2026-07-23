@@ -28,14 +28,17 @@
 >
 > ### Work completed since (the campaign's first standing promotion landed — §51)
 >
-> **SparkGap line (§52, 2026-07-22) — READ `### §52 SparkGap line — FINAL STATE &
-> FORWARD BUILD PLAN` below for the full handoff.** SHIPPED: **#40b** (select routes
-> mid-speed hand-keyed to bimodal, −22%/−35%) and **#41** (model-fit channel keep-alive
-> gate). **#42 BREAKTHROUGH (validated, build pending):** the noise wall is a
-> filter-bandwidth problem — a 40 Hz per-channel matched filter + a forward-backward
-> soft detector turns heavy-noise garbage into copy (15wpm-n3 1.09→0.35, 25wpm-n3
-> 0.96→0.27). All pieces measured in probes; remaining work is a streaming detector +
-> speed-matched front end + squelch + adjudication. Detail: investigation §52–52.9c.
+> **SparkGap line (§52) — READ `### §52 step 4 — BUILT, and it became a REGIME ROUTER`
+> below for the current handoff.** SHIPPED: **#40b** (select→bimodal mid-speed hand-keyed)
+> and **#41** (model-fit channel keep-alive). **#42 IS BUILT (2026-07-23):** the noise wall
+> was a filter-bandwidth problem AND a detector problem. The streaming fb detector is
+> **forward-only** (the backward/lag pass HURT — removed) with **online-EM emission** (the
+> fixed window HURT — removed), both surfaced by user design questions. fb is a
+> fast+heavy-AWGN specialist (noise3-25wpm −0.74, the §25/§43 wall), so the shippable product
+> is **`legacy+route`** (RegimeRouteCore): runs select+fb, keeps whichever decodes more valid
+> ham tokens. **It DOMINATES the current default: route-vs-select 7 better / 0 worse / 18 ns.**
+> PENDING: user decision to promote `legacy+route` to DEFAULT_CORE. Detail: §52 step-4 block
+> below + investigation §52.10+.
 >
 > **Current default: `legacy+select` (regime timing selector), promoted 2026-07-22
 > (§48–51), now with the #40b 3-way routing.** It routes each signal to log (jittered good-SNR hand-keyed), a V2/V1
@@ -437,7 +440,7 @@ Key finding: **filter bandwidth is the dominant factor** — 35 Hz vs 68 Hz = 20
 | 36 | SNR (noise-side) LR bound scaling | Medium | High | Low | **Refuted by the bound curve (§28)** — `[lr-snr]`. Fast+heavy noise wants a *small* bound (lag dominates), slow+heavy a *large* one (rejection dominates); SNR is low for both and cannot separate them, so a noise-side rule hurts the target. Even the floor bound leaves fast+heavy above legacy: the residual is intrinsic, not a tuning miss |
 | 40 | Speed marginalisation over WPM bins (SparkGap ITILA) | High | Low | Medium | **Probe done (§52.1); cheap-win half LANDED as #40b (§52.2).** `[speedmarg-headroom]` decomposed select vs best-existing vs the timing-oracle. **Finding: `select` mis-routed mid-speed hand-keyed** — bimodal beats log in a dit window ~[40,55] ms (22–30 wpm; log wins slower AND at 40 wpm). Fixed in §52.2 (`selectUseBimodal`, 3-way router) — strict improvement, hk-25/30 −22%/−35%, 0 significant worse at n=384. The genuine speedmarg `margGap` (best-existing→oracle) that REMAINS is only +0.04–0.06, a fraction achievable — real but SECOND-order, a new-algorithm build now competing for the residual after the routing fix already took the free part |
 | 41 | Model-fit log-evidence as a decode-quality metric (SparkGap) | N/A | N/A | Medium | **Stage 0/1 DONE (§52.1) — `src/cw/model_fit.h`, `[modelfit]`.** `ModelFitScorer`: two-component Gaussian-mixture EM on the envelope, scored as a per-sample LLR vs a composite unimodal null (better-of Gaussian/Rayleigh, arrived at by two measured corrections). **Proven orthogonal to SNR:** a 22 dB loud het (sails past `snr > 6.0`) scores LLR 0.0004 while 12 dB CW scores 0.29 — a single threshold separates usable CW from all loud non-Morse. **Honest limit:** at 6 dB weak CW hits the floor, so it is a **carrier/het VETO at usable SNR, not a weak-signal detector** (recall stays SNR's job; used AND-ed with SNR). Passive, decode-path byte-identical (suite 1674/227). **Remaining:** Stage 2 (compute per-channel on the real front-end envelope, surface in `getMarkers`), Stage 3 (replace the `snr > 6.0` spawn/prune gate behind a config flag, `test_channel_manager` harness). Cross-*receiver* RBN consensus is the one SparkGap idea that does NOT transfer |
-| 42 | Soft-posterior fb detector + matched filter — SparkGap ITILA | **High** | **Very High** | Very High | **BREAKTHROUGH, validated in probes; build pending (§52.5–52.9).** The noise wall is a **detector** problem (§52.5: a perfect detector drives noise2/3/4 to CER 0.0000, +0.8/+0.9 ceiling, robust across the WPM×noise grid §52.5b), and the detector fails because the **pre-detection filter is 4–5× too wide** (§52.9): our EnvelopeFrontEnd BPF is ~100–200 Hz, optimal is ~WPM×2.5 ≈ 40 Hz. A validated forward-backward soft detector (§52.6, clean-gate-passing) on a **40 Hz matched filter** transforms the wall (§52.9b): 15wpm-n3 1.09(runaway)→**0.345** (beats legacy 0.82), 25wpm-n3 0.96→**0.27**, 15wpm-n2 →**0.007**. Speed marginalisation (§52.8, evidence-selected prior) makes it speed-agnostic. The runaway was NOT information-theoretic (§52.7 was wrong) — it was out-of-band noise. **Architecture (all pieces validated): IQ → per-channel speed-matched BPF (`setBandwidth`, the #31 hook) → speed-marginalised fb detector → squelch below human-copy SNR → decode.** Matched filter is per-channel (§52.9c — multi-channel is the ideal vehicle). Remaining: streaming fb `IDetector` + speed-matched front end + squelch + paired adjudication. ⚠ validated on synthetic AWGN; CW Skimmer's CER<0.02 @ −10 dB (matched filter) is the external corroboration. Supersedes #24/#27/#31 |
+| 42 | Soft-posterior fb detector + matched filter — SparkGap ITILA | **High** | **Very High** | Very High | **BUILT & SHIPPED-AS-CANDIDATE `legacy+route` (2026-07-23) — see `### §52 step 4` block. Forward-only + online-EM streaming fb detector; regime router dominates the select default (route-vs-select 7 better/0 worse/18 ns). Promotion to DEFAULT_CORE pending user decision.** Original probe evidence below.**BREAKTHROUGH, validated in probes; build pending (§52.5–52.9).** The noise wall is a **detector** problem (§52.5: a perfect detector drives noise2/3/4 to CER 0.0000, +0.8/+0.9 ceiling, robust across the WPM×noise grid §52.5b), and the detector fails because the **pre-detection filter is 4–5× too wide** (§52.9): our EnvelopeFrontEnd BPF is ~100–200 Hz, optimal is ~WPM×2.5 ≈ 40 Hz. A validated forward-backward soft detector (§52.6, clean-gate-passing) on a **40 Hz matched filter** transforms the wall (§52.9b): 15wpm-n3 1.09(runaway)→**0.345** (beats legacy 0.82), 25wpm-n3 0.96→**0.27**, 15wpm-n2 →**0.007**. Speed marginalisation (§52.8, evidence-selected prior) makes it speed-agnostic. The runaway was NOT information-theoretic (§52.7 was wrong) — it was out-of-band noise. **Architecture (all pieces validated): IQ → per-channel speed-matched BPF (`setBandwidth`, the #31 hook) → speed-marginalised fb detector → squelch below human-copy SNR → decode.** Matched filter is per-channel (§52.9c — multi-channel is the ideal vehicle). Remaining: streaming fb `IDetector` + speed-matched front end + squelch + paired adjudication. ⚠ validated on synthetic AWGN; CW Skimmer's CER<0.02 @ −10 dB (matched filter) is the external corroboration. Supersedes #24/#27/#31 |
 
 ### Reprioritized leftovers (2026-07-21, after §28)
 
@@ -544,6 +547,93 @@ IQ → per-channel tone→DC → speed-matched BPF (~WPM×2.5 Hz, via setBandwid
    running away. Gate on the fitted separation / evidence.
 4. **Register a core** (`legacy+fb` or `fbmatch+...`), run the **full paired adjudication
    vs legacy** at n=384 with the clean-first gate; ratchet gains, never loosen.
+
+---
+
+### §52 step 4 — BUILT, and it became a REGIME ROUTER (2026-07-23, self-contained)
+
+> The forward build above is DONE. Two batch-idioms transliterated into the streaming
+> detector were actively HARMFUL and were removed (each surfaced from a user design
+> question, not tuning). The fb core is a fast+heavy-AWGN specialist; the shippable
+> product is a router that uses it only where it wins. Full detail: investigation §52.10+.
+
+**Files:** `src/cw/fb_detector.h` (FBDetector), `src/cw/stages.h` (ForwardBackwardDetector
+adapter), `src/cw/regime_route.h` (RegimeRouteCore), `src/cw/core_registry.h` (makeFB +
+cores `legacy+fb`/`+fb+wide`/`+fb+narrow`/`+fb+adapt`/**`legacy+route`**), `src/cw/staged_core.h`
+(matchedFilter bypass + fbBpf SNR-adaptive geometry + setSmoothing), `src/cw/dsp.h`
+(`setSmoothing`, `inputSnrReadyFast`). Cores register clean; suite 1687/230 green.
+
+**Two integration bugs found via clean-first discipline (the CLASS was proven to
+reproduce the batch transitions BEFORE debugging, `[fbclass]`):** (1) StagedCore's boxcar
+matched filter corrupts the fb emission fit → bypass it; (2) NEGATIVE `sampleOffset`
+(transition reported LAG-late in a later block) breaks StagedCore cross-block gap
+accounting → emit at the head with a non-negative offset (constant lag cancels in timing).
+
+**BREAKTHROUGH 1 — FORWARD-ONLY, zero lag ("do we need the lag?").** The backward
+(smoothing) pass was the whole problem: its fixed-lag truncation + windowed-emission
+mismatch shifted mark/gap boundaries ~14 ms on slow (narrow-smoothed) edges → char-splits
+(`CQ→NNQ`). Neither MIN_RUN nor LAG nor a huge EM window fixed it; the batch detector proved
+narrow-smooth is fine, so it was an ONLINE artifact. Decide directly from the causal forward
+posterior (`_fwdOnly=true`, `fwdDecide`); the low transition prior makes it sticky. STRICTLY
+better everywhere: clean-narrow 0.141→0.000, 15wpm-n3 0.759→0.308, and it HALVED the "detector
+limits" (qsb 0.29→0.15, farnsworth 0.46→0.11). Also removed the wide-warmup runaway → fb now
+STARTS WIDE (no clean switch transient, hand-keyed stays wide). Adjudication vs legacy:
+backward 8/13/17harm → forward-only+wide-start 11/8/13harm.
+
+**BREAKTHROUGH 2 — ONLINE-EM emission, no window ("why a window?").** The fixed 1.2s EM
+window is single-timescale: too long fails QSB fades, too short wrecks the noise fit
+(measured tradeoff). Replaced with recursive exponentially-forgetting (`ONLINE_LAM=0.003`)
+POSTERIOR-WEIGHTED sufficient-stat updates (`updateEmission`): only mark-posterior mass
+updates the mark stats, so muHi tracks the fade and holds through gaps; O(1)/sample; window
+now only bootstraps. Fixed CLEAN (0.000), halved qsb (+0.056), fixed qrn, grew AWGN wins
+(noise3-25wpm −0.74). Adjudication → **11 better / 7 worse / 11 harmful.** KNOWN latent:
+online-EM needs a well-separated bootstrap so `legacy+fb+narrow` (narrow-from-start
+diagnostic) DIVERGES to CER 1.0 — the shipping router bootstraps wide, unaffected.
+
+**fb is a SPECIALIST (adjudication vs legacy 11/7/11):** dominates fast+heavy-AWGN
+(noise3-25wpm −0.74) — the §25/§43 wall — but loses on qsb/farnsworth/qrm/weak-hand-keyed
+(fading/spacing/interference/jitter break the HMM). Failure isolation `[fb-diag]`: hand-keyed/
+QRN are FILTER-caused (fb+wide≈legacy), qsb/Farnsworth DETECTOR-caused. Real pileup:
+standalone fb regressed 60→32 (wide-start overfit synthetic; real signals carry QRM).
+
+**THE DELIVERABLE — `legacy+route` (RegimeRouteCore, option B):** runs `select`+`fb` in
+parallel; at a 6s commit picks fb ONLY where it decodes MORE valid ham tokens than select
+(`fbGood>=selGood+1`; callsign/Q-abbr/numeric, len≥2 so noise single-chars don't score) AND
+`inputSnr<8`. Ties→select. Pre-commit select drives the sink live, fb buffers; if fb wins,
+`clearEmitted()`+replay fb's buffer (no lead-in lost). Post-commit ONLY the winner runs (2x
+cost confined to acquisition, steady-state 1x). **Decode-plausibility arbitration was the
+key** — raw inputSnr wrongly sent qsb/qrm/weak-hk (read as noise but select copes) to fb.
+
+**Adjudication (`[fb-adjudicate]`, n=96, 4 runs):** select-vs-legacy 12/1/6harm, fb-vs-legacy
+11/7/11, route-vs-legacy **16/0/3harm**, **route-vs-SELECT 7 better / 0 worse / 18 ns /
+3 ns-harm**. The strict 0-harm-vs-legacy gate CANNOT be cleared by any select-fallback core
+— SELECT (the default) itself fails it (6 harm) and route inherits its deep-noise ns-harm
+(noise4). So the operative bar is route-vs-select, where route STRICTLY DOMINATES (7 noise
+wins incl. noise3-25wpm −0.62; 18 identical; 0 worse; 3 microscopic ns-harm) WITHOUT loosening
+any gate. Real pileup: route 55 = select 55 (routes moderate-SNR real signals to select).
+
+**PROPOSAL PENDING USER DECISION: promote `legacy+route` to `DEFAULT_CORE`** (currently
+`legacy+select`, `core_registry.h` ~line 288). It dominates the incumbent. Weigh: ~2x decode
+during the 6s window; campaign promoted-then-reverted same day before (§21/§25) so cautious.
+If not promoting → ships as a strong selectable core.
+
+**LOOSE ENDS to clean before/independent of promotion:** (a) dead backward path
+(`_fwdOnly=false` branch + `finalize` + ring buffers + LAG) is removable — forward-only is
+strictly better; (b) `legacy+fb+narrow` diagnostic diverges (online-EM needs wide bootstrap)
+— fix or drop it; (c) many `[.]` step-4 probes in `test_ditguard.cpp` are scaffolding.
+
+**Step-4 probes (hidden `[.]`):** `[fbclass]` (online==batch validation), `[fbcore]`
+(registered core gate), `[fb-diag]` (filter-vs-detector split), `[fb-root]`/`[fb-durs]`
+(char-split root cause), `[fb-decouple]` (bpf/smooth), `[fb-insnr]`/`[fb-bwsweep]`
+(calibration), `[fb-adjudicate]` (`test_promotion.cpp` — the 4 adjudications),
+`[realpileup]` (`test_realpileup.cpp` + `tests/pileup_extract.py`, truthless pileup).
+
+**DISCIPLINE (step 4 added these):** questioning a transliterated batch idiom (lag, window)
+beat tuning around its symptoms — twice. Synthetic adjudication can overfit (wide-start won
+synthetic, lost the real pileup); validate on real data. A router lets a specialist ship
+safely: dominate the incumbent, don't chase a gate the incumbent itself fails.
+
+---
 
 **Probe inventory (hidden `[.]`, in `tests/test_ditguard.cpp` unless noted):**
 `[softdet-headroom]` `[softdet-grid]` (ceiling), `[softdet-v2]` (validated fb),
