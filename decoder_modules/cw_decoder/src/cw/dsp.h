@@ -39,9 +39,11 @@ namespace cw {
             // while rejecting adjacent signals 200+ Hz away.
             bpfTaps = dsp::taps::lowPass(bpfCutoff, bpfTrans, _internalRate);
             bpfBufSize = bpfTaps.size - 1;
-            bpfBuffer = dsp::buffer::alloc<dsp::complex_t>(bpfBufSize + 65536);
-            dsp::buffer::clear(bpfBuffer, bpfBufSize);
+            bpfCap = std::max(MAX_DELAY, bpfBufSize);
+            bpfBuffer = dsp::buffer::alloc<dsp::complex_t>(bpfCap + 65536);
+            dsp::buffer::clear(bpfBuffer, bpfCap);
             bpfBufStart = &bpfBuffer[bpfBufSize];
+            _bpfCutoff = bpfCutoff; _bpfTrans = bpfTrans;
 
             // Smoothing LPF (float lowpass at internal rate)
             // 80 Hz cutoff, 100 Hz transition → ~20 taps.
@@ -49,9 +51,11 @@ namespace cw {
             // The matched filter in channel.h provides additional narrowing.
             smoothTaps = dsp::taps::lowPass(smoothCutoff, smoothTrans, _internalRate);
             smoothBufSize = smoothTaps.size - 1;
-            smoothBuffer = dsp::buffer::alloc<float>(smoothBufSize + 65536);
-            dsp::buffer::clear(smoothBuffer, smoothBufSize);
+            smoothCap = std::max(MAX_DELAY, smoothBufSize);
+            smoothBuffer = dsp::buffer::alloc<float>(smoothCap + 65536);
+            dsp::buffer::clear(smoothBuffer, smoothCap);
             smoothBufStart = &smoothBuffer[smoothBufSize];
+            _smoothCutoff = smoothCutoff; _smoothTrans = smoothTrans;
 
             // Intermediate buffers
             xlatedBuf = dsp::buffer::alloc<dsp::complex_t>(65536);
@@ -177,28 +181,34 @@ namespace cw {
         // pre-lock events are already captured. Only the BPF changes; the xlator,
         // decimator and smoothing LPF keep their state.
         void setBandwidth(float bpfCutoff, float bpfTrans) {
-            // Preserve the recent input history across the rebuild instead of
-            // zeroing it (docs §33). A hard clear injects a filter-length dropout;
-            // on a near-clean profile that still triggers narrowing (e.g. QRM,
-            // where a narrowband interferer reads as noise) that dropout is a
-            // spurious character. The delay line holds recent decimated input
-            // samples, which stay valid across a tap change — carry the newest
-            // min(old, new) of them into the tail of the new history.
-            std::vector<dsp::complex_t> hist;
-            if (bpfBuffer && bpfBufSize > 0) {
-                hist.assign(bpfBuffer, bpfBuffer + bpfBufSize);   // oldest → newest
-            }
+            // §53: allocation-free in the RT thread. Skip a no-op change (the fb
+            // adaptive path re-asserts the start geometry on every channel), and
+            // reuse the pre-reserved buffer — recompute only the (small) taps and
+            // realign the delay-line history IN PLACE, instead of freeing/allocating
+            // the ~512 KB scratch, which spiked the live audio thread.
+            if (bpfCutoff == _bpfCutoff && bpfTrans == _bpfTrans) { return; }
+            _bpfCutoff = bpfCutoff; _bpfTrans = bpfTrans;
             if (bpfTaps.taps) { dsp::taps::free(bpfTaps); }
-            if (bpfBuffer) { dsp::buffer::free(bpfBuffer); }
             bpfTaps = dsp::taps::lowPass(bpfCutoff, bpfTrans, _internalRate);
-            bpfBufSize = bpfTaps.size - 1;
-            bpfBuffer = dsp::buffer::alloc<dsp::complex_t>(bpfBufSize + 65536);
-            dsp::buffer::clear(bpfBuffer, bpfBufSize);
-            const int keep = std::min((int)hist.size(), bpfBufSize);
-            if (keep > 0) {
-                memcpy(&bpfBuffer[bpfBufSize - keep], &hist[hist.size() - keep],
-                       keep * sizeof(dsp::complex_t));
+            const int oldSize = bpfBufSize;
+            int newSize = bpfTaps.size - 1;
+            if (newSize > bpfCap) {   // outgrew the reserve (not expected for CW) — grow once
+                dsp::buffer::free(bpfBuffer);
+                bpfCap = newSize;
+                bpfBuffer = dsp::buffer::alloc<dsp::complex_t>(bpfCap + 65536);
+                dsp::buffer::clear(bpfBuffer, bpfCap);
+            } else {
+                // Preserve the recent input history (docs §33: a hard clear would
+                // inject a filter-length dropout -> a spurious character). Shift the
+                // newest min(old,new) samples to the tail of the new delay line.
+                const int keep = std::min(oldSize, newSize);
+                if (keep > 0 && newSize != oldSize) {
+                    memmove(&bpfBuffer[newSize - keep], &bpfBuffer[oldSize - keep],
+                            keep * sizeof(dsp::complex_t));
+                }
+                if (newSize > keep) { dsp::buffer::clear(bpfBuffer, newSize - keep); }
             }
+            bpfBufSize = newSize;
             bpfBufStart = &bpfBuffer[bpfBufSize];
         }
 
@@ -208,21 +218,27 @@ namespace cw {
         // the former, so this is its post-detection twin. Preserves the smoothing
         // history (real magnitude samples) across the tap change to avoid a dropout.
         void setSmoothing(float smoothCutoff, float smoothTrans) {
-            std::vector<float> hist;
-            if (smoothBuffer && smoothBufSize > 0) {
-                hist.assign(smoothBuffer, smoothBuffer + smoothBufSize);
-            }
+            // §53: allocation-free, mirror of setBandwidth (real magnitude samples).
+            if (smoothCutoff == _smoothCutoff && smoothTrans == _smoothTrans) { return; }
+            _smoothCutoff = smoothCutoff; _smoothTrans = smoothTrans;
             if (smoothTaps.taps) { dsp::taps::free(smoothTaps); }
-            if (smoothBuffer) { dsp::buffer::free(smoothBuffer); }
             smoothTaps = dsp::taps::lowPass(smoothCutoff, smoothTrans, _internalRate);
-            smoothBufSize = smoothTaps.size - 1;
-            smoothBuffer = dsp::buffer::alloc<float>(smoothBufSize + 65536);
-            dsp::buffer::clear(smoothBuffer, smoothBufSize);
-            const int keep = std::min((int)hist.size(), smoothBufSize);
-            if (keep > 0) {
-                memcpy(&smoothBuffer[smoothBufSize - keep], &hist[hist.size() - keep],
-                       keep * sizeof(float));
+            const int oldSize = smoothBufSize;
+            int newSize = smoothTaps.size - 1;
+            if (newSize > smoothCap) {
+                dsp::buffer::free(smoothBuffer);
+                smoothCap = newSize;
+                smoothBuffer = dsp::buffer::alloc<float>(smoothCap + 65536);
+                dsp::buffer::clear(smoothBuffer, smoothCap);
+            } else {
+                const int keep = std::min(oldSize, newSize);
+                if (keep > 0 && newSize != oldSize) {
+                    memmove(&smoothBuffer[newSize - keep], &smoothBuffer[oldSize - keep],
+                            keep * sizeof(float));
+                }
+                if (newSize > keep) { dsp::buffer::clear(smoothBuffer, newSize - keep); }
             }
+            smoothBufSize = newSize;
             smoothBufStart = &smoothBuffer[smoothBufSize];
         }
 
@@ -260,17 +276,29 @@ namespace cw {
         lv_32fc_t xlPhase = {1.0f, 0.0f};
         lv_32fc_t xlPhaseDelta = {1.0f, 0.0f};
 
+        // Delay-line capacity reserved once so a runtime geometry switch
+        // (setBandwidth/setSmoothing, §52 fb adaptive path) recomputes taps and
+        // reuses the buffer instead of freeing + allocating the ~512 KB scratch in
+        // the real-time DSP thread — that per-channel alloc spike starved the live
+        // tone scanner/decode (§53). CW filters at 1 kHz internal rate run ~15-200
+        // taps; 2048 is ~10x headroom, and the switch grows only if it is exceeded.
+        static constexpr int MAX_DELAY = 2048;
+
         // Narrow BPF state
         dsp::tap<float> bpfTaps = {};
         dsp::complex_t* bpfBuffer = nullptr;
         dsp::complex_t* bpfBufStart = nullptr;
         int bpfBufSize = 0;
+        int bpfCap = 0;                 // allocated delay-line capacity
+        float _bpfCutoff = 0, _bpfTrans = 0;
 
         // Smoothing LPF state
         dsp::tap<float> smoothTaps = {};
         float* smoothBuffer = nullptr;
         float* smoothBufStart = nullptr;
         int smoothBufSize = 0;
+        int smoothCap = 0;
+        float _smoothCutoff = 0, _smoothTrans = 0;
 
         // Intermediate buffers
         dsp::complex_t* xlatedBuf = nullptr;

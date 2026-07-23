@@ -2160,6 +2160,86 @@ TEST_CASE("fb char-split duration dump (§52 step 4)", "[cw][.][fb-durs]") {
 // durations are clean and well-separated, the bug is downstream (gap classification);
 // if jittery/inflated, it is the detector. Internal rate 1kHz => 1 sample = 1 ms.
 // farnsworth ratio 2.0 @ dit=80ms: element-gap ~80, char-gap ~480, word-gap ~1120.
+// §53 — WHY the router degrades LIVE tone detection (even at 3 channels — not CPU).
+// The channel keep-alive drops a tone unless snr>6 OR modelFit>keep (channel_manager
+// §41). Feed a realistic moderate signal through a REAL Channel with select vs route,
+// block-by-block, and dump snr/wpm/modelFit over time. If route's snr/modelFit read
+// lower (fb reports keying-CONTRAST snr, not select's snr), the keep-alive idles the
+// tone out — the tone "disappears" though fb decodes it. modelFitKeep default 0.25.
+TEST_CASE("router live tone-detection regression (§53)", "[cw][.][route-live]") {
+    struct Case { const char* name; SignalParams params; };
+    auto nz=[](float dit,float amp){auto p=profileClean(dit);p.noiseAmp=amp;return p;};
+    const Case cases[] = {
+        {"clean-15",  profileClean(80.0f)},
+        {"n1.5-15",   nz(80,1.5f)},        // moderate — the recall-sensitive band (§41)
+        {"n2.0-25",   nz(48,2.0f)},
+        {"n3.0-25",   nz(48,3.0f)},        // heavy — where fb wins the decode
+    };
+    printf("\n=== §53 live tone-detection: snr / modelFit over time (keep = snr>6 OR mf>0.25) ===\n");
+    for (auto& c : cases) {
+        SignalParams p = c.params; p.seed = 4242;
+        auto sig = generateMessage(MSG_FULL(), p);
+        cw::Channel chSel, chFb;
+        chSel.init(0, p.toneFreq, "legacy+select");
+        chFb.init(1, p.toneFreq, "legacy+fb");   // what a channel committed to fb reports
+        printf("\n[%s]  %-7s | %-24s | %-24s\n", c.name, "t(s)", "select snr/wpm/mf keep?", "FB snr/wpm/mf keep?");
+        long total = 0; int blk = 512; int selKept=0, fbKept=0, nsamp=0;
+        for (int off = 0; off < (int)sig.samples.size(); off += blk) {
+            int n = std::min(blk, (int)sig.samples.size() - off);
+            chSel.process(n, &sig.samples[off]);
+            chFb.process(n, &sig.samples[off]);
+            total += n;
+            auto keepB=[](cw::Channel&ch){ return (ch.snr>6.0f || ch.modelFit>0.25f); };
+            if ((total % 8000) < blk) { nsamp++; selKept+=keepB(chSel); fbKept+=keepB(chFb); }  // every ~1s
+            if ((total % 16000) < blk) {
+                auto keep=[](cw::Channel&ch){ return (ch.snr>6.0f || ch.modelFit>0.25f) ? "KEEP" : "drop"; };
+                printf("        %6.1f | %5.1f %5.1f %6.3f %-5s| %5.1f %5.1f %6.3f %-5s\n",
+                    total/8000.0f,
+                    chSel.snr, chSel.wpm, chSel.modelFit, keep(chSel),
+                    chFb.snr, chFb.wpm, chFb.modelFit, keep(chFb));
+            }
+        }
+        printf("        KEEP fraction over run:  select %d/%d   fb %d/%d\n", selKept, nsamp, fbKept, nsamp);
+    }
+}
+
+// §53 — MEASURE per-core wall-clock cost. The live decoder runs every channel's
+// core in a real-time thread; if route (select + fb) is much heavier than select
+// alone, even a few channels miss the audio deadline -> scanner/decode starve. This
+// times steady-state process() cost (small live-like 512-sample blocks).
+TEST_CASE("core per-block cost (§53)", "[cw][.][core-cost]") {
+    auto p = profileClean(80.0f); p.seed = 4242; p.noiseAmp = 2.0f;  // realistic band signal
+    auto sig = generateMessage(MSG_FULL(), p);
+    struct RawSink : public cw::CharSink {
+        void emitChar(char,float) override {} void flushWord() override {}
+        void emitWordGap() override {} void clearEmitted() override {}
+    } sink;
+    auto timeCore = [&](const char* name)->double{
+        double best = 1e30;
+        for (int rep = 0; rep < 5; rep++) {                 // best-of-5 (min = least noise)
+            auto core = cw::findCore(name)->make();
+            core->init(8000.0f, 1000.0f, p.toneFreq);
+            auto t0 = std::chrono::steady_clock::now();
+            for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+                int n = std::min(512, (int)sig.samples.size() - off);
+                core->process(n, &sig.samples[off], sink);
+            }
+            auto t1 = std::chrono::steady_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            best = std::min(best, ms);
+        }
+        return best;
+    };
+    double sel = timeCore("legacy+select");
+    double fb  = timeCore("legacy+fb");
+    double rt  = timeCore("legacy+route");
+    printf("\n=== §53 per-core cost (best-of-5, whole %.1fs signal) ===\n", sig.samples.size()/8000.0);
+    printf("  legacy+select : %7.2f ms  (1.00x)\n", sel);
+    printf("  legacy+fb     : %7.2f ms  (%.2fx)\n", fb, fb/sel);
+    printf("  legacy+route  : %7.2f ms  (%.2fx)  <- default when promoted\n", rt, rt/sel);
+    printf("  => in the live RT thread, every channel pays the route multiple.\n");
+}
+
 TEST_CASE("fb farnsworth char-split diagnosis (§53)", "[cw][.][fb-farns]") {
     auto p = profileFarnsworth(80.0f, 2.0f); p.seed = 4242;
     auto sig = generateMessage(MSG_FULL(), p);

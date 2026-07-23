@@ -44,8 +44,11 @@
 > (2) the arbitration was rebuilt on **valid/total token RATIO + fb keying CONTRAST** (buried
 > AWGN ~4dB vs strong hand-keyed ~6dB — the discriminator inputSnr couldn't make). Result:
 > **route vs select 6 better / 0 worse / 0 harm** (noise3-25wpm 0.98→**0.41**, noise3-30wpm
-> 0.92→**0.53**, +4 cells), full default gate suite green. Cost: ~2x decode for a 12s commit
-> window, 1x after. Detail: §52 step-4 block + §53 block below.
+> 0.92→**0.53**, +4 cells), full default gate suite green. (3) A LIVE regression the offline
+> gates missed — route degraded tone detection + decode — was root-caused NOT to stats or
+> throughput but to the fb core rebuilding DSP filters (512 KB alloc) INSIDE the RT audio
+> thread; **FIXED** by making `dsp.h` setBandwidth/setSmoothing allocation-free (confirmed live:
+> tone detection back to normal). Detail: §52 step-4 block + §53 block below.
 >
 > **Current default: `legacy+route` (regime router over select+fb), promoted 2026-07-23 (§53).**
 > Pre-commit it runs the `legacy+select` timing selector (below), which routes each signal to log (jittered good-SNR hand-keyed), a V2/V1
@@ -709,10 +712,34 @@ for the 12s commit window, 1x after (winner only, `RegimeRouteCore::process` run
 committed core post-commit). `COMMIT_SEC`/`CONTRAST_MAX`/`SEL_RATIO_MAX`/`RATIO_MARGIN` are the
 tunables in `regime_route.h`.
 
+**LIVE REGRESSION + ROOT CAUSE (the promotion's real test — offline gates missed it).**
+First promotion of route broke the LIVE skimmer: degraded tone detection AND decode, even at
+3 channels. Offline tests decode ONE channel from a batch buffer with NO real-time deadline, so
+they cannot see it. Disproved by measurement: NOT stats (route's snr/wpm/modelFit are identical
+to select pre/select-commit, and fb-committed channels keep BETTER — higher modelFit, [route-
+live]), NOT throughput (route is 1.05x select, fb is 0.80x, [core-cost]). The cause is a per-
+channel LATENCY SPIKE: the fb core's SNR-adaptive geometry rebuilds its DSP filters
+(`setBandwidth`/`setSmoothing`) INSIDE `StagedCore::process` — the RT audio thread — each
+freeing + allocating a ~512 KB scratch buffer + recomputing a windowed-sinc tap set. `select`
+(`adaptiveBpf=false`) NEVER rebuilds filters at runtime. The tone scanner runs in the SAME DSP
+thread (`channel_manager::process`), so every fb channel's rebuild spike (once at ~0.5s, and
+recurring as band signals appear/disappear) overran the deadline and starved the scanner +
+gapped the decode. Throughput averages hide it; only per-call latency matters live.
+
+**FIX (dsp.h, allocation-free filter switch — confirmed live: tone detection back to normal).**
+`setBandwidth`/`setSmoothing` no longer touch the heap in the RT thread: reserve the delay-line
+capacity once at init (`MAX_DELAY=2048`, ~10x headroom for any CW filter; grows once only if
+exceeded), recompute only the small taps and realign the delay-line history IN PLACE (preserved,
+no dropout), and skip a no-op change (the fb path re-asserts the start geometry on every channel).
+So the switch went from "free + 512 KB malloc + sinc" to "~200-tap recompute in place." LESSON:
+a core that reallocates DSP buffers inside process() is fine in batch tests and lethal in the RT
+audio thread; keep the process() path allocation-free.
+
 **§53 probes (hidden `[.]`):** `[fb-farns]` (farnsworth raw-vs-corrected decode + the
 staged_core fix), `[fb-small]` (fast n=24 select/fb/fb+wide small-scope), `[route-why]`
 (arbitration dump: selRatio/fbRatio/contrast/inputSnr per profile — uses
-`RegimeRouteCore::debug`).
+`RegimeRouteCore::debug`), `[route-live]` (select vs fb snr/modelFit keep-alive over time),
+`[core-cost]` (per-core wall-clock — throughput, which is NOT the live bottleneck).
 
 **REMAINING fb weak regimes (handled by routing to select, not yet fixed IN fb):** qsb (fade
 below noise floor → spurious elements), qrm (adaptive narrowing misroutes it — fb+wide is

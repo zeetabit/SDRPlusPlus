@@ -316,19 +316,18 @@ namespace cw {
     // is real. Unlike the reverted LR promotion, the gate coverage is complete
     // (fast×heavy §43, weak-hand-keyed §48, and the recalibrated artifacts §51).
     //
-    // legacy+route PROMOTED 2026-07-23 (§53). The regime router runs legacy+select and
-    // the forward-only online-EM fb detector in parallel and, at a 12s commit, hands off
-    // to fb where the DECODE-PLAUSIBILITY signal says fb copies a buried AWGN signal that
-    // select cannot: select's valid/total token RATIO is low (garbage), fb's ratio beats
-    // it by a margin, fb's keying CONTRAST is low (buried, not strong-hand-keyed), and the
-    // pre-BPF inputSnr is broadband. Paired n=96 vs select: 6 better / 0 worse / 0 harm
-    // (noise3-25wpm 0.98→0.41, noise3-30wpm 0.92→0.53, +4 more cells); full default gate
-    // suite green. This SUPERSEDES the earlier deferral: the deferred version used a raw
-    // token-COUNT gate (selGood<=0 && fbGood>=3) that stalled on select's 1-2 garbage
-    // tokens and only reached 0.84 with 3 improved cells. Two §53 fixes unlocked it: the
-    // staged_core idle-flush no longer misclassifies stretched gaps (farnsworth 0.155→
-    // 0.014, so fb's router branch is clean), and the ratio+contrast arbitration replaced
-    // the count. Cost: ~2x decode for the 12s commit window, 1x after (winner only).
-    // fb detector: src/cw/fb_detector.h; router+arbitration: src/cw/regime_route.h.
+    // legacy+route (§53): ratio+contrast regime router, promotable on paired n=96 vs
+    // select (6 better / 0 worse / 0 harm, noise3-25wpm 0.98→0.41). First promotion
+    // broke the LIVE skimmer — root-caused NOT to throughput (route is ~1.05x select,
+    // measured [core-cost]) but to a per-channel LATENCY SPIKE: the fb core's adaptive
+    // geometry rebuilt its DSP filters (setBandwidth/setSmoothing) INSIDE the RT audio
+    // thread, each freeing+allocating a ~512 KB scratch. select never rebuilds filters.
+    // With signals appearing/disappearing, those spikes starved the tone scanner (same
+    // DSP thread) → degraded tone detection + decode, invisible to the batch tests
+    // (which have no RT deadline). FIXED §53: dsp.h setBandwidth/setSmoothing are now
+    // allocation-free (reserve the delay-line capacity once, recompute only the small
+    // taps in place, skip no-op changes). Router+arbitration: src/cw/regime_route.h;
+    // fb detector: src/cw/fb_detector.h. Revert to "legacy+select" is one line if the
+    // live test still regresses.
     inline constexpr const char* DEFAULT_CORE = "legacy+route";
 }
