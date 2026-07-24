@@ -39,6 +39,11 @@ namespace cw {
         float confidence = 0;
         bool  locked     = false;
         float inputSnr   = 0;   // pre-BPF, input-referred SNR (docs §32/§33)
+        // DR-4b: count of timing locks refused because the estimated speed was
+        // non-physical (outside ~5-60 WPM). Tracked ALWAYS. A raw estimator that
+        // produces an unreal speed is an implementation smell — tests/benchmarks
+        // assert this is 0 so the backstop never launders a bug (docs §14).
+        int   unrealWpmRejections = 0;
     };
 
     // Where decoded characters go.
@@ -118,6 +123,16 @@ namespace cw {
         virtual const char* name() const = 0;
         // Pre-charge the noise estimator so detection can start immediately.
         virtual void preseed(float level, int count) { (void)level; (void)count; }
+        // DR-4: re-detect a buffered envelope window under the detector's CURRENT
+        // parameters, without touching live state — the basis of the continuous
+        // re-decode. Returns events with buffer-relative offsets. Detectors that do
+        // not support re-detection return empty (the core then skips re-decode).
+        virtual std::vector<KeyEvent> reDetect(const float* env, int count) {
+            (void)env; (void)count; return {};
+        }
+        // Whether the detector's parameter model is calibrated enough that a
+        // re-decode is worth trusting (both element classes observed).
+        virtual bool paramsReady() const { return true; }
     };
 
     // Stage 3: durations → DIT/DAH and gap classes.

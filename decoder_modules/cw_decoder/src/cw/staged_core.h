@@ -3,6 +3,7 @@
 #include "stages.h"
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 // StagedCore — the classic pipeline as a composition of swappable stages:
@@ -45,12 +46,15 @@ namespace cw {
                    bool bpfGarbageRevert = false,
                    bool bpfReeval = false,
                    bool matchedFilter = true,
-                   bool fbBpf = false)
+                   bool fbBpf = false,
+                   bool unrealWpmGuard = false,
+                   bool contRedecode = false)
             : frontEnd(std::move(fe)), detector(std::move(det)),
               timing(std::move(tim)), symbols(std::move(sym)),
               mfResizePolicy(mfResize), minElementScale(minElemScale),
               adaptiveBpf(adaptiveBpf), bpfGarbageRevert(bpfGarbageRevert),
-              bpfReeval(bpfReeval), _mfEnabled(matchedFilter), _fbBpf(fbBpf) {}
+              bpfReeval(bpfReeval), _mfEnabled(matchedFilter), _fbBpf(fbBpf),
+              _unrealWpmGuard(unrealWpmGuard), _contRedecode(contRedecode) {}
 
         // Runtime noise-aware BPF geometry (docs §29–33), from the locked WPM
         // (dit, ms) and the INPUT-referred SNR (dB, pre-BPF; frontEnd
@@ -108,6 +112,10 @@ namespace cw {
             symbols->init();
             envBuf = dsp::buffer::alloc<float>(CORE_MAX_ENVELOPE);
             mfBuf  = dsp::buffer::alloc<float>(CORE_MAX_ENVELOPE);
+            if (_contRedecode) {
+                _reCap = (int)(internalRate * 60.0f);
+                _reEnv.assign(_reCap, 0.0f);
+            }
         }
 
         ~StagedCore() override {
@@ -168,6 +176,17 @@ namespace cw {
                 }
                 _fbDecided = true;
             }
+
+            // DR-4: continuous re-decode buffers the envelope + live events and emits the
+            // ratchet winner (re-decode vs live) itself; the normal streaming path is
+            // skipped. The detector already ran above (θ updated), so live events + the
+            // envelope are all the re-decode needs.
+            if (_contRedecode) {
+                contPost(mfBuf, envCount, events, totalSamples, sink);
+                _wpm = _reWpm;
+                return;
+            }
+
             timing->setSnr(_snr);   // §48: SNR-gated regime selection (no-op for other timings)
             // B: smoothed getSNR, started only AFTER the estimate has converged.
             // The §36 EMA failed because it averaged from t=0 through the
@@ -275,20 +294,32 @@ namespace cw {
             totalSamples += envCount;
 
             if (!timingWasLocked) {
-                if (timing->isLocked()) {
+                // DR-4b: refuse a non-physical speed. Counted ALWAYS (an implementation
+                // smell, not a normal event); refusing keeps the pre-lock classify loop
+                // adapting the estimator toward a real dit before any retro-decode commits.
+                const bool unrealLock = _unrealWpmGuard && ditUnreal(timing->getDitDuration());
+                if (timing->isLocked() && !unrealLock) {
                     if (debugLog) fprintf(stderr, "[CW ch%d] TIMING LOCKED dit=%.1f wpm=%.1f\n", id, timing->getDitDuration(), timing->getWPM());
                     timingWasLocked = true;
                     retroDecode(sink);
+                } else if (timing->isLocked() && unrealLock) {
+                    _unrealWpmRejections++;
+                    if (debugLog) fprintf(stderr, "[CW ch%d] UNREAL WPM refused dit=%.1f wpm=%.1f (n=%lld)\n",
+                                          id, timing->getDitDuration(), timing->getWPM(), _unrealWpmRejections);
                 } else if (lastKeyUp >= 0 && !detector->isKeyDown() && !preLockEvents.empty()) {
                     float nowMs = (float)totalSamples / _internalRate * 1000.0f;
                     float silenceMs = nowMs - lastKeyUp;
                     if (silenceMs > timing->getDitDuration() * 4.0f && !flushed) {
-                        retroDecode(sink);
-                        char c = symbols->characterBreak();
-                        if (c) { sink.emitChar(c, 0.5f); }
-                        sink.flushWord();
-                        timingWasLocked = true;
-                        flushed = true;
+                        if (unrealLock) {
+                            _unrealWpmRejections++;
+                        } else {
+                            retroDecode(sink);
+                            char c = symbols->characterBreak();
+                            if (c) { sink.emitChar(c, 0.5f); }
+                            sink.flushWord();
+                            timingWasLocked = true;
+                            flushed = true;
+                        }
                     }
                 }
             }
@@ -430,10 +461,17 @@ namespace cw {
             _snrSmooth = 0;
             snrSmoothStarted = false;
             lastEvalSample = 0;
+            _unrealWpmRejections = 0;
+            _reFill = 0;
+            _lastRedecodeSample = 0;
+            _committedConf = -1.0f;
+            _liveSaved.clear();
+            _reCommittedText.clear();
         }
 
         CoreStats stats() const override {
-            return { _snr, _wpm, _confidence, timingWasLocked, frontEnd->getInputSnrDb() };
+            return { _snr, _wpm, _confidence, timingWasLocked, frontEnd->getInputSnrDb(),
+                     (int)_unrealWpmRejections };
         }
 
         const float* diagnostic(int& countOut) const override {
@@ -445,6 +483,7 @@ namespace cw {
 
     private:
         static constexpr int CORE_MAX_ENVELOPE = 65536;
+        struct SavedEvent { bool keyDown; float timeMs; };
 
         void applyMatchedFilter(const float* in, float* out, int count) {
             // The fb detector does its own fixed-lag smoothing; a boxcar in front of
@@ -487,6 +526,137 @@ namespace cw {
             float factor = 0.4f;
             int w = (int)(timing->getDitDuration() / 1000.0f * _internalRate * factor);
             return std::max(5, std::min(w, 100));
+        }
+
+        struct Candidate { std::string text; float conf; int n; float wpm; };
+
+        // Decode a key-event stream (times in ms) with a FRESH timing+symbol chain.
+        // Live and re-detected streams go through the SAME decoder so the confidence
+        // comparison reflects only which DETECTION is cleaner.
+        Candidate decodeStream(const std::vector<SavedEvent>& evs) {
+            auto tim = timing->makeFresh(); tim->init(_internalRate);
+            auto sym = symbols->makeFresh();
+            // Seed the estimator (docs §16.4): estimate dit from the mark durations, prime
+            // the element model, then centre the gap window from every gap — so char/word
+            // spacing classifies against real data, not the 1:3:7 cold defaults.
+            {
+                std::vector<float> marks;
+                float down = -1.0f;
+                for (auto& ev : evs) {
+                    if (ev.keyDown) { down = ev.timeMs; }
+                    else if (down >= 0) { marks.push_back(ev.timeMs - down); down = -1.0f; }
+                }
+                if (marks.size() >= 2) {
+                    std::vector<float> s = marks; std::sort(s.begin(), s.end());
+                    const float ditEst = std::max(5.0f, s[s.size() / 4]);   // lower quartile ~ dit
+                    for (int i = 0; i < 8; i++) { tim->classifyOn(ditEst); tim->classifyOn(ditEst * 3.0f); }
+                }
+                float seedUp = -1.0f;
+                for (auto& ev : evs) {
+                    if (ev.keyDown) { if (seedUp >= 0) { tim->classifyOff(ev.timeMs - seedUp); } }
+                    else { seedUp = ev.timeMs; }
+                }
+            }
+            std::string text; float confSum = 0.0f; int confN = 0;
+            float lastDown = -1.0f, lastUp = -1.0f;
+            for (auto& ev : evs) {
+                const float t = ev.timeMs;
+                if (ev.keyDown) {
+                    if (lastUp >= 0) {
+                        auto te = tim->classifyOff(t - lastUp);
+                        if (te.gap == CHAR_GAP || te.gap == WORD_GAP) {
+                            char c = sym->characterBreak();
+                            if (c) { text += c; }
+                            if (te.gap == WORD_GAP) { text += ' '; }
+                        }
+                    }
+                    lastDown = t;
+                } else {
+                    if (lastDown >= 0) {
+                        const float elem = t - lastDown;
+                        const float minEl = std::max(5.0f, tim->getDitDuration() * 0.3f);
+                        if (elem >= minEl) {
+                            auto te = tim->classifyOn(elem);
+                            sym->addElement(te.element, te.confidence);
+                            confSum += te.confidence; confN++;
+                        }
+                    }
+                    lastUp = t;
+                }
+            }
+            char c = sym->characterBreak();
+            if (c) { text += c; }
+            return { text, confN > 0 ? confSum / (float)confN : 0.0f, confN, tim->getWPM() };
+        }
+
+        // DR-4 post-step: buffer the detection-input envelope + live events, then
+        // re-decode periodically and emit the ratchet winner. Owns totalSamples (the
+        // normal streaming path is skipped in continuous mode).
+        void contPost(const float* env, int count, std::vector<KeyEvent>& events,
+                      long long blockStart, CharSink& sink) {
+            for (auto& ev : events) {
+                const float ms = (float)(blockStart + ev.sampleOffset) / _internalRate * 1000.0f;
+                _liveSaved.push_back({ ev.keyDown, ms });
+            }
+            // Sliding window: when the buffer would overflow, COMMIT the current decode
+            // to the frozen prefix and slide to a fresh window (θ persists in the
+            // detector — no re-acquisition). This handles messages longer than the
+            // window and cuts only at a window boundary, never dropping the tail.
+            if (_reFill + count > _reCap) {
+                float c, w;
+                _reCommittedText += winnerText(c, w);
+                _reFill = 0;
+                _liveSaved.clear();
+            }
+            std::memcpy(_reEnv.data() + _reFill, env, count * sizeof(float));
+            _reFill += count;
+            totalSamples += count;
+
+            const long long period = (long long)(_internalRate * 0.5f);
+            if (detector->paramsReady() &&
+                (totalSamples - _lastRedecodeSample) >= period) {
+                reDecodeBuffer(sink);
+                _lastRedecodeSample = totalSamples;
+            }
+        }
+
+        // Decide the winning decode of the CURRENT window: the re-detected stream vs the
+        // live event stream, scored comparably (both via decodeStream), with a margin so
+        // the re-decode only overrides when CLEARLY better — keeps Farnsworth / heavy
+        // noise at the live decode while holding the stationary wins. Returns its text.
+        std::string winnerText(float& outConf, float& outWpm) {
+            auto reEvents = detector->reDetect(_reEnv.data(), _reFill);
+            std::vector<SavedEvent> reSaved;
+            reSaved.reserve(reEvents.size());
+            for (auto& ev : reEvents) {
+                reSaved.push_back({ ev.keyDown, (float)ev.sampleOffset / _internalRate * 1000.0f });
+            }
+            const Candidate live = decodeStream(_liveSaved);
+            const Candidate cont = decodeStream(reSaved);
+            // Override live only when the re-decode is CLEARLY more confident (margin) —
+            // at the noise floor both score ~equal on garbage, so a hair-thin lead is a
+            // coin flip; the margin keeps live there while real wins (cont.conf ≫ live.conf)
+            // are unaffected.
+            constexpr float MARGIN = 0.04f;
+            const Candidate& best =
+                (cont.n >= 3 && cont.conf > live.conf + MARGIN && cont.n >= (int)(0.6f * live.n))
+                ? cont : live;
+            outConf = best.conf; outWpm = best.wpm;
+            return best.n >= 3 ? best.text : std::string();
+        }
+
+        void reDecodeBuffer(CharSink& sink) {
+            float conf, wpm;
+            const std::string win = winnerText(conf, wpm);
+            if (win.empty() && _reCommittedText.empty()) { return; }
+            _committedConf = conf; _reWpm = wpm;
+            sink.clearEmitted();
+            for (char ch : _reCommittedText) {
+                if (ch == ' ') { sink.emitWordGap(); } else { sink.emitChar(ch, conf); }
+            }
+            for (char ch : win) {
+                if (ch == ' ') { sink.emitWordGap(); } else { sink.emitChar(ch, conf); }
+            }
         }
 
         void retroDecode(CharSink& sink) {
@@ -590,6 +760,31 @@ namespace cw {
         bool bpfNarrowed = false;
         bool _mfEnabled = true;   // §52: fb core disables the boxcar matched filter
         bool _fbBpf = false;      // §52 step 2: SNR-adaptive BPF+smoothing for fb
+        // DR-4b: refuse to accept a timing lock whose speed is non-physical.
+        // 5-60 WPM => dit 240-20 ms (dit_ms = 1200/WPM, PARIS). Off by default so
+        // every existing core is byte-identical.
+        bool _unrealWpmGuard = false;
+        long long _unrealWpmRejections = 0;
+        static constexpr float DIT_MIN_MS = 20.0f;   // 60 WPM
+        static constexpr float DIT_MAX_MS = 240.0f;  //  5 WPM
+        bool ditUnreal(float ditMs) const { return ditMs < DIT_MIN_MS || ditMs > DIT_MAX_MS; }
+
+        // DR-4: continuous confidence-ratcheted re-decode. Buffers the detection-input
+        // envelope; while the buffer holds the whole message-so-far, periodically
+        // RE-DETECTS it under the detector's current (maturing) θ, re-decodes with a
+        // fresh timing+symbol chain, and COMMITS the result only when its confidence
+        // strictly beats what is already shown. The first character is recovered as a
+        // natural consequence once θ is good (re-detection un-merges the cold-start
+        // blob); the ratchet makes it regression-safe (never commits a worse decode).
+        // Off by default so every existing core is byte-identical.
+        bool _contRedecode = false;
+        std::vector<float> _reEnv;          // linear envelope history (detection input)
+        int _reFill = 0;
+        int _reCap = 60000;                 // 60 s window at 1 kHz; slides on overflow
+        long long _lastRedecodeSample = 0;
+        float _committedConf = -1.0f;       // ratchet: best committed mean element conf
+        float _reWpm = 0.0f;
+        std::string _reCommittedText;       // DR-4: text from windows that have slid out
         bool _fbDecided = false;  // fb geometry committed (decide-once, no hunting)
         float _fbCurBpf = 1e9f;   // last applied fb bpf cutoff (init "unset")
         bool bpfGaveUp = false;
@@ -602,8 +797,8 @@ namespace cw {
         bool snrSmoothStarted = false;
         long long lastEvalSample = 0;
 
-        struct SavedEvent { bool keyDown; float timeMs; };
         std::vector<SavedEvent> preLockEvents;
+        std::vector<SavedEvent> _liveSaved;  // DR-4: live key events for live-vs-re-decode
 
         bool timingWasLocked = false;
         long long totalSamples = 0;

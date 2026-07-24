@@ -31,6 +31,11 @@ namespace cw {
         // the "debugLog" config key. Uses fprintf intentionally — flog takes
         // a global mutex that would stall the DSP thread.
         bool debugLog = false;
+        // Dictionary/callsign/RST word-correction on the word boundary. OFF by
+        // default: it rewrites the raw decode against a vocabulary, which masks
+        // detector/timing errors. Kept as an opt-in so raw decode quality stays
+        // visible until it is good enough to warrant a language layer.
+        bool wordCorrection = false;
 
         float snr = 0;
         float wpm = 0;
@@ -128,11 +133,13 @@ namespace cw {
         void flushWord() override {
             if (currentWord.empty()) return;
             float avgConf = currentWordCharCount > 0 ? currentWordConfSum / currentWordCharCount : 0.5f;
-            std::string corrected = corrector::correctWord(currentWord, avgConf, &conversation);
-            if (corrected != currentWord) {
-                text.replaceLastN(currentWord.size(), corrected, avgConf);
+            if (wordCorrection) {
+                std::string corrected = corrector::correctWord(currentWord, avgConf, &conversation);
+                if (corrected != currentWord) {
+                    text.replaceLastN(currentWord.size(), corrected, avgConf);
+                }
+                conversation.feedWord(corrected, avgConf, wpm);
             }
-            conversation.feedWord(corrected, avgConf, wpm);
             currentWord.clear();
             currentWordConfSum = 0;
             currentWordCharCount = 0;

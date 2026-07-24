@@ -48,6 +48,9 @@ namespace cw {
         // Propagated to every Channel on creation. Toggle via the "debugLog"
         // config key (read once at module init in main.cpp).
         bool debugLog = false;
+        // Dictionary word-correction, propagated to every Channel. OFF by default
+        // so the raw decode stays visible (correction masks detector/timing errors).
+        bool wordCorrection = false;
 
         void init(float sampleRate) {
             scanner.init(sampleRate, 1024);
@@ -61,6 +64,7 @@ namespace cw {
             auto ch = std::make_unique<Channel>();
             ch->init(nextId++, toneFreq);
             ch->debugLog = debugLog;
+            ch->wordCorrection = wordCorrection;
             entries.push_back({std::move(ch), pinned, 0});
         }
 
@@ -203,6 +207,7 @@ namespace cw {
                     auto ch = std::make_unique<Channel>();
                     ch->init(nextId++, st.frequency);
                     ch->debugLog = debugLog;
+                    ch->wordCorrection = wordCorrection;
                     entries.push_back({std::move(ch), false, 0});
                     flog::info("CW confirmed tone at {0:.0f} Hz ({1:.1f} dB)", st.frequency, st.power);
                 }

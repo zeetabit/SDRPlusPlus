@@ -1,0 +1,349 @@
+// Replay harness: run the REAL ChannelManager over a recorded baseband IQ WAV.
+//
+// The offline decode tests feed a single core synthetic/AF audio. This drives
+// the full front end — ToneScanner detection + channel spawn/prune + decode —
+// over a real SDR++ baseband recording, so a signal the operator copies by ear
+// but the decoder misses becomes a reproducible, instrumented measurement.
+//
+// Reproduces the module front end (src/main.cpp): shift the VFO offset to DC,
+// then decimate to the 8 kHz / 3 kHz VFO the manager runs at.
+//
+//   CW_REPLAY_WAV=/path/to/baseband_<centerHz>_...wav \
+//   CW_REPLAY_OFFSET_HZ=36545 \            # VFO - recordingCenter (default 36545)
+//   ./cw_decoder_tests "[replay]"
+//
+// Run ONLY by the explicit [replay] tag — never [.] / [cw] wildcards.
+
+#include <catch.hpp>
+#include <cw/channel_manager.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstdint>
+#include <cstring>
+#include <fstream>
+#include <vector>
+#include <cmath>
+
+namespace {
+
+    struct IQ {
+        std::vector<dsp::complex_t> samples;
+        double sampleRate = 0;
+    };
+
+    // Streamed WAV read of a 2-channel Int16 baseband file, applying the VFO
+    // frequency shift during the read (offset -> DC) to avoid a second pass over
+    // ~73M samples.
+    IQ loadShiftedIQ(const std::string& path, double offsetHz) {
+        IQ iq;
+        std::ifstream f(path, std::ios::binary);
+        if (!f.is_open()) { return iq; }
+
+        char riff[4]; f.read(riff, 4);
+        uint32_t riffSize; f.read((char*)&riffSize, 4);
+        char wave[4]; f.read(wave, 4);
+        if (std::memcmp(riff, "RIFF", 4) != 0 || std::memcmp(wave, "WAVE", 4) != 0) { return iq; }
+
+        uint16_t channels = 0, bits = 0; uint32_t rate = 0; uint32_t dataSize = 0;
+        std::streampos dataPos = -1;
+        while (f && dataPos < 0) {
+            char id[4]; f.read(id, 4);
+            uint32_t sz; f.read((char*)&sz, 4);
+            if (!f) { break; }
+            if (std::memcmp(id, "fmt ", 4) == 0) {
+                uint16_t fmt; f.read((char*)&fmt, 2);
+                f.read((char*)&channels, 2);
+                f.read((char*)&rate, 4);
+                uint32_t byteRate; f.read((char*)&byteRate, 4);
+                uint16_t blockAlign; f.read((char*)&blockAlign, 2);
+                f.read((char*)&bits, 2);
+                f.seekg(sz - 16, std::ios::cur);
+            }
+            else if (std::memcmp(id, "data", 4) == 0) {
+                dataSize = sz;
+                dataPos = f.tellg();
+            }
+            else {
+                f.seekg(sz, std::ios::cur);
+            }
+        }
+        if (dataPos < 0 || channels != 2 || bits != 16) { return iq; }
+
+        iq.sampleRate = rate;
+        f.clear();
+        f.seekg(dataPos);
+
+        const uint64_t nFrames = dataSize / 4;   // 2ch * 2 bytes
+        iq.samples.reserve(nFrames);
+
+        const double w = -2.0 * M_PI * offsetHz / (double)rate;
+        double phase = 0.0;
+
+        const size_t CHUNK = 1 << 20;            // frames per read
+        std::vector<int16_t> buf(CHUNK * 2);
+        uint64_t done = 0;
+        while (done < nFrames) {
+            size_t want = std::min<uint64_t>(CHUNK, nFrames - done);
+            f.read((char*)buf.data(), want * 4);
+            std::streamsize got = f.gcount() / 4;
+            if (got <= 0) { break; }
+            for (std::streamsize i = 0; i < got; i++) {
+                float re = buf[i * 2] / 32768.0f;
+                float im = buf[i * 2 + 1] / 32768.0f;
+                float c = cosf((float)phase), s = sinf((float)phase);
+                iq.samples.push_back({ re * c - im * s, re * s + im * c });
+                phase += w;
+                if (phase < -M_PI) { phase += 2.0 * M_PI; }
+                if (phase > M_PI) { phase -= 2.0 * M_PI; }
+            }
+            done += got;
+        }
+        return iq;
+    }
+
+    // Blackman-windowed-sinc low-pass, sized from the transition width.
+    std::vector<float> designLPF(double cutoffHz, double stopHz, double fs) {
+        double fc = 0.5 * (cutoffHz + stopHz) / fs;      // normalised -6 dB point
+        int L = (int)std::ceil(3.3 * fs / (stopHz - cutoffHz));
+        if (L % 2 == 0) { L++; }
+        if (L < 11) { L = 11; }
+        std::vector<float> h(L);
+        int c = (L - 1) / 2;
+        double sum = 0.0;
+        for (int n = 0; n < L; n++) {
+            int k = n - c;
+            double sinc = (k == 0) ? 2.0 * fc : sin(2.0 * M_PI * fc * k) / (M_PI * k);
+            double win = 0.42 - 0.5 * cos(2.0 * M_PI * n / (L - 1)) + 0.08 * cos(4.0 * M_PI * n / (L - 1));
+            h[n] = (float)(sinc * win);
+            sum += h[n];
+        }
+        for (auto& v : h) { v /= (float)sum; }
+        return h;
+    }
+
+    std::vector<dsp::complex_t> decimate(const std::vector<dsp::complex_t>& in, int M,
+                                         const std::vector<float>& h) {
+        const int L = (int)h.size();
+        const long N = (long)in.size();
+        std::vector<dsp::complex_t> out(N / M);
+        for (size_t m = 0; m < out.size(); m++) {
+            long base = (long)m * M - (L - 1);
+            float ar = 0, ai = 0;
+            for (int k = 0; k < L; k++) {
+                long idx = base + k;
+                if (idx >= 0 && idx < N) { ar += h[k] * in[idx].re; ai += h[k] * in[idx].im; }
+            }
+            out[m] = { ar, ai };
+        }
+        return out;
+    }
+
+    double envd(const char* k, double def) {
+        const char* v = std::getenv(k);
+        return v ? atof(v) : def;
+    }
+
+    // Load the recording and reproduce the module front end: shift VFO offset to
+    // DC, decimate 2.4 MHz -> 8 kHz. Returns the 8 kHz IQ the manager runs on.
+    std::vector<dsp::complex_t> loadDecimated8k(const char* wav, double offset, double& fsOut) {
+        IQ iq = loadShiftedIQ(wav, offset);
+        if (iq.sampleRate <= 0) { fsOut = 0; return {}; }
+        auto s1 = decimate(iq.samples, 10, designLPF(4000, 236000, iq.sampleRate));
+        iq.samples.clear(); iq.samples.shrink_to_fit();
+        auto s2 = decimate(s1, 6, designLPF(4000, 36000, iq.sampleRate / 10));
+        s1.clear(); s1.shrink_to_fit();
+        auto s3 = decimate(s2, 5, designLPF(3600, 4000, iq.sampleRate / 60));
+        fsOut = iq.sampleRate / 300.0;
+        return s3;
+    }
+
+    // E-flood proxy: single-element chars (E/T) are valid CW, but a long run of
+    // them between real words is the noise-admission signature. Report the count
+    // and the longest consecutive run — no ground truth needed to see garbage.
+    void garbageStats(const std::string& t, int& single, int& longestRun, int& total) {
+        single = 0; longestRun = 0; total = 0; int run = 0;
+        for (char c : t) {
+            if (c == ' ') { continue; }
+            total++;
+            if (c == 'E' || c == 'T') { single++; run++; if (run > longestRun) { longestRun = run; } }
+            else { run = 0; }
+        }
+    }
+
+    void dumpState(cw::ChannelManager& mgr, double tSec) {
+        printf("  t=%5.1fs | ", tSec);
+        for (auto& e : mgr.entries) {
+            std::string txt = e.channel->text.getText();
+            if (txt.size() > 14) { txt = txt.substr(txt.size() - 14); }
+            printf("[%.0fHz snr%.1f wpm%.0f fit%.2f \"%s\"] ",
+                   e.channel->toneFreq, e.channel->snr, e.channel->wpm,
+                   e.channel->modelFit, txt.c_str());
+        }
+        printf("\n");
+    }
+
+} // namespace
+
+TEST_CASE("Replay: real baseband recording through ChannelManager", "[cw][.][replay]") {
+    const char* wav = std::getenv("CW_REPLAY_WAV");
+    if (!wav) { WARN("set CW_REPLAY_WAV to run"); return; }
+
+    double offset = envd("CW_REPLAY_OFFSET_HZ", 36545.0);
+    printf("\n=== Replay %s  (VFO offset %.0f Hz -> DC) ===\n", wav, offset);
+
+    double fs = 0;
+    auto s3 = loadDecimated8k(wav, offset, fs);
+    REQUIRE(fs == Approx(8000.0));
+    printf("  decimated to %.2f ks @ %.0f Hz\n\n", s3.size() / 1e3, fs);
+
+    cw::ChannelManager mgr;
+    mgr.init((float)fs);
+    mgr.autoDetect = true;
+    mgr.scanThreshold = (float)envd("CW_REPLAY_THRESH", 3.0);   // matches UI "Auto Detect 3 dB"
+    mgr.maxChannels = (int)envd("CW_REPLAY_CHANNELS", 4);
+    mgr.modelFitGate = true;
+
+    const int BLK = 1024;
+    double nextDump = 0.0;
+    for (size_t p = 0; p + BLK <= s3.size(); p += BLK) {
+        mgr.process(&s3[p], BLK);
+        mgr.updateChannels();
+        double tSec = (double)(p + BLK) / fs;
+        if (tSec >= nextDump) { dumpState(mgr, tSec); nextDump += 2.0; }
+    }
+
+    printf("\n=== FINAL channels ===\n");
+    for (auto& e : mgr.entries) {
+        printf("  %+.0f Hz  snr=%.1f wpm=%.0f fit=%.2f  \"%s\"\n",
+               e.channel->toneFreq, e.channel->snr, e.channel->wpm, e.channel->modelFit,
+               e.channel->text.getText().c_str());
+    }
+    printf("\n");
+}
+
+// Head-to-head: run several cores on the SAME extracted real signal (one pinned
+// channel per core at CW_REPLAY_TONE Hz). No reliable ground truth on this
+// recording, so compare on the E-flood garbage proxy + eyeball the text.
+TEST_CASE("Replay: core A/B on the extracted real signal", "[cw][.][replay-cores]") {
+    const char* wav = std::getenv("CW_REPLAY_WAV");
+    if (!wav) { WARN("set CW_REPLAY_WAV to run"); return; }
+    double offset = envd("CW_REPLAY_OFFSET_HZ", 36545.0);
+    float tone = (float)envd("CW_REPLAY_TONE", 1000.0);
+
+    double fs = 0;
+    auto s3 = loadDecimated8k(wav, offset, fs);
+    REQUIRE(fs == Approx(8000.0));
+    printf("\n=== Core A/B on tone %+.0f Hz  (%s) ===\n\n", tone, wav);
+
+    const char* cores[] = { "legacy", "legacy+select", "legacy+fb",
+                            "legacy+fb+sel", "legacy+route", "legacy+lr+log" };
+    printf("  %-16s | sngl/tot | run | text\n", "core");
+    printf("  -----------------+----------+-----+-----\n");
+    for (const char* core : cores) {
+        cw::Channel ch;
+        ch.init(0, tone, core);
+        if (ch.coreName() != core) { printf("  %-16s | (unavailable)\n", core); continue; }
+        for (int off = 0; off + 1 <= (int)s3.size(); off += 512) {
+            int n = std::min(512, (int)s3.size() - off);
+            ch.process(n, &s3[off]);
+        }
+        std::string txt = ch.text.getText();
+        int single, run, total;
+        garbageStats(txt, single, run, total);
+        printf("  %-16s | %4d/%-3d | %3d | \"%s\"\n", core, single, total, run, txt.c_str());
+    }
+    printf("\n  sngl/tot = single-element (E/T) chars over total; run = longest E/T run.\n"
+           "  A cleaner decoder shows a SHORTER longest-run at similar length.\n\n");
+}
+
+// Tune/bandwidth sweep: the operator copied this best in USB at 1 kHz BW, and
+// the pinned decode is offset-fragile — so sweep the channel tone (and compare
+// fb narrow vs wide) to test whether the decoder is simply mistuned / too narrow
+// for a drifting signal. Scored against the operator's (uncertain) copy.
+TEST_CASE("Replay: tone + bandwidth sweep on the real signal", "[cw][.][replay-sweep]") {
+    const char* wav = std::getenv("CW_REPLAY_WAV");
+    if (!wav) { WARN("set CW_REPLAY_WAV to run"); return; }
+    double offset = envd("CW_REPLAY_OFFSET_HZ", 36545.0);
+    double fs = 0;
+    auto s3 = loadDecimated8k(wav, offset, fs);
+    REQUIRE(fs == Approx(8000.0));
+
+    const std::string GT = "DCOMEOUTONETIMETEMLADT16C=SOEALQQX";
+    auto lev = [](const std::string& a, const std::string& b) {
+        std::string x, y;
+        for (char c : a) { if (c != ' ') x += c; }
+        for (char c : b) { if (c != ' ') y += c; }
+        int m = x.size(), n = y.size();
+        std::vector<int> d(n + 1);
+        for (int j = 0; j <= n; j++) { d[j] = j; }
+        for (int i = 1; i <= m; i++) {
+            int prev = d[0]; d[0] = i;
+            for (int j = 1; j <= n; j++) {
+                int cur = d[j];
+                d[j] = std::min({ d[j] + 1, d[j - 1] + 1, prev + (x[i-1] != y[j-1]) });
+                prev = cur;
+            }
+        }
+        return d[n];
+    };
+    auto anchors = [](const std::string& t) {
+        std::string v; for (char c : t) { if (c != ' ') v += c; }
+        std::string h;
+        for (const char* a : { "OME", "ONE", "TIO", "TIM", "OUT", "16C" }) {
+            if (v.find(a) != std::string::npos) { h += a; h += " "; }
+        }
+        return h.empty() ? std::string("-") : h;
+    };
+
+    float lo = (float)envd("CW_SWEEP_LO", 880);
+    float hi = (float)envd("CW_SWEEP_HI", 1120);
+    float step = (float)envd("CW_SWEEP_STEP", 20);
+    const char* only = std::getenv("CW_SWEEP_CORE");
+    const char* allCores[] = { "legacy+fb", "legacy+fb+wide", "legacy+select" };
+    std::vector<const char*> cores;
+    if (only) { cores.push_back(only); } else { for (auto c : allCores) { cores.push_back(c); } }
+    for (const char* core : cores) {
+        printf("\n=== %s : tone sweep ===\n  tone | CER  | anchors | text\n  -----+------+---------+----\n", core);
+        int bestD = 1e9; float bestT = 0;
+        for (float tone = lo; tone <= hi + 0.5f; tone += step) {
+            cw::Channel ch;
+            ch.init(0, tone, core);
+            if (ch.coreName() != core) { printf("  (unavailable)\n"); break; }
+            for (int off = 0; off + 1 <= (int)s3.size(); off += 512) {
+                int n = std::min(512, (int)s3.size() - off);
+                ch.process(n, &s3[off]);
+            }
+            std::string txt = ch.text.getText();
+            int d = lev(GT, txt);
+            float cer = (float)d / 34.0f;
+            if (d < bestD) { bestD = d; bestT = tone; }
+            printf("  %4.0f | %.2f | %-8s| \"%s\"\n", tone, cer, anchors(txt).c_str(), txt.c_str());
+        }
+        printf("  best CER %.2f at tone %.0f Hz\n", bestD / 34.0f, bestT);
+    }
+    printf("\n");
+}
+
+// Why did the router pick select on the real signal? Dump the arbitration terms.
+#include <cw/regime_route.h>
+TEST_CASE("Replay: router arbitration on the real signal", "[cw][.][route-why]") {
+    const char* wav = std::getenv("CW_REPLAY_WAV");
+    if (!wav) { WARN("set CW_REPLAY_WAV to run"); return; }
+    double offset = envd("CW_REPLAY_OFFSET_HZ", 36545.0);
+    float tone = (float)envd("CW_REPLAY_TONE", 1000.0);
+    double fs = 0;
+    auto s3 = loadDecimated8k(wav, offset, fs);
+    REQUIRE(fs == Approx(8000.0));
+
+    cw::RegimeRouteCore::debug = true;
+    printf("\n=== router arbitration @ %+.0f Hz  (gate: fbGood>=3, selRatio<0.6, "
+           "fbRatio>selRatio+0.25, fbContrast<5.5, inputSnr<8) ===\n", tone);
+    cw::Channel ch;
+    ch.init(0, tone, "legacy+route");
+    for (int off = 0; off + 1 <= (int)s3.size(); off += 512) {
+        int n = std::min(512, (int)s3.size() - off);
+        ch.process(n, &s3[off]);
+    }
+    cw::RegimeRouteCore::debug = false;
+    printf("  route text: \"%s\"\n\n", ch.text.getText().c_str());
+}

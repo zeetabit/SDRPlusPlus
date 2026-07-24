@@ -28,8 +28,16 @@
 >
 > ### Work completed since (the campaign's first standing promotion landed — §51)
 >
-> **SparkGap line (§52–§53) — READ `### §53 — router PROMOTED` below for the current
-> handoff.** SHIPPED: **#40b** (select→bimodal mid-speed hand-keyed) and **#41** (model-fit
+> **CURRENT HANDOFF — READ `### §54` below.** (2026-07-24) The campaign pivoted from
+> promotion to **debugging the raw decoder**. Word-correction is now **off by default**
+> (it was masking bugs — dictionary-repairing `+Q→CQ` etc.); benchmark gates kept tight,
+> so 9 assertions honestly fail = the raw decoder's true error rate. A **real-baseband
+> replay harness** now tests detect→route→decode on off-air IQ. Field research (CW Skimmer
+> Bayesian, RSCW, AG1LE CTC) + a criticality analysis set the direction: **soft sequence-
+> level decoding over a robust speed estimate** (the fb/#42 path), **element/matched-filter
+> for weak-signal**, and **word-gap tolerance deprioritised** (it trades against sensitivity).
+>
+> **SparkGap line (§52–§53) — `### §53 — router PROMOTED` below is the prior handoff.** SHIPPED: **#40b** (select→bimodal mid-speed hand-keyed) and **#41** (model-fit
 > channel keep-alive). **#42 IS BUILT (2026-07-23):** the noise wall was a filter-bandwidth
 > problem AND a detector problem. The streaming fb detector is **forward-only** + **online-EM
 > emission** (both HURT-when-added pieces removed via user design questions). fb is a
@@ -775,6 +783,108 @@ matched filter makes a wide VFO valuable — ~8 isolated channels/kHz.
 - **Headroom (ceiling) ≠ achievable.** Measure both; a green ceiling can still be
   unreachable by a naive build (§44 trellis) OR reachable once the real blocker (filter
   BW) is found (§52.9). Don't conclude "can't" from a buggy/underpowered attempt.
+
+### §54 — raw-decode debugging: masking removed + field-grounded prioritization (2026-07-24, self-contained)
+
+> Reads standalone. This session pivoted from promotion work to **debugging the raw
+> decoder**, triggered by a live weak-signal complaint. Deliverables: a real-baseband
+> replay harness; word-correction **disabled by default** (it was masking decoder bugs);
+> a characterisation of the true raw errors; and a research-grounded prioritisation.
+
+**0. Trigger (live, real signal).** Operator: weak signals audible/copyable by ear that
+the skimmer misses or decodes poorly. Captured a 30 s baseband IQ recording (2.4 Msps,
+7.0290 VFO, a signal at 7.030 copied ~80% by ear) → the first **real-signal** fixture.
+
+**1. Real-baseband replay harness** (`tests/test_replay.cpp`, `[.]` probes). Loads a 2-ch
+Int16 baseband IQ WAV, shifts the VFO offset to DC, decimates 2.4 MHz→8 kHz (staged FIR),
+runs the **real** ChannelManager (scanner + spawn/prune + decode). First instrument that
+exercises detect→route→decode on **real off-air IQ**, closing the "synthetic AWGN only" ⚠.
+Probes: `[replay]` (timeline), `[replay-cores]` (A/B named cores on the extracted tone),
+`[replay-sweep]` (tone/BW), `[route-why]` (arbitration dump). Findings on the 7.030 signal:
+- Detection/tuning are **not** the wall: it detects (snr 3–4), spawns; fb's usable tuning
+  window is ~40 Hz wide (985–1025) vs the scanner's ±4 Hz binning — **sub-bin tuning would
+  not help** (a 5 Hz sweep disproved my own recommendation).
+- **fb is the only core that copies real words** (OME/ONE/TIO = COME/ONE/TIME); select and
+  route (≡select here) produce plausible-but-**wrong** text. At this SNR **CER can't tell
+  them apart** (both 0.76) — real-word capture is the discriminator, not CER.
+- **The router MISROUTES this to select.** Commit: `sel=4/4(1.00) fb=3/3(1.00)
+  fbContrast=5.7 -> select`. The gate (`selRatio<0.6 AND fbContrast<5.5`) is AWGN-calibrated;
+  real weak hand-keyed violates **both** (select's wrong tokens score valid; fb contrast
+  5–8 > 5.5). Structurally blind to real hand-keyed where fb wins. (One signal ≠ enough to
+  retune; needs more real recordings.)
+- Scanner note (`[scanner-sens]`): the FFT gate averages single-bin power, penalising
+  **keyed** signals ~5 dB vs a steady tone of equal key-down SNR (duty-cycle dilution +
+  sideband spreading). Explains detection **flicker** (real signal losing slot competition
+  to steadier noise during keying gaps), NOT the decode.
+
+**2. Word-correction disabled by default — it was masking decoder bugs.**
+`corrector::correctWord` (dictionary/callsign/RST edit-distance repair, `channel.h`
+`flushWord`) rewrote raw decode against a vocabulary. Now gated behind
+`Channel.wordCorrection` (default **false**) + `ChannelManager.wordCorrection` + config key
+`wordCorrection`; **live is raw**. Rationale: a vocabulary layer masks detector/timing bugs
+and cannot generalise (mid-transmission start, off-vocabulary text); it returns only as a
+**final** layer once raw quality is good enough. Benchmark gates kept **tight**
+([[never-loosen-quality-gates]]): 9 assertions now fail = the raw decoder's true error rate,
+previously hidden. **Not loosened** — loosening a gate to admit raw-decode is re-masking the
+bug one layer down.
+
+**3. The masked-bug backlog is ~1 bug.** `[maskdiff]` (raw vs corrected per seed) across
+**all** failing profiles: every divergent seed is the identical **`+Q`** — first char
+C(`-.-.`) decoded as +(`.-.-.`), a spurious leading dit at cold start (all test messages
+start with CQ). QRN/QRM/moderate decode **perfectly** except this. Root cause (core sweep):
+the wide (100 Hz) **fixed** select BPF passes a **sustained** onset noise excursion;
+`bpf20`(31 Hz)/`bpf40`(64 Hz) decode CQ correctly; CUSUM `lr+log` fails too (not a brief
+spike — a duration-debounce fix regressed and was reverted). Same as the #42 "BPF too wide"
+thesis, at cold start.
+- **DECISION (user):** `+Q` is a decoder-**initiation** artifact, NOT a generic bug. Do NOT
+  narrow the BPF to fix it — that is masking (blanket +Q→CQ) and breaks on mid-transmission
+  starts. Park it; later repairable by **low-confidence backward correction** (signal-level,
+  once params known), not vocabulary.
+
+**4. Generic raw errors** (`[rawerr]`, first symbol excluded). The true algorithm weaknesses:
+- **#1 word-space DELETION** (` >_`, 28–33 per 24 seeds on hand-keyed): word gaps read as
+  char gaps → adjacent words merge. Systematic; gap-classifier / sloppy-hand-spacing issue.
+  High frequency, **low criticality** (characters intact, recoverable).
+- **#2 element (dit/dah) errors** at faster speeds (W→R/U/O, Q→7, 9→7, S→H): **mixed
+  direction** (dahs→dits AND dits→dahs on the same letter) → jitter-driven mis-sizing, not a
+  correctable edge bias. **High criticality** (corrupts callsigns).
+- worstcase = noise-flood E/T insertions (separate heavy-noise regime).
+
+**5. Criticality prioritisation + FIELD RESEARCH.** Element errors **>** word-gap errors in
+CW: element errors corrupt information **irreversibly** (wrong callsign = false skimmer spot,
+the worst outcome) while word-gaps leave characters intact. CER weights them **equally** and
+word-gaps dominate by count — a **metric trap** pushing effort to the *less* critical problem.
+Field (sources below) confirms and sharpens:
+- CW Skimmer (VE3NEA, RBN engine) = **Bayesian soft** decisions, never hard dit/dah/gap
+  calls. RSCW (PA3FWM) = **correlate** against all valid sequences, max-likelihood. AG1LE =
+  CNN-LSTM-**CTC**, 1.5% CER, learns timing implicitly (no explicit segmentation). → the
+  field replaced **hard per-symbol decisions** (our Schmitt+timing pipeline) with **soft
+  sequence-level** inference over a robust speed estimate.
+- RSCW's fundamental **tradeoff**: "expecting perfect timing digs weaker signals out of noise
+  than accepting sloppily sent code." Weak-signal sensitivity and hand-keyed timing tolerance
+  are **in tension** — for a weak-signal skimmer, word-gap tolerance actively **costs**
+  sensitivity.
+- Clock/speed recovery is where classical decoders spend the most effort — one dit estimate
+  drives **both** element and gap classification.
+
+**STRATEGIC DIRECTION (this session's conclusion).**
+1. Highest leverage: **soft/probabilistic sequence decoding over a robust speed estimate** —
+   the direction fb (#42) already prototypes; the hard-decision Schmitt+timing pipeline is the
+   limiting paradigm.
+2. Right tactical axis for weak-signal: **element/signal + matched filter** (RSCW tradeoff),
+   NOT gap-timing tolerance.
+3. **Deprioritise word-gap tolerance**: low criticality, recoverable, and it fights sensitivity.
+4. Language/callsign models: real gains per the field, but a **final** layer only — keep
+   parked (matches the `wordCorrection`-off decision).
+
+**Instruments (all `[.]`, test-only):** `[replay] [replay-cores] [replay-sweep] [route-why]`
+(real IQ), `[scanner-sens]` (keyed-vs-steady detection gap), `[maskdiff]` (raw vs corrected),
+`[rawerr]` (generic error histogram), `[onsettrace]` (cold-start). Shipping change:
+`wordCorrection` flag off-by-default + wired (`channel.h`/`channel_manager.h`/`main.cpp`).
+Sources: [CW Skimmer/VE3NEA](https://en.wikipedia.org/wiki/CW_Skimmer),
+[RSCW/PA3FWM](https://www.pa3fwm.nl/software/rscw/algorithm.html),
+[AG1LE Bayesian](http://ag1le.blogspot.com/2013/01/towards-bayesian-morse-decoder.html) +
+[LSTM-CTC](https://ag1le.blogspot.com/2020/04/new-real-time-deep-learning-morse.html).
 
 ### Results of 2026-07 work (24 seeds, MSG_FULL, mean CER)
 

@@ -550,3 +550,26 @@ TEST_CASE("Recording: candidates under added noise", "[cw][.][recording-noise]")
            "bpfauto cuts noiseAmp-1.0 CER ~5x (0.121 -> 0.026) and no longer emits "
            "garbage at the deepest noise. Validated.\n");
 }
+
+// L1 (ladder), REAL ground truth: what does the soft path get wrong on real
+// near-clean W1AW audio (fb+sel 0.0163 vs select 0.0044)? Dump decodes vs the
+// published reference to find the systematic soft error. [L1-real].
+TEST_CASE("L1real: soft vs hard decode on real W1AW audio", "[cw][.][L1-real]") {
+    for (const char* stem : { "w1aw_15wpm", "w1aw_5wpm" }) {
+        LoadedSession s = loadSession(stem);
+        printf("\n===== %s (%.0fs) =====\n", stem, s.durationSec);
+        std::string refShort = s.reference.substr(0, 220);
+        printf("  REF   : %s\n", refShort.c_str());
+        for (const char* core : { "legacy+fb+sel", "legacy+select" }) {
+            cw::Channel ch; ch.init(0, 750.0f, core); ch.wordCorrection = false;
+            for (int off = 0; off < (int)s.iq.size(); off += 512) {
+                int n = std::min(512, (int)s.iq.size() - off);
+                ch.process(n, &s.iq[off]);
+            }
+            std::string t = ch.text.getText();
+            DecodeScore sc = score(s.reference, t);
+            printf("  %-13s CER=%.4f: %s\n", core, sc.cer, t.substr(0, 220).c_str());
+        }
+    }
+    printf("\n");
+}

@@ -206,6 +206,38 @@ namespace cw {
             }
         }
 
+    public:
+        // DR-4: re-detect a buffered envelope window under the CURRENT (matured) θ.
+        // A fresh causal forward pass + debounce, independent of the live filter state,
+        // so a window originally detected under a cold/immature θ (the initiation blob)
+        // is re-segmented once θ is good. Offsets are buffer-relative ([0,count));
+        // the caller maps them to absolute time. Does NOT mutate live state — safe to
+        // call repeatedly for the continuous confidence-ratcheted re-decode.
+        std::vector<KeyEvent> reDetect(const float* env, int count) const {
+            std::vector<KeyEvent> out;
+            if (!_haveParams || count <= 0) { return out; }
+            const float muLo = _muLo, muHi = _muHi, vLo = _vLo, vHi = _vHi;
+            const double stay = 1.0 - SWITCH_P, cross = SWITCH_P;
+            double la0 = 0.5, la1 = 0.5;
+            uint8_t lraw = 0, lemit = 0; int lrun = 0;
+            for (int k = 0; k < count; k++) {
+                double e0, e1; emitLL(env[k], muLo, muHi, vLo, vHi, e0, e1);
+                double x0 = (la0*stay + la1*cross) * e0;
+                double x1 = (la1*stay + la0*cross) * e1;
+                double s = 1.0 / (x0 + x1 + 1e-300); la0 = x0*s; la1 = x1*s;
+                uint8_t raw = (la1 > la0) ? 1 : 0;
+                if (raw == lraw) { lrun++; } else { lraw = raw; lrun = 1; }
+                if (lraw != lemit && lrun >= MIN_RUN) {
+                    lemit = lraw;
+                    KeyEvent ev; ev.keyDown = (lemit == 1); ev.sampleOffset = k;
+                    out.push_back(ev);
+                }
+            }
+            return out;
+        }
+        bool haveParams() const { return _haveParams; }
+
+    private:
         bool _fwdOnly = true;     // §52 step 4: forward-only, zero-lag (user)
         float _rate = 1000.0f;
         int _winW = 1200;

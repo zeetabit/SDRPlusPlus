@@ -1,6 +1,10 @@
 #include <catch.hpp>
 #include <cw/tone_scanner.h>
 #include <cmath>
+#include <random>
+#include <cstdio>
+#include <vector>
+#include <algorithm>
 
 static void generateTone(dsp::complex_t* buf, int count, float freq, float sampleRate, float amplitude, float& phase) {
     float omega = 2.0f * M_PI * freq / sampleRate;
@@ -171,4 +175,77 @@ TEST_CASE("ToneScanner noise floor is stable", "[cw][scanner]") {
     if (!afterSilence.empty()) {
         REQUIRE(afterSilence[0].power < withTone[0].power);
     }
+}
+
+// ── Diagnostic: does the detection gate penalise KEYED (intermittent) CW? ──
+//
+// Every test above feeds a STEADY tone. Real weak CW the operator copies by ear
+// is intermittent — the ear integrates key-down SNR + rhythm. The scanner gates
+// on a time-averaged, single-bin power spectrum (ToneScanner::getDetectedTones),
+// which dilutes an intermittent signal by its duty cycle AND spreads its energy
+// across keying sidebands. This probe measures that penalty directly, at the
+// signal bin the gate itself reads, keyed vs steady at identical key-down SNR.
+//
+// Run ONLY as:  ./cw_decoder_tests "[scanner-sens]"   (never [.] / [cw] wildcards)
+namespace {
+    float signalBinSNRdb(cw::ToneScanner& sc, float freqHz) {
+        const std::vector<float>& spec = sc.getPowerSpectrum();
+        int n = sc.getFFTSize();
+        float bw = sc.getBinWidth();
+        int center = (int)lroundf(freqHz / bw) + n / 2;
+        float peak = 0.0f;
+        for (int b = center - 5; b <= center + 5; b++) {
+            if (b >= 0 && b < n && spec[b] > peak) { peak = spec[b]; }
+        }
+        std::vector<float> s(spec.begin(), spec.end());
+        std::nth_element(s.begin(), s.begin() + n / 2, s.end());
+        float floor = std::max(s[n / 2], 1e-12f);
+        return 10.0f * log10f(std::max(peak, 1e-12f) / floor);
+    }
+}
+
+TEST_CASE("ToneScanner: keyed-vs-steady detection gap", "[cw][.][scanner-sens]") {
+    const float fs = 8000.0f, freq = 700.0f;
+    const int ditSamples = 480;      // ~20 WPM at 8 kHz
+    const int frames = 60;           // ~7.7 s — many keying cycles, EMA settled
+    std::mt19937 rng(12345);
+    std::normal_distribution<float> g(0.0f, 1.0f);   // sigma=1 per component
+
+    printf("\n  keydown | steady det | keyed det | penalty  (dB, at 700 Hz signal bin)\n");
+    printf("  --------+------------+-----------+--------\n");
+    for (float snr = 0.0f; snr <= 12.001f; snr += 2.0f) {
+        float A = sqrtf(2.0f * powf(10.0f, snr / 10.0f));   // key-down amplitude for target SNR
+
+        cw::ToneScanner st; st.init(fs, 1024);
+        cw::ToneScanner kd; kd.init(fs, 1024);
+        dsp::complex_t buf[1024];
+        float phS = 0, phK = 0; long clk = 0;
+        const float w = 2.0f * (float)M_PI * freq / fs;
+
+        for (int f = 0; f < frames; f++) {
+            for (int i = 0; i < 1024; i++) {
+                buf[i].re = A * cosf(phS) + g(rng);
+                buf[i].im = A * sinf(phS) + g(rng);
+                phS += w; if (phS > (float)M_PI) { phS -= 2.0f * (float)M_PI; }
+            }
+            st.feed(buf, 1024);
+        }
+        for (int f = 0; f < frames; f++) {
+            for (int i = 0; i < 1024; i++) {
+                bool on = ((clk / ditSamples) % 5) < 2;    // 40% duty
+                float a = on ? A : 0.0f;
+                buf[i].re = a * cosf(phK) + g(rng);
+                buf[i].im = a * sinf(phK) + g(rng);
+                phK += w; if (phK > (float)M_PI) { phK -= 2.0f * (float)M_PI; }
+                clk++;
+            }
+            kd.feed(buf, 1024);
+        }
+
+        float sSNR = signalBinSNRdb(st, freq);
+        float kSNR = signalBinSNRdb(kd, freq);
+        printf("  %6.1f  |  %8.2f  |  %7.2f  | %6.2f\n", snr, sSNR, kSNR, sSNR - kSNR);
+    }
+    printf("\n  A positive penalty = keyed CW reads WEAKER than a steady tone of the\n"
+           "  same key-down SNR, so the averaged-power gate misses it first.\n\n");
 }

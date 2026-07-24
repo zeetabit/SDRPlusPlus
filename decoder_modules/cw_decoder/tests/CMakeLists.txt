@@ -46,6 +46,7 @@ add_executable(cw_decoder_tests
     test_conversation.cpp
     test_view_state.cpp
     test_wpm_stability.cpp
+    test_replay.cpp
     stubs.cpp
     ${CORE_SRC}/gui/view_state.cpp
 )

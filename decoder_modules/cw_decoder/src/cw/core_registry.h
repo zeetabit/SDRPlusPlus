@@ -39,7 +39,8 @@ namespace cw {
         inline std::unique_ptr<IDecodeCore> makeFB(
                 TimingStrategy timing, bool fbBpf = true,
                 float bpfCutoff = 140.0f, float bpfTrans = 140.0f,
-                float smoothCutoff = 88.0f, float smoothTrans = 100.0f) {
+                float smoothCutoff = 88.0f, float smoothTrans = 100.0f,
+                bool unrealWpmGuard = false, bool contRedecode = false) {
             // Start WIDE: the forward-only detector no longer runs away on a wide
             // warmup (§52 step 4), so starting wide avoids the narrow->wide switch
             // transient on clean AND keeps high-SNR non-AWGN (hand-keyed) wide. The fb
@@ -52,7 +53,8 @@ namespace cw {
                 std::make_unique<AdaptiveTimingStage>(timing),
                 std::make_unique<BeamSymbolDecoder>(),
                 MF_RESET, 1.0f, /*adaptiveBpf=*/false, false, false,
-                /*matchedFilter=*/false, /*fbBpf=*/fbBpf);
+                /*matchedFilter=*/false, /*fbBpf=*/fbBpf, /*unrealWpmGuard=*/unrealWpmGuard,
+                /*contRedecode=*/contRedecode);
         }
 
         // Likelihood-ratio detector (docs §24). Its own factory: the CUSUM
@@ -156,6 +158,27 @@ namespace cw {
             //    is a plain wide front end for the batch-reproduction probe. ──
             {"legacy+fb", "Forward-backward soft detector + SNR-adaptive BPF/smoothing + Kalman timing",
              []{ return detail::makeFB(TIMING_KALMAN, /*fbBpf=*/true); }},
+
+            // §54 experiment: fb detector + adaptive SELECT timing. Isolation showed
+            // half-speed collapses split into timing-side (legacy+fb both collapse,
+            // select copes) and detector-side. SELECT timing should kill the timing-side.
+            {"legacy+fb+sel", "Forward-backward soft detector + adaptive SELECT timing (half-speed fix)",
+             []{ return detail::makeFB(TIMING_SELECT, /*fbBpf=*/true); }},
+
+            // DR-4b step 1: fb+sel + unreal-WPM guard. Refuses to accept a timing lock
+            // whose speed is outside ~5-60 WPM (the trace's dit=12 ms / 100 WPM), keeping
+            // acquisition open so a real speed can lock. Rejections are counted ALWAYS in
+            // CoreStats.unrealWpmRejections (docs §14). Identical to legacy+fb+sel otherwise.
+            {"legacy+fb+sel+rsg", "fb + SELECT timing + unreal-WPM guard (DR-4b step 1)",
+             []{ return detail::makeFB(TIMING_SELECT, /*fbBpf=*/true, 140.0f, 140.0f, 88.0f, 100.0f, /*unrealWpmGuard=*/true); }},
+
+            // DR-4: fb+sel + continuous re-decode. Buffers the detection-input envelope
+            // and periodically re-detects+re-decodes the whole message-so-far under the
+            // detector's matured θ — the first character is recovered once θ is good
+            // (re-detection un-merges the cold-start blob). Identical to legacy+fb+sel
+            // otherwise.
+            {"legacy+fb+sel+cont", "fb + SELECT timing + continuous re-decode (DR-4)",
+             []{ return detail::makeFB(TIMING_SELECT, /*fbBpf=*/true, 140.0f, 140.0f, 88.0f, 100.0f, /*unrealWpmGuard=*/false, /*contRedecode=*/true); }},
 
             // Regime router (§52 step 4B): select by default, fb in heavy broadband
             // noise. Captures fb's fast+heavy-AWGN wins without its weak-regime harm.

@@ -161,6 +161,10 @@ namespace cw {
         float getSNR() const override { return det.getSNR(); }
         bool isKeyDown() const override { return det.isKeyDown(); }
         void preseed(float level, int count) override { det.preseed(level, count); }
+        std::vector<KeyEvent> reDetect(const float* env, int count) override {
+            return det.reDetect(env, count);
+        }
+        bool paramsReady() const override { return det.haveParams(); }
         const char* name() const override { return "fb"; }
 
     private:

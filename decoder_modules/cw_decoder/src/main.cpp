@@ -32,6 +32,7 @@ public:
     CWDecoderModule(std::string name, ModuleConfig* cfg) : name(name), cfg(cfg) {
         mgr.init(CW_SAMPLERATE);
         mgr.debugLog = cfg->get<bool>("debugLog", false);
+        mgr.wordCorrection = cfg->get<bool>("wordCorrection", false);   // OFF: raw decode visible
 
         listenMode = cfg->get<bool>("listenMode", false);
         mgr.loadConfig(cfg);
