@@ -130,9 +130,20 @@ namespace cw {
         virtual std::vector<KeyEvent> reDetect(const float* env, int count) {
             (void)env; (void)count; return {};
         }
+        // D (RT-safety): alloc-free overload — the continuous re-decode calls this
+        // every 0.5 s, so it writes into a pre-reserved caller vector rather than
+        // returning a fresh one. Default clears out (detectors without re-detection).
+        virtual void reDetect(const float* env, int count, std::vector<KeyEvent>& out) {
+            (void)env; (void)count; out.clear();
+        }
         // Whether the detector's parameter model is calibrated enough that a
         // re-decode is worth trusting (both element classes observed).
         virtual bool paramsReady() const { return true; }
+        // Emission model levels for the re-decode matched-filter element-integrity
+        // pass: noise floor and mark level, to normalise gap/element energy.
+        // Defaults describe a detector without a bimodal model (pass-through).
+        virtual float noiseLevel() const { return 0.0f; }
+        virtual float markLevel()  const { return 1.0f; }
     };
 
     // Stage 3: durations → DIT/DAH and gap classes.

@@ -106,7 +106,12 @@ namespace cw {
             float pClassified = 0.5f + confidence * 0.5f;   // P(classified element)
             float pAlternate = 1.0f - pClassified;           // P(other element)
 
-            std::vector<PathState> newPaths;
+            // D (RT-safety): double-buffer into a persistent scratch vector and swap,
+            // instead of allocating a fresh newPaths every element. The continuous
+            // re-decode replays the whole window each 0.5 s cycle, so a per-element
+            // allocation here floods process(); swap() retains both buffers for reuse.
+            std::vector<PathState>& newPaths = _scratch;
+            newPaths.clear();
             newPaths.reserve(paths.size() * 2);
 
             for (auto& p : paths) {
@@ -147,7 +152,7 @@ namespace cw {
                 for (auto& p : newPaths) { p.prob /= maxProb; }
             }
 
-            paths = std::move(newPaths);
+            paths.swap(newPaths);   // O(1); old paths buffer stays in _scratch for reuse
         }
 
         // Character break: select the best character from all paths.
@@ -205,6 +210,7 @@ namespace cw {
         MorseNode tree[treeSize] = {};
         float letterPrior[26] = {};
         std::vector<PathState> paths;
+        std::vector<PathState> _scratch;   // D: reused addElement double-buffer
     };
 
 }

@@ -36,17 +36,51 @@ namespace cw {
 
         std::string getText() {
             std::lock_guard<std::mutex> lck(mtx);
-            return text;
+            return frozenText.empty() ? text : (frozenText + text);
         }
 
-        // Get a snapshot of entries for UI rendering (per-char confidence + corrected flag)
+        // Get a snapshot of entries for UI rendering (per-char confidence + corrected flag).
+        // Frozen (retained from before a frequency switch) precede the live decode.
         std::vector<CharEntry> getEntries() {
             std::lock_guard<std::mutex> lck(mtx);
-            return entries;
+            if (frozen.empty()) { return entries; }
+            std::vector<CharEntry> all = frozen;
+            all.insert(all.end(), entries.begin(), entries.end());
+            return all;
         }
 
+        // Number of leading entries that are frozen history (dimmed in the UI).
+        size_t frozenCount() {
+            std::lock_guard<std::mutex> lck(mtx);
+            return frozen.size();
+        }
+
+        // Clear the LIVE decode only — frozen history is retained. Used by the cont
+        // core's clearEmitted() (it rewrites the live window each re-decode cycle).
         void clear() {
             std::lock_guard<std::mutex> lck(mtx);
+            text.clear();
+            entries.clear();
+        }
+
+        // Clear everything, frozen history included (the UI "Clear"/"Reset" buttons).
+        void clearAll() {
+            std::lock_guard<std::mutex> lck(mtx);
+            text.clear();
+            entries.clear();
+            frozenText.clear();
+            frozen.clear();
+        }
+
+        // Move the live decode into frozen history (retained across a frequency
+        // switch) so a decode-state reset keeps the already-copied text visible.
+        // A single separator space marks the boundary between sessions.
+        void freeze() {
+            std::lock_guard<std::mutex> lck(mtx);
+            if (entries.empty()) { return; }
+            if (!frozen.empty()) { frozen.push_back({' ', 0.0f, false}); frozenText += ' '; }
+            frozen.insert(frozen.end(), entries.begin(), entries.end());
+            frozenText += text;
             text.clear();
             entries.clear();
         }
@@ -55,6 +89,8 @@ namespace cw {
         std::mutex mtx;
         std::string text;
         std::vector<CharEntry> entries;
+        std::string frozenText;              // retained decode from before freq switches
+        std::vector<CharEntry> frozen;
     };
 
 }

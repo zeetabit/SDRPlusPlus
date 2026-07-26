@@ -1,8 +1,10 @@
 #include <catch.hpp>
 #include <cw/channel.h>
+#include <cw/stages.h>
 #include "cw_test_signals.h"
 #include "cw_bench_stats.h"
 #include <cstdio>
+#include <cmath>
 
 using namespace cw_test;
 
@@ -247,6 +249,123 @@ TEST_CASE("Maskdiff: onset trace seed4 mild-noise", "[cw][.][onsettrace]") {
         std::string t = ch.text.getText();
         printf("  %-16s first-token=\"%s\"\n", core, t.substr(0, t.find(' ')).c_str());
     }
+}
+
+// KNOWN DEFECT reproduction (timing.h:475): a CLEAN message opening with an
+// all-one-type run (O=---, MM, TT) seeds ditEst from min(first 3 elements), which is a
+// DAH, so ditEst is 3x too high (WPM 3x too low) and the opening char(s) mis-decode.
+// The fix uses intra-character GAP durations (element gap ~= 1 dit) to disambiguate.
+// [seed-defect].
+TEST_CASE("Seeddefect: all-dah opening seeds dit 3x high", "[cw][.][seed-defect]") {
+    struct Case { const char* msg; };
+    for (auto& c : { Case{"OM OM DE W1AW"}, Case{"TT TT DE W1AW"},
+                     Case{"MM MM DE W1AW"}, Case{"CQ CQ DE W1AW"} }) {
+        SignalParams p = profileClean(80.0f);   // dit=80ms => 15 WPM, clean
+        p.seed = 1000;
+        auto sig = generateMessage(c.msg, p);
+        printf("\n=== clean msg \"%s\" (true 15 WPM) ===\n", c.msg);
+        for (const char* core : { "legacy+select", "legacy+fb+sel" }) {
+            cw::Channel ch; ch.init(0, p.toneFreq, core); ch.wordCorrection = false;
+            for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+                int n = std::min(512, (int)sig.samples.size() - off);
+                ch.process(n, &sig.samples[off]);
+            }
+            std::string t = ch.text.getText();
+            printf("  %-16s = \"%s\"  wpm=%.1f\n", core, t.substr(0, 24).c_str(), ch.wpm);
+        }
+    }
+}
+
+// Joint-dit acquisition debug: dump the RETRO stream/joint/conf line + per-element
+// retro classification for a few clean all-dah openings. [joint-dbg].
+TEST_CASE("Jointdbg: retro dit + classification, clean all-dah", "[cw][.][joint-dbg]") {
+    for (const char* msg : { "T DE W1AW" }) {
+      for (const char* coreName : { "legacy+select", "legacy+fb+sel" }) {
+        SignalParams p = profileClean(80.0f); p.seed = 1000;
+        auto sig = generateMessage(msg, p);
+        const cw::CoreSpec* spec = cw::findCore(coreName);
+        auto core = spec->make();
+        auto* sc = dynamic_cast<cw::StagedCore*>(core.get());
+        sc->debugLog = true; sc->id = 0;
+        cw::Channel ch; ch.initWithCore(0, p.toneFreq, std::move(core), coreName);
+        ch.wordCorrection = false;
+        fprintf(stderr, "\n===== \"%s\" via %s (clean 15 WPM) =====\n", msg, coreName);
+        for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+            int n = std::min(512, (int)sig.samples.size() - off);
+            ch.process(n, &sig.samples[off]);
+        }
+        fprintf(stderr, "FINAL: \"%s\"\n", ch.text.getText().c_str());
+      }
+    }
+}
+
+// Per-seed moderate-noise decode dump, to A/B the proportion classifier (NOPROP=1 vs
+// on) and find the exact seed it regresses, then trace with PROP_TRACE=1. [prop-dbg].
+TEST_CASE("Propdbg: per-seed moderate-noise decode", "[cw][.][prop-dbg]") {
+    for (int i = 0; i < 24; i++) {
+        SignalParams p = profileClean(80.0f); p.noiseAmp = 3.0f;   // snr-noise3
+        p.seed = 1000 + (unsigned)i * 7919u;
+        auto sig = generateMessage(MSG_FULL(), p);
+        cw::Channel ch; ch.init(0, p.toneFreq, "legacy+fb+sel"); ch.wordCorrection = false;
+        for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+            int n = std::min(512, (int)sig.samples.size() - off);
+            ch.process(n, &sig.samples[off]);
+        }
+        fprintf(stderr, "seed %2d  \"%s\"\n", i, ch.text.getText().c_str());
+    }
+}
+
+// Opening sweep: systematically decode CLEAN signals across many opening patterns
+// (all-dah, all-dit, mixed, numbers, single-element) at 2 speeds, to flush out
+// sibling acquisition/seed bugs of the OM/MM family. A clean signal must decode
+// EXACTLY; any mismatch is a raw acquisition bug. [opening-sweep].
+TEST_CASE("Openingsweep: clean openings decode exactly", "[cw][.][opening-sweep]") {
+    // Opening word varied; fixed context after so mid-stream decode is unambiguous.
+    const char* opens[] = {
+        // all-dah (the OM/MM family + siblings)
+        "O", "M", "T", "OM", "MO", "MM", "OO", "TM", "MT", "TT", "OT", "TO", "OOO",
+        // all-dit
+        "E", "I", "S", "H", "EE", "II", "SS", "IS", "SI", "EEE", "HH",
+        // mixed (should already be fine)
+        "A", "N", "K", "R", "W", "AN", "NA", "CQ", "DE", "AR",
+        // numbers / prosigns (long runs)
+        "5", "0", "50", "05", "599", "73", "000",
+    };
+    struct Res { const char* open; int wpm; const char* core; std::string got; };
+    std::vector<Res> fails;
+    int total = 0, broken = 0;
+    for (float ditMs : { 80.0f, 48.0f }) {          // 15 and 25 WPM
+        const int wpm = (int)(1200.0f / ditMs + 0.5f);
+        for (const char* op : opens) {
+            std::string msg = std::string(op) + " DE W1AW";
+            SignalParams p = profileClean(ditMs);
+            p.seed = 1000;
+            auto sig = generateMessage(msg, p);
+            for (const char* core : { "legacy+select", "legacy+fb+sel" }) {
+                cw::Channel ch; ch.init(0, p.toneFreq, core); ch.wordCorrection = false;
+                for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+                    int n = std::min(512, (int)sig.samples.size() - off);
+                    ch.process(n, &sig.samples[off]);
+                }
+                std::string got = ch.text.getText();
+                // Trim trailing spaces for comparison.
+                while (!got.empty() && got.back() == ' ') got.pop_back();
+                bool ok = (got == msg);
+                total++;
+                if (!ok) { broken++; fails.push_back({ op, wpm, core, got }); }
+            }
+        }
+    }
+    printf("\n=== opening sweep: %d/%d decodes BROKEN (clean signal) ===\n", broken, total);
+    for (const char* core : { "legacy+select", "legacy+fb+sel" }) {
+        int c = 0; for (auto& f : fails) if (std::string(f.core) == core) c++;
+        printf("  [%s] %d broken:\n", core, c);
+        for (auto& f : fails) {
+            if (std::string(f.core) != core) continue;
+            printf("    %-5s %-4d  \"%s DE W1AW\"  ->  \"%s\"\n", f.open, f.wpm, f.open, f.got.c_str());
+        }
+    }
+    printf("\n");
 }
 
 // Generic raw-decode error histogram, EXCLUDING the first symbol (a known
@@ -795,9 +914,11 @@ TEST_CASE("Inittrace: fb cold-start decode on artifact seeds", "[cw][.][init-tra
 // classification)? Dump the per-event stream for seed 0's first token. [acq-axis].
 // ref first token: "CQ CQ CQ"  (C = dah dit dah dit,  Q = dah dah dit dah)
 TEST_CASE("Acqaxis: detector events vs timing classification, seed 0", "[cw][.][acq-axis]") {
+  for (int seedIdx : { 0, 5 }) {
     SignalParams p = profileModerateNoise(80.0f);
-    p.seed = 1000 + 0;
+    p.seed = 1000 + (unsigned)seedIdx * 7919u;
     auto sig = generateMessage(MSG_FULL(), p);
+    fprintf(stderr, "\n==================== SEED %d ====================\n", seedIdx);
     for (const char* coreName : { "legacy+fb+sel" }) {
         const cw::CoreSpec* spec = cw::findCore(coreName);
         REQUIRE(spec);
@@ -815,6 +936,47 @@ TEST_CASE("Acqaxis: detector events vs timing classification, seed 0", "[cw][.][
             ch.process(n, &sig.samples[off]);
         }
         fprintf(stderr, "FINAL(2.2s): \"%s\"\n", ch.text.getText().c_str());
+    }
+  }
+}
+
+// B onset diagnosis: is the first-char merge in the ENVELOPE (front-end warmup/BPF)
+// or the DETECTOR (cold theta)? Dump the post-BPF envelope over the first ~800 ms as a
+// sparkline; if the first char's intra-element gaps show as dips, the envelope is fine
+// and the merge is a detector/timing acquisition bug (re-decodable); if the envelope
+// stays high across them, it is a front-end merge (needs a front-end fix). [onset-env].
+TEST_CASE("Onsetenv: first-char envelope structure, seeds 0 & 5", "[cw][.][onset-env]") {
+    for (int seedIdx : { 0, 5 }) {
+        SignalParams p = profileModerateNoise(80.0f);
+        p.seed = 1000 + (unsigned)seedIdx * 7919u;
+        auto sig = generateMessage(MSG_FULL(), p);
+        const cw::CoreSpec* spec = cw::findCore("legacy+fb+sel");
+        auto core = spec->make();
+        auto* sc = dynamic_cast<cw::StagedCore*>(core.get());
+        cw::Channel ch; ch.initWithCore(0, p.toneFreq, std::move(core), "legacy+fb+sel");
+        ch.wordCorrection = false;
+        std::vector<float> env;
+        const int limit = std::min((int)sig.samples.size(), 8000);   // 1.0 s at 8 kHz
+        for (int off = 0; off < limit; off += 512) {
+            int n = std::min(512, limit - off);
+            ch.process(n, &sig.samples[off]);
+            int dn = 0; const float* d = sc->diagnostic(dn);
+            for (int i = 0; i < dn; i++) { env.push_back(d[i]); }
+        }
+        float peak = 1e-9f; for (float v : env) { peak = std::max(peak, v); }
+        // Fine sparkline: 2 ms/col over the first 600 ms so intra-element gaps of the
+        // first character are visible (a filled first gap => front-end onset merge;
+        // present gaps => detector/timing acquisition, re-decodable).
+        const char* ramp = " .:-=+*#@";
+        std::string line, scaleLine;
+        for (int i = 0; i + 2 <= (int)env.size() && i < 600; i += 2) {
+            float m = 0.5f * (env[i] + env[i + 1]);
+            int q = std::min(8, std::max(0, (int)(m / peak * 8.0f + 0.5f)));
+            line += ramp[q];
+            scaleLine += (((i / 2) % 25) == 0) ? '|' : ' ';   // | every 50 ms
+        }
+        printf("\n=== seed %d envelope (post-BPF, peak=%.3f, 2 ms/col, | = 50 ms) ===\n  %s\n  %s\n",
+               seedIdx, peak, line.c_str(), scaleLine.c_str());
     }
 }
 
@@ -956,4 +1118,211 @@ TEST_CASE("L3heavy: soft vs hard decodes at snr-noise3", "[cw][.][L3-heavy]") {
     }
     printf("\n  element errors (excl 1st):  fb+sel=%d  select=%d\n", fe, se);
     printf("  gap errors:                 fb+sel=%d  select=%d\n\n", fg, sg);
+}
+
+// Robust dit estimator via envelope autocorrelation (the synchronous/CW-Skimmer
+// research direction, refined to hand-keyed): the first ZERO-CROSSING of the
+// mean-removed envelope autocorrelation is a fade-robust, event-INDEPENDENT scale
+// (it integrates over the window, so per-event fragmentation cannot poison it).
+// This [dit-cal] measures zeroCross vs the KNOWN dit across profiles to (a) get
+// the zeroCross->dit constant and (b) test stability under noise — BEFORE wiring
+// it into the decode path. Pure DSP, no vocabulary.
+namespace {
+    float autocorrZeroCrossMs(const std::vector<float>& env, float rate) {
+        const int n = (int)env.size();
+        if (n < 400) return 0;
+        double mean = 0; for (float v : env) mean += v; mean /= n;
+        double r0 = 0; for (int i = 0; i < n; i++) { double d = env[i]-mean; r0 += d*d; }
+        if (r0 < 1e-12) return 0;
+        const int maxLag = std::min(n/2, (int)(0.6f*rate));
+        float prev = 1.0f;
+        for (int lag = 1; lag < maxLag; lag++) {
+            double s = 0; for (int i = 0; i < n-lag; i++) s += (double)(env[i]-mean)*(env[i+lag]-mean);
+            float r = (float)(s / r0);
+            if (prev >= 0 && r < 0) {                 // linear interp the crossing
+                float frac = prev / (prev - r);
+                return (lag - 1 + frac) * (1000.0f / rate);
+            }
+            prev = r;
+        }
+        return 0;
+    }
+    std::vector<float> envelopeOf(const SignalParams& p, const char* msg) {
+        auto sig = generateMessage(msg, p);
+        cw::EnvelopeFrontEnd fe(140.0f, 140.0f, 88.0f, 100.0f);
+        fe.init(p.toneFreq, 8000.0f, 1000.0f);
+        std::vector<float> env, buf(1024);
+        for (int off = 0; off + 1 <= (int)sig.samples.size(); off += 512) {
+            int n = std::min(512, (int)sig.samples.size() - off);
+            int m = fe.process(n, &sig.samples[off], buf.data());
+            env.insert(env.end(), buf.data(), buf.data() + m);
+        }
+        return env;
+    }
+}
+TEST_CASE("Ditcal: autocorr zero-cross vs known dit", "[cw][.][dit-cal]") {
+    struct P { const char* name; float dit; SignalParams params; };
+    std::vector<P> profs = {
+        {"clean-15wpm",     80.0f, profileClean(80.0f)},
+        {"clean-20wpm",     60.0f, profileClean(60.0f)},
+        {"clean-25wpm",     48.0f, profileClean(48.0f)},
+        {"handkeyed-15wpm", 80.0f, profileHandKeyed(80.0f)},
+        {"handkeyed-20wpm", 60.0f, profileHandKeyed(60.0f)},
+        {"handkeyed-30wpm", 40.0f, profileHandKeyed(40.0f)},
+        {"qsb-15wpm",       80.0f, profileQSB(80.0f)},
+        {"moderate-15wpm",  80.0f, profileModerateNoise(80.0f)},
+    };
+    printf("\n%-18s %6s %8s %8s %8s   (%d seeds; K = dit/zeroCross)\n",
+           "profile", "dit", "zc(ms)", "K", "stderr", SEEDS);
+    printf("%s\n", std::string(60, '-').c_str());
+    for (auto& pr : profs) {
+        double kSum = 0, kSq = 0; int nOk = 0;
+        double zcSum = 0;
+        for (int i = 0; i < SEEDS; i++) {
+            SignalParams p = pr.params; p.seed = 1000 + (unsigned)i * 7919u;
+            auto env = envelopeOf(p, MSG_FULL());
+            float zc = autocorrZeroCrossMs(env, 1000.0f);
+            if (zc > 5.0f) { float k = pr.dit / zc; kSum += k; kSq += k*k; zcSum += zc; nOk++; }
+        }
+        if (nOk > 0) {
+            double kMean = kSum/nOk, kVar = kSq/nOk - kMean*kMean;
+            double se = nOk > 1 ? std::sqrt(std::max(0.0,kVar)/nOk) : 0;
+            printf("%-18s %6.0f %8.1f %8.3f %8.3f\n", pr.name, pr.dit, zcSum/nOk, kMean, se);
+        } else {
+            printf("%-18s %6.0f   (no zero-crossing found)\n", pr.name, pr.dit);
+        }
+    }
+    printf("\n  If K is ~constant across profiles/speeds/noise, dit = K * zeroCross\n"
+           "  is a robust, event-independent estimator worth wiring to the timing seed.\n\n");
+}
+
+// §7b: soft-segmentation cont decode vs the hard cont, across the profile ladder.
+// Both full-channel (through the ratchet); shows whether the soft trellis helps
+// the emitted output and whether it regresses any regime. [soft-cmp].
+TEST_CASE("Softcmp: soft-segmentation vs hard cont", "[cw][.][soft-cmp]") {
+    auto decFull = [](const char* core, const GeneratedSignal& sig, float tone){
+        cw::Channel ch; ch.init(0, tone, core); ch.wordCorrection = false;
+        for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+            int n = std::min(512, (int)sig.samples.size() - off);
+            ch.process(n, &sig.samples[off]);
+        }
+        return ch.text.getText();
+    };
+    printf("\n  profile              hardCont(elem/gap)  soft(elem/gap)  Δelem\n");
+    int totH = 0, totS = 0;
+    for (auto& prof : allProfiles()) {
+        int he=0, hg=0, se=0, sg=0;
+        for (int i = 0; i < SEEDS; i++) {
+            SignalParams p = prof.params; p.seed = 1000 + (unsigned)i * 7919u;
+            auto sig = generateMessage(prof.message, p);
+            tallyCategorized(sig.sourceText, decFull("legacy+fb+sel+cont", sig, p.toneFreq), he, hg);
+            tallyCategorized(sig.sourceText, decFull("legacy+fb+soft",     sig, p.toneFreq), se, sg);
+        }
+        totH += he; totS += se;
+        printf("  %-18s   %4d /%3d       %4d /%3d      %+d%s\n",
+               prof.name, he, hg, se, sg, se - he, (se > he ? "  <-- REGRESSION" : ""));
+    }
+    printf("  %-18s   %4d           %4d          %+d\n\n", "TOTAL elem", totH, totS, totS - totH);
+}
+
+// Router discriminator check (post confidence-fix): does reported confidence
+// separate "select correct" from "select wrong"? For each profile, decode with
+// select and fb+sel+cont, report each core's CER and confidence. If select-conf
+// is HIGH where it copies well and LOW where fb wins, a comparative confidence
+// rule can drive the router — no language model. [route-conf].
+TEST_CASE("Routeconf: confidence vs correctness by regime", "[cw][.][route-conf]") {
+    auto run = [](const char* core, const GeneratedSignal& sig, float tone, float& cer){
+        cw::Channel ch; ch.init(0, tone, core); ch.wordCorrection = false;
+        for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+            int n = std::min(512, (int)sig.samples.size() - off);
+            ch.process(n, &sig.samples[off]);
+        }
+        cer = score(sig.sourceText, ch.text.getText()).cer;
+        return ch.confidence;
+    };
+    printf("\n%-18s  selCER selConf  fbCER  fbConf\n", "profile");
+    printf("%s\n", std::string(52, '-').c_str());
+    for (auto& prof : allProfiles()) {
+        double sC=0, sK=0, fC=0, fK=0; int nS = 8;
+        for (int i = 0; i < nS; i++) {
+            SignalParams p = prof.params; p.seed = 1000 + (unsigned)i * 7919u;
+            auto sig = generateMessage(prof.message, p);
+            float cer;
+            sK += run("legacy+select", sig, p.toneFreq, cer); sC += cer;
+            fK += run("legacy+fb+sel+cont", sig, p.toneFreq, cer); fC += cer;
+        }
+        printf("%-18s  %.2f   %.2f   %.2f   %.2f\n",
+               prof.name, sC/nS, sK/nS, fC/nS, fK/nS);
+    }
+    printf("\n  If selConf is HIGH where selCER is low and LOW where fbCER<<selCER,\n"
+           "  a comparative-confidence router rule works.\n\n");
+}
+
+// Validate the router-confidence discriminator: (a) is select's low confidence
+// present EARLY (~12s, the router's COMMIT_SEC) and not just at message end?
+// (b) per-seed spread, not just the mean. Sample select's confidence at ~12s and
+// at the end, per seed, for select-FAILS vs select-OK regimes. [early-conf].
+TEST_CASE("Earlyconf: select confidence early vs final, per seed", "[cw][.][early-conf]") {
+    struct P { const char* name; SignalParams params; };
+    std::vector<P> profs = {
+        {"snr-noise3 (FAIL)", [](){ auto q=profileClean(80.0f); q.noiseAmp=3.0f; return q; }()},
+        {"snr-noise4 (FAIL)", [](){ auto q=profileClean(80.0f); q.noiseAmp=4.0f; return q; }()},
+        {"snr-noise2 (ok)",   [](){ auto q=profileClean(80.0f); q.noiseAmp=2.0f; return q; }()},
+        {"moderate (ok)",     profileModerateNoise(80.0f)},
+        {"handkeyed-20 (ok)", profileHandKeyed(60.0f)},
+    };
+    const float fs = 8000.0f;
+    const int commitBlk = (int)(12.0f * fs);      // ~12s = router COMMIT_SEC
+    printf("\n%-20s  conf@12s (per seed)         conf@end\n", "profile");
+    printf("%s\n", std::string(64, '-').c_str());
+    for (auto& pr : profs) {
+        printf("%-20s  ", pr.name);
+        std::string e12, eend;
+        for (int i = 0; i < 8; i++) {
+            SignalParams p = pr.params; p.seed = 1000 + (unsigned)i * 7919u;
+            auto sig = generateMessage(MSG_FULL(), p);
+            cw::Channel ch; ch.init(0, p.toneFreq, "legacy+select"); ch.wordCorrection = false;
+            float c12 = -1;
+            for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+                int n = std::min(512, (int)sig.samples.size() - off);
+                ch.process(n, &sig.samples[off]);
+                if (c12 < 0 && off + n >= commitBlk) { c12 = ch.confidence; }
+            }
+            char b[16]; snprintf(b, sizeof b, "%.2f ", c12 < 0 ? ch.confidence : c12); e12 += b;
+            snprintf(b, sizeof b, "%.2f ", ch.confidence); eend += b;
+        }
+        printf("%-28s %s\n", e12.c_str(), eend.c_str());
+    }
+    printf("\n  If FAIL rows are LOW at 12s (not just at end) and OK rows stay HIGHER,\n"
+           "  the router can arbitrate on select confidence at commit time.\n\n");
+}
+
+// §7c promotion check: legacy+route (default) vs legacy+route+cont (confidence-gated
+// + cont fb sub-core) across the profile ladder. route+cont must be same-or-better
+// on EVERY profile to be promotable to default. [route-cmp].
+TEST_CASE("Routecmp: default route vs route+cont by profile", "[cw][.][route-cmp]") {
+    auto cer = [](const char* core, const GeneratedSignal& sig, float tone){
+        cw::Channel ch; ch.init(0, tone, core); ch.wordCorrection = false;
+        for (int off = 0; off < (int)sig.samples.size(); off += 512) {
+            int n = std::min(512, (int)sig.samples.size() - off);
+            ch.process(n, &sig.samples[off]);
+        }
+        return score(sig.sourceText, ch.text.getText()).cer;
+    };
+    printf("\n%-20s  route   route+cont   Δ\n", "profile");
+    printf("%s\n", std::string(52, '-').c_str());
+    double tR=0, tC=0;
+    for (auto& prof : allProfiles()) {
+        double r=0, c=0;
+        for (int i = 0; i < SEEDS; i++) {
+            SignalParams p = prof.params; p.seed = 1000 + (unsigned)i * 7919u;
+            auto sig = generateMessage(prof.message, p);
+            r += cer("legacy+route", sig, p.toneFreq);
+            c += cer("legacy+route+cont", sig, p.toneFreq);
+        }
+        r/=SEEDS; c/=SEEDS; tR+=r; tC+=c;
+        printf("%-20s  %.3f   %.3f    %+.3f%s\n", prof.name, r, c, c-r,
+               (c > r + 0.003 ? "  <-- REGRESSION" : ""));
+    }
+    printf("%-20s  %.3f   %.3f\n\n", "MEAN", tR/allProfiles().size(), tC/allProfiles().size());
 }

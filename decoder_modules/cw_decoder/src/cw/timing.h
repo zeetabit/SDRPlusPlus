@@ -292,6 +292,8 @@ namespace cw {
         void init() { reset(); }
         void setRobust(bool r) { robust = r; }
         void setGuarded(bool g) { guarded = g; }
+        // KNOWN-DEFECT fix: intra-character element gap (~1 dit), fed by AdaptiveTiming.
+        void setGapDitHint(float ms) { _gapDitHint = ms; }
 
         TimingEvent classifyOn(float durationMs) {
             TimingEvent evt;
@@ -305,12 +307,27 @@ namespace cw {
             // Bootstrap: shortest seed element is taken as a dit.
             if (elementCount <= seedCount) {
                 seedBuf[elementCount - 1] = ld;
-                float minL = seedBuf[0];
+                float minL = seedBuf[0], maxL = seedBuf[0];
                 for (int i = 1; i < elementCount; i++) {
                     if (seedBuf[i] < minL) minL = seedBuf[i];
+                    if (seedBuf[i] > maxL) maxL = seedBuf[i];
                 }
                 if (elementCount == seedCount) {
-                    x = minL;
+                    // KNOWN-DEFECT FIX (was: x = minL): an all-one-type seed set
+                    // (maxL-minL <= ln 1.8) may be all DAHs -> x seeded 3x high. If the
+                    // element gap-dit hint says minD is ~3x a dit, minD is a DAH -> seed
+                    // from the gap. Mixed sets (e.g. CQ) keep minL, so clean is unchanged.
+                    float seedX = minL;
+                    // See KalmanTiming seed: fire only on a tight all-one-type run whose
+                    // minD is ~3x the element-gap dit (physical dah:dit = 3:1), so a noise
+                    // gap (off-ratio) cannot pull the seed down. Mixed sets keep minL.
+                    const bool ambiguous = (maxL - minL <= 0.405f);   // ln(1.5)
+                    const float md = expf(minL);
+                    const float ratio = _gapDitHint > 1.0f ? md / _gapDitHint : 0.0f;
+                    if (ambiguous && ratio > 2.2f && ratio < 4.0f) {
+                        seedX = logf(_gapDitHint);
+                    }
+                    x = seedX;
                     P = 0.25f;   // ln-space variance: ~50% duration uncertainty
                     R = 0.04f;   // ~20% duration measurement noise
                 }
@@ -404,9 +421,11 @@ namespace cw {
             P = 0.25f;
             R = 0.04f;
             elementCount = 0;
+            _gapDitHint = 0.0f;
         }
 
     private:
+        float _gapDitHint = 0.0f;   // shortest acquisition gap (~1 dit), fed by AdaptiveTiming
         static constexpr float LN3 = 1.0986123f;          // ln 3
         static constexpr float LN_DIT_MIN = 3.526361f;    // ln 34 ms
         static constexpr float LN_DIT_MAX = 5.010635f;    // ln 150 ms
@@ -447,6 +466,10 @@ namespace cw {
         // V2's cold-start sensitivity regresses light-noise machine signals (§50).
         void setSnrGraded(bool g) { snrGraded = g; }
         void setKalmanSnr(float s) { _snrForGate = s; }
+        // KNOWN-DEFECT fix (timing.h seed): the intra-character element gap ~= 1 dit is
+        // an independent dit estimate that classifyOn cannot see; AdaptiveTiming feeds
+        // the shortest acquisition gap here so the seed can reject an all-DAH seed set.
+        void setGapDitHint(float ms) { _gapDitHint = ms; }
 
         TimingEvent classifyOn(float durationMs) {
             TimingEvent evt;
@@ -472,24 +495,41 @@ namespace cw {
                         if (seedBuf[i] < minD) minD = seedBuf[i];
                         if (seedBuf[i] > maxD) maxD = seedBuf[i];
                     }
-                    // KNOWN DEFECT: when maxD/minD <= 1.8 the seed set is all
-                    // one element type and minD may be a DAH, seeding ditEst 3x
-                    // too high (messages opening O, MM, TT). Deferring the seed
-                    // until the set is unambiguous was tried and regresses clean
-                    // decoding badly (WPM sweep CER 0.01 -> 0.364) because it
-                    // also defers timing lock and retroDecode. The correct fix
-                    // uses gap durations to disambiguate -- gaps within a
-                    // character are element gaps ~= 1 dit -- which classifyOn()
-                    // cannot see. See docs/decoder-investigation-2026-07.md 2.1(c).
-                    ditEst = minD;
+                    // KNOWN-DEFECT FIX (was: ditEst = minD): when maxD/minD <= 1.8 the
+                    // seed set is all ONE element type, so minD may be a DAH, seeding
+                    // ditEst 3x too high (openings O=---, MM, TT). Deferring the seed
+                    // regresses clean decode (WPM sweep 0.01->0.364, it also defers the
+                    // lock + retroDecode). Instead DISAMBIGUATE with the intra-character
+                    // element gap ~= 1 dit (setGapDitHint, fed by AdaptiveTiming): if the
+                    // set is ambiguous AND minD is ~3x the gap-dit, minD is a DAH -> seed
+                    // from the gap. The mixed case (maxD/minD > 1.8, e.g. CQ) keeps minD
+                    // unchanged, so clean decoding is byte-identical there.
+                    float seedDit = minD;
+                    // Fire only on a TIGHT all-one-type run whose minD is ~3x the
+                    // element-gap dit (a DAH). The ratio band is the physical dah:dit =
+                    // 3:1; a NOISE gap gives an off-ratio (e.g. 8x) and is rejected, so a
+                    // spurious short gap cannot pull the seed down (min(gap) alone is as
+                    // fragile as min(element)). Mixed sets (CQ) fail `ambiguous` and are
+                    // byte-identical.
+                    const bool ambiguous = (maxD <= minD * 1.5f);
+                    const float ratio = _gapDitHint > 1.0f ? minD / _gapDitHint : 0.0f;
+                    if (ambiguous && ratio > 2.2f && ratio < 4.0f) {
+                        seedDit = _gapDitHint;
+                    }
+                    ditEst = seedDit;
                     P = ditEst * ditEst * 0.25f;  // initial uncertainty: 50% of dit
                     R = ditEst * ditEst * 0.04f;   // measurement noise: 20% of dit
                 }
-                // During seed: rough classification
+                // During seed: rough classification. At the seed-completing element,
+                // classify against the just-set (possibly gap-corrected) ditEst, NOT
+                // minSoFar*2 -- otherwise an all-DAH seed's 3rd element (== minSoFar)
+                // is mislabeled DIT even though ditEst is now correct (O -> W bug).
                 float minSoFar = seedBuf[0];
                 for (int i = 1; i < elementCount; i++)
                     if (seedBuf[i] < minSoFar) minSoFar = seedBuf[i];
-                evt.element = (durationMs < minSoFar * 2.0f) ? DIT : DAH;
+                const float boundary = (elementCount == seedCount) ? ditEst * 2.0f
+                                                                    : minSoFar * 2.0f;
+                evt.element = (durationMs < boundary) ? DIT : DAH;
                 evt.confidence = 0.3f;
                 return evt;
             }
@@ -633,9 +673,11 @@ namespace cw {
             elementCount = 0;
             switchWpmEma = 0.0f;
             switchInV2 = true;
+            _gapDitHint = 0.0f;
         }
 
     private:
+        float _gapDitHint = 0.0f;   // shortest acquisition gap (~1 dit), fed by AdaptiveTiming
         static float gaussLikelihood(float x, float mean, float var) {
             if (var < 1.0f) var = 1.0f;
             float diff = x - mean;
@@ -709,7 +751,9 @@ namespace cw {
                 // Decide/settle the mode until frozen; after that it re-opens only
                 // at a word gap on a robust dit-drift trigger (reEvalSelectGate).
                 updateSelectGate();
-                return selectUseLog ? (selectUseBimodal ? bEvt : lEvt) : kEvt;
+                TimingEvent result = selectUseLog ? (selectUseBimodal ? bEvt : lEvt) : kEvt;
+                applyProportionClassifier(result, durationMs);
+                return result;
             }
 
             TimingEvent result;
@@ -729,6 +773,7 @@ namespace cw {
             // Track element durations for gap sigma estimation
             elementDurations.push_back(durationMs);
             if ((int)elementDurations.size() > 30) elementDurations.erase(elementDurations.begin());
+            applyProportionClassifier(result, durationMs);
             return result;
         }
 
@@ -790,6 +835,17 @@ namespace cw {
             // Track gap durations for adaptive center estimation
             gapDurations.push_back(durationMs);
             if ((int)gapDurations.size() > 40) gapDurations.erase(gapDurations.begin());
+
+            // KNOWN-DEFECT fix: feed the shortest ACQUISITION gap (~1 dit, the element
+            // gap) to the seed estimators BEFORE they lock, so an all-DAH opening seed
+            // set is corrected (the gap is an independent dit anchor classifyOn cannot
+            // see). Only pre-lock and only the running min, so a clean signal's first
+            // element gaps set it; after lock the seed is done and this is inert.
+            if (!isLocked() && durationMs > 1.0f && durationMs < _seedGapDit) {
+                _seedGapDit = durationMs;
+                kalman.setGapDitHint(_seedGapDit);
+                logTiming.setGapDitHint(_seedGapDit);
+            }
 
             // _ditOverride (test-only, docs §38) substitutes a known dit into
             // the gap-centre and sigma computation ONLY, leaving getDitDuration()
@@ -857,7 +913,55 @@ namespace cw {
                 if (_strategy == TIMING_SELECT) { reEvalSelectGate(); }
             }
 
+            // Track the recent element-gap reference (~1 dit) + its consistency, for the
+            // proportion classifier: mark:element-gap ~= 3:1 dah / 1:1 dit is scale-
+            // invariant, so it survives onset attenuation / amplitude drift where the
+            // absolute mark-vs-2*dit test fails. _egMad/_egMean is the CV -> confidence.
+            if (evt.gap == ELEMENT_GAP && evt.confidence >= 0.6f && durationMs > 1.0f) {
+                if (_egMean <= 0.0f) { _egMean = durationMs; _egMad = 0.0f; }
+                else {
+                    _egMad  = 0.8f * _egMad + 0.2f * std::fabs(durationMs - _egMean);
+                    _egMean = 0.8f * _egMean + 0.2f * durationMs;
+                }
+                _lastElemGap = durationMs;
+            }
+
             return evt;
+        }
+
+        // Proportion classifier (user idea): correct an AMBIGUOUS absolute dit/dah
+        // classification using the scale-invariant mark:element-gap ratio (~1 dit, ~3
+        // dah), gated by element-gap consistency. Only touches low-confidence marks, so
+        // a clean signal (confident absolute) is unchanged; it bites on degraded marks
+        // (jitter/attenuation) where absolute duration fails but the ratio still holds.
+        void applyProportionClassifier(TimingEvent& evt, float markMs) {
+            // A/B toggles (test/investigation only, static -> read once):
+            //   NOPROP     — disable this proportion classifier entirely, to isolate its
+            //                effect from the rest of the pipeline in a paired run.
+            //   PROP_TRACE — log every dit/dah flip this classifier makes (mark, egMean,
+            //                ratio, old->new, conf, consistency) to stderr.
+            static const bool disabled = getenv("NOPROP") != nullptr;
+            static const bool trace = getenv("PROP_TRACE") != nullptr;
+            if (disabled) { return; }
+            if (evt.type != TimingEvent::KEY_ELEMENT) { return; }
+            if (gapBootstrap) { return; }                       // retro replay (setRetroMode): don't churn the
+                                                                // noisy opening; proportion's wins are live/mid-stream
+            if (evt.confidence >= PROP_CONF_CEIL) { return; }   // absolute already confident
+            if (_snr < PROP_SNR_MIN) { return; }                // heavy noise: gaps too corrupt to trust
+            if (_lastElemGap < 1.0f || _egMean <= 0.0f) { return; }
+            const float cv = _egMad / _egMean;                  // element-gap jitter
+            const float consist = std::clamp(1.0f - cv / 0.35f, 0.0f, 1.0f);
+            if (consist < PROP_CONSIST_MIN) { return; }         // gaps too jittery to trust
+            const float ratio = markMs / _egMean;               // ~1 dit, ~3 dah
+            const Element propClass = (ratio < 2.0f) ? DIT : DAH;
+            const float margin = std::fabs(ratio - 2.0f);       // distance from boundary
+            if (margin < 0.7f) { return; }                      // proportion itself ambiguous
+            if (propClass != evt.element) {
+                if (trace) fprintf(stderr, "  [PROP] mark=%.0f egMean=%.0f ratio=%.2f %s->%s conf=%.2f consist=%.2f\n",
+                    markMs, _egMean, ratio, evt.element==DIT?"DIT":"DAH", propClass==DIT?"DIT":"DAH", evt.confidence, consist);
+                evt.element = propClass;
+                evt.confidence = std::min(0.95f, 0.5f + 0.25f * margin) * consist;
+            }
         }
 
         float getWPM() const {
@@ -923,6 +1027,8 @@ namespace cw {
             selectUseBimodal = false;   // §52.1 #40b
             selectFrozen = false;
             selectFrozenDit = 0.0f;
+            _seedGapDit = 1e9f;
+            _lastElemGap = 0.0f; _egMean = 0.0f; _egMad = 0.0f;
         }
 
         TimingStrategy getStrategy() const { return _strategy; }
@@ -1015,7 +1121,8 @@ namespace cw {
         // in the sorted non-element durations.
         GapCenterSource estimateGapCenters(float dit, float& elemMean, float& charMean, float& wordMean) const {
             float sumElem = 0; int nElem = 0;
-            std::vector<float> longGaps;
+            std::vector<float>& longGaps = _longGapsScratch;   // D: reused, not per-call alloc
+            longGaps.clear();
 
             float boundary = dit * 2.0f;
             for (float g : gapDurations) {
@@ -1104,6 +1211,13 @@ namespace cw {
 
         std::vector<float> elementDurations;  // recent ON-durations for sigma estimation
         std::vector<float> gapDurations;      // recent OFF-durations for gap center estimation
+        mutable std::vector<float> _longGapsScratch;  // D: reused by estimateGapCenters (const)
+        float _seedGapDit = 1e9f;             // KNOWN-DEFECT: shortest pre-lock gap (~1 dit) for seed disambiguation
+        float _lastElemGap = 0.0f;            // proportion classifier: last confident element gap
+        float _egMean = 0.0f, _egMad = 0.0f;  // element-gap EMA mean + mean-abs-dev (consistency)
+        static constexpr float PROP_CONF_CEIL   = 0.75f;  // only correct classifications below this conf
+        static constexpr float PROP_CONSIST_MIN = 0.5f;   // min element-gap consistency to trust ratio
+        static constexpr float PROP_SNR_MIN     = 6.0f;   // skip under heavy noise (jittery gaps corrupt ratio)
         bool gapBootstrap = false;            // config, not state: survives reset()
         int  minGapSamples = 10;              // relaxed only for retro replay (docs §16.4)
         float _ditOverride = 0.0f;            // test-only confound probe (docs §38)

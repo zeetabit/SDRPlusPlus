@@ -163,7 +163,23 @@ namespace cw {
         void reset() {
             if (core) { core->reset(); }
             conversation.reset();
-            text.clear();
+            text.clearAll();
+            resetLiveState();
+        }
+
+        // Reset the decoder to re-acquire on a NEW signal (frequency switch) while
+        // KEEPING the already-decoded text visible: the live decode is frozen into
+        // history and the timing/detector/core state is cleared so it re-locks to the
+        // new signal instead of dragging the old signal's speed/level estimates.
+        void resetDecodeState() {
+            text.freeze();
+            if (core) { core->reset(); }
+            conversation.reset();
+            resetLiveState();
+        }
+
+    private:
+        void resetLiveState() {
             snr = 0;
             wpm = 0;
             confidence = 0;
@@ -173,6 +189,7 @@ namespace cw {
             currentWordConfSum = 0;
             currentWordCharCount = 0;
         }
+    public:
 
         std::vector<float> getDiagramData(int maxSamples) {
             std::lock_guard<std::mutex> lck(diagMtx);

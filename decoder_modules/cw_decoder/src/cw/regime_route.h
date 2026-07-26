@@ -23,8 +23,13 @@ namespace cw {
     // Cost is ~2x decode per channel for the commit window, then 1x (winner only).
     class RegimeRouteCore : public IDecodeCore {
     public:
-        RegimeRouteCore(std::unique_ptr<IDecodeCore> select, std::unique_ptr<IDecodeCore> fb)
-            : _select(std::move(select)), _fb(std::move(fb)) {}
+        // selConfGate>0 enables the correctness discriminator (§7c): route to fb when
+        // SELECT's committed confidence is below the gate — select's confidence
+        // collapses (<0.15) on the buried/valid-but-wrong regimes where fb wins, and
+        // stays high (>0.6) where select copies. 0 = disabled (byte-identical legacy).
+        RegimeRouteCore(std::unique_ptr<IDecodeCore> select, std::unique_ptr<IDecodeCore> fb,
+                        float selConfGate = 0.0f)
+            : _select(std::move(select)), _fb(std::move(fb)), _selConfGate(selConfGate) {}
 
         void init(float sampleRate, float internalRate, float toneFreq) override {
             _sampleRate = sampleRate;
@@ -35,7 +40,8 @@ namespace cw {
         void setToneFreq(float f) override { _select->setToneFreq(f); _fb->setToneFreq(f); }
         void reset() override {
             _select->reset(); _fb->reset();
-            _committed = false; _useFb = false; _samples = 0; _fbLog.clear(); _selLog.clear();
+            _committed = false; _useFb = false; _samples = 0; _selConfMax = 0.0f;
+            _fbLog.clear(); _selLog.clear();
         }
         void preseed(float level, int count) override {
             _select->preseed(level, count); _fb->preseed(level, count);
@@ -51,6 +57,15 @@ namespace cw {
             if (!_committed || _useFb)  { _fb->process(count, iq, _fbSink); }
             if (!_committed || !_useFb) { _select->process(count, iq, _selSink); }
             _samples += count;
+
+            // Track the PEAK of select's confidence over the pre-commit window. The
+            // confidence gate must fire only when select NEVER showed competence
+            // (persistent failure) — a single-snapshot read at commit misfires on the
+            // TRANSIENT dips that clean/handkeyed/contest show while re-locking, which
+            // recover to high confidence (§7c gate regression, 2026-07-26).
+            if (!_committed) {
+                _selConfMax = std::max(_selConfMax, _select->stats().confidence);
+            }
 
             if (!_committed && _samples >= (long long)(_sampleRate * COMMIT_SEC)) {
                 // Decide by DECODE PLAUSIBILITY, not raw SNR: fb and select both read as
@@ -81,13 +96,22 @@ namespace cw {
                 // keeps every AWGN win and excludes weak-hand-keyed, whose few clean
                 // tokens otherwise fool the valid/total ratio (§53).
                 const float fbContrast = _fb->stats().snr;
-                _useFb = (fbGood >= FB_ABS)
-                         && (selRatio < SEL_RATIO_MAX)
-                         && (fbRatio > selRatio + RATIO_MARGIN)
-                         && (fbContrast < CONTRAST_MAX)
-                         && (inSnr < ROUTE_SNR);
-                if (debug) fprintf(stderr, "[ROUTE] sel=%d/%d(%.2f) fb=%d/%d(%.2f) inputSnr=%.1f fbContrast=%.1f -> %s\n",
-                                   selGood, selTot, selRatio, fbGood, fbTot, fbRatio, inSnr, _fb->stats().snr, _useFb ? "FB" : "select");
+                const bool ratioGate = (selRatio < SEL_RATIO_MAX)
+                                       && (fbRatio > selRatio + RATIO_MARGIN)
+                                       && (fbContrast < CONTRAST_MAX)
+                                       && (inSnr < ROUTE_SNR);
+                // §7c correctness discriminator: select confidently WRONG (low conf,
+                // valid-but-wrong copy) where the token RATIO cannot tell (selRatio~1).
+                // confGate fires when select's PEAK confidence stayed low — it never
+                // copied (persistent failure), not a transient re-lock dip. Stands
+                // alone: the cont fb sub-core batches its re-decode so fbGood is ~0 at
+                // commit; the fbGood ratio-guard would wrongly veto it. fb-cont is the
+                // trusted fallback where select genuinely never copies.
+                const bool confGate = (_selConfGate > 0.0f) && (_selConfMax < _selConfGate);
+                _useFb = (fbGood >= FB_ABS && ratioGate) || confGate;
+                static const bool dbgEnv = getenv("ROUTE_DBG") != nullptr;
+                if (debug || dbgEnv) fprintf(stderr, "[ROUTE] sel=%d/%d(%.2f) fb=%d/%d(%.2f) inputSnr=%.1f fbContrast=%.1f selConfMax=%.3f gate=%.2f confG=%d ratioG=%d -> %s\n",
+                                   selGood, selTot, selRatio, fbGood, fbTot, fbRatio, inSnr, _fb->stats().snr, _selConfMax, _selConfGate, confGate?1:0, ratioGate?1:0, _useFb ? "FB" : "select");
                 _committed = true;
                 if (_useFb) { sink.clearEmitted(); replay(sink); }   // adopt fb's lead-in
                 _fbLog.clear(); _fbLog.shrink_to_fit();
@@ -181,5 +205,7 @@ namespace cw {
         bool _committed = false, _useFb = false;
         long long _samples = 0;
         float _sampleRate = 8000.0f;
+        float _selConfGate = 0.0f;   // §7c: route-to-fb-when-select-unsure threshold (0=off)
+        float _selConfMax = 0.0f;    // peak select confidence over the pre-commit window
     };
 }

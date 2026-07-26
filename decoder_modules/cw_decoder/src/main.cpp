@@ -11,6 +11,7 @@
 
 #define CW_VFO_BANDWIDTH 3000.0f
 #define CW_SNAP_INTERVAL 10.0  // 10 Hz — fine tuning for CW
+#define FREQ_SWITCH_HZ 50.0    // retune beyond this resets decode state (>snap jitter)
 
 ConfigManager config;
 
@@ -145,10 +146,24 @@ private:
         _this->mgr.process(data, count);
     }
 
+    // Detect operator retune (radio LO or VFO drag) and reset decode state so the
+    // decoder re-acquires on the new signal — while KEEPING the decoded text in the
+    // UI (frozen as history). Absolute tuned freq = waterfall center + VFO offset.
+    void checkFrequencySwitch() {
+        if (!enabled || !vfo) { return; }
+        double tuned = gui::waterfall.getCenterFrequency() + vfo->getOffset();
+        if (lastTunedFreq == 0.0) { lastTunedFreq = tuned; return; }   // first frame: seed
+        if (fabs(tuned - lastTunedFreq) > FREQ_SWITCH_HZ) {
+            mgr.requestResetDecode();
+            lastTunedFreq = tuned;
+        }
+    }
+
     static void menuHandler(void* ctx) {
         auto* _this = (CWDecoderModule*)ctx;
 
         _this->syncVFOs();
+        _this->checkFrequencySwitch();
         _this->mgr.updateChannels();
 
         // Push channel markers to the visible VFO for waterfall display
@@ -190,6 +205,7 @@ private:
     bool listenMode = false;
     double lastTargetOffset = 0;
     double lastTargetBw = CW_VFO_BANDWIDTH;
+    double lastTunedFreq = 0.0;   // absolute tuned freq for retune detection
     VFOManager::VFO* vfo = nullptr;
     dsp::sink::Handler<dsp::complex_t> sink;
     cw::ChannelManager mgr;

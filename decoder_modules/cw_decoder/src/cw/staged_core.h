@@ -1,6 +1,7 @@
 #pragma once
 #include "core.h"
 #include "stages.h"
+#include "soft_seq_decoder.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -48,13 +49,15 @@ namespace cw {
                    bool matchedFilter = true,
                    bool fbBpf = false,
                    bool unrealWpmGuard = false,
-                   bool contRedecode = false)
+                   bool contRedecode = false,
+                   bool softDecode = false)
             : frontEnd(std::move(fe)), detector(std::move(det)),
               timing(std::move(tim)), symbols(std::move(sym)),
               mfResizePolicy(mfResize), minElementScale(minElemScale),
               adaptiveBpf(adaptiveBpf), bpfGarbageRevert(bpfGarbageRevert),
               bpfReeval(bpfReeval), _mfEnabled(matchedFilter), _fbBpf(fbBpf),
-              _unrealWpmGuard(unrealWpmGuard), _contRedecode(contRedecode) {}
+              _unrealWpmGuard(unrealWpmGuard), _contRedecode(contRedecode),
+              _softDecode(softDecode) {}
 
         // Runtime noise-aware BPF geometry (docs §29–33), from the locked WPM
         // (dit, ms) and the INPUT-referred SNR (dB, pre-BPF; frontEnd
@@ -115,6 +118,26 @@ namespace cw {
             if (_contRedecode) {
                 _reCap = (int)(internalRate * 60.0f);
                 _reEnv.assign(_reCap, 0.0f);
+                // D: build the persistent re-decode chains ONCE. makeFresh()+init()
+                // here == per-cycle makeFresh()+init() because AdaptiveTiming::init is
+                // "configure variants from strategy (invariant), then reset()", and
+                // MorseDecoder's tree is built once and invariant — so a per-cycle
+                // reset() reproduces a fresh chain's state exactly (verified byte-
+                // identical on the [cont] ladder). The strategy/rate never change, so
+                // the invariant config is hoisted out of the 0.5 s hot loop.
+                _reTimLive = timing->makeFresh(); _reTimLive->init(internalRate);
+                _reTimCont = timing->makeFresh(); _reTimCont->init(internalRate);
+                _reSymLive = symbols->makeFresh();
+                _reSymCont = symbols->makeFresh();
+                _liveSaved.reserve(1 << 16);   // bound: events in a 60 s window (+ noise)
+                _reEvents.reserve(1 << 13);
+                _reSaved.reserve(1 << 13);
+                _reMarks.reserve(1 << 13);
+                _reMarkSort.reserve(1 << 13);
+                _reKeep.reserve(1 << 13);
+                _reTextLive.reserve(1024);
+                _reTextCont.reserve(1024);
+                _reWinner.reserve(1024);
             }
         }
 
@@ -232,6 +255,8 @@ namespace cw {
                         if (lastKeyDown >= 0) {
                             float elemMs = now - lastKeyDown;
                             if (elemMs >= 5.0f) {
+                                if (elemMs < _plMinElem) { _plMinElem = elemMs; }  // flush-gate bimodality
+                                if (elemMs > _plMaxElem) { _plMaxElem = elemMs; }
                                 if (!timingFrozen) {
                                     auto te = timing->classifyOn(elemMs);
                                     if (debugLog) fprintf(stderr, "[CW ch%d] t=%.0f PRE elem=%.1fms %s conf=%.2f dit=%.1f wpm=%.1f\n",
@@ -309,7 +334,33 @@ namespace cw {
                 } else if (lastKeyUp >= 0 && !detector->isKeyDown() && !preLockEvents.empty()) {
                     float nowMs = (float)totalSamples / _internalRate * 1000.0f;
                     float silenceMs = nowMs - lastKeyUp;
-                    if (silenceMs > timing->getDitDuration() * 4.0f && !flushed) {
+                    // Flush (force-commit the buffered opening) only when the signal has
+                    // CLEARLY ended -- NOT on a mid-message word gap during acquisition.
+                    // A word gap is ~7*dit; fb detector latency inflates the measured
+                    // silence by ~3*dit more (~10*dit total). Firing at 4*dit committed
+                    // the opening while the estimator was still SEEDING, so the next word
+                    // decoded in seed phase and its leading dah mislabeled (T DE -> T SE).
+                    // Waiting past a word gap lets the estimator seed across the early
+                    // words and retro-decode the whole opening correctly.
+                    // A/B toggle (test/investigation only, static -> read once): OLDFLUSH
+                    // forces the pre-fix behaviour — a flat 4*dit silence-flush threshold
+                    // regardless of seed state — to isolate the bimodality-gated fix below
+                    // in a paired run.
+                    static const bool oldFlush = getenv("OLDFLUSH") != nullptr;
+                    // Raise the flush threshold only until the estimator has a RELIABLE dit
+                    // = it has seen BOTH a dit and a dah (bimodal pre-lock elements). Until
+                    // then a word gap (7*dit, ~10*dit with fb latency) would prematurely
+                    // commit an opening whose dit is unknown -- a short opening (T DE) or an
+                    // all-DAH run (0, OM) -- forcing the rest to decode in seed phase (T SE,
+                    // 0->OTT). Once bimodal, retro decodes correctly, so revert to the
+                    // original 4*dit and don't churn noisy multi-element acquisition
+                    // (moderate CQ is bimodal by its 2nd element).
+                    const float dit = timing->getDitDuration();
+                    const bool haveReliableDit = _plMaxElem > _plMinElem * 1.8f;
+                    const float flushThresh = (oldFlush || haveReliableDit)
+                        ? (4.0f * dit)
+                        : std::max(12.0f * dit, 900.0f);
+                    if (silenceMs > flushThresh && !flushed) {
                         if (unrealLock) {
                             _unrealWpmRejections++;
                         } else {
@@ -446,6 +497,7 @@ namespace cw {
             mfRingSum = 0;
             mfCurrentW = 0;
             preLockEvents.clear();
+            _plMinElem = 1e9f; _plMaxElem = 0.0f;
             timingWasLocked = false;
             timingFrozen = false;
             frozenDitEst = 0;
@@ -470,7 +522,13 @@ namespace cw {
         }
 
         CoreStats stats() const override {
-            return { _snr, _wpm, _confidence, timingWasLocked, frontEnd->getInputSnrDb(),
+            // Cont mode owns emission via reDecodeBuffer, which updates _committedConf
+            // (the ratchet winner's mean element confidence) — NOT _confidence, which
+            // only the streaming path touches. Report the committed value so the
+            // channel/UI/router see a real confidence instead of a stale 0.
+            const float conf = (_contRedecode && _committedConf >= 0.0f)
+                               ? _committedConf : _confidence;
+            return { _snr, _wpm, conf, timingWasLocked, frontEnd->getInputSnrDb(),
                      (int)_unrealWpmRejections };
         }
 
@@ -528,27 +586,35 @@ namespace cw {
             return std::max(5, std::min(w, 100));
         }
 
-        struct Candidate { std::string text; float conf; int n; float wpm; };
+        struct Candidate { float conf; int n; float wpm; };
 
-        // Decode a key-event stream (times in ms) with a FRESH timing+symbol chain.
-        // Live and re-detected streams go through the SAME decoder so the confidence
-        // comparison reflects only which DETECTION is cleaner.
-        Candidate decodeStream(const std::vector<SavedEvent>& evs) {
-            auto tim = timing->makeFresh(); tim->init(_internalRate);
-            auto sym = symbols->makeFresh();
+        // Decode a key-event stream (times in ms) through a caller-supplied timing+symbol
+        // chain, writing the text into `outText`. D: the chain is a PERSISTENT member,
+        // reset() here (not makeFresh()) so process() never allocates; mark scratch and
+        // outText are reused member buffers (capacity kept across cycles). Live and
+        // re-detected streams go through the SAME decoder so the confidence comparison
+        // reflects only which DETECTION is cleaner.
+        Candidate decodeStream(const std::vector<SavedEvent>& evs,
+                               ITiming* tim, ISymbolDecoder* sym, std::string& outText) {
+            tim->reset(); sym->reset();
+            outText.clear();
             // Seed the estimator (docs §16.4): estimate dit from the mark durations, prime
             // the element model, then centre the gap window from every gap — so char/word
             // spacing classifies against real data, not the 1:3:7 cold defaults.
             {
-                std::vector<float> marks;
+                _reMarks.clear();
                 float down = -1.0f;
                 for (auto& ev : evs) {
                     if (ev.keyDown) { down = ev.timeMs; }
-                    else if (down >= 0) { marks.push_back(ev.timeMs - down); down = -1.0f; }
+                    else if (down >= 0) { _reMarks.push_back(ev.timeMs - down); down = -1.0f; }
                 }
-                if (marks.size() >= 2) {
-                    std::vector<float> s = marks; std::sort(s.begin(), s.end());
-                    const float ditEst = std::max(5.0f, s[s.size() / 4]);   // lower quartile ~ dit
+                if (_reMarks.size() >= 2) {
+                    _reMarkSort = _reMarks; std::sort(_reMarkSort.begin(), _reMarkSort.end());
+                    float ditEst = std::max(5.0f, _reMarkSort[_reMarkSort.size() / 4]);   // lower quartile ~ dit
+                    // ROBUST_DIT: seed from the fade-robust envelope-autocorr estimate
+                    // instead of the fragment-poisoned mark quantile ([dit-cal]).
+                    static const bool useRobust = getenv("ROBUST_DIT") != nullptr;
+                    if (useRobust && _robustDitMs > 5.0f) { ditEst = _robustDitMs; }
                     for (int i = 0; i < 8; i++) { tim->classifyOn(ditEst); tim->classifyOn(ditEst * 3.0f); }
                 }
                 float seedUp = -1.0f;
@@ -557,7 +623,7 @@ namespace cw {
                     else { seedUp = ev.timeMs; }
                 }
             }
-            std::string text; float confSum = 0.0f; int confN = 0;
+            float confSum = 0.0f; int confN = 0;
             float lastDown = -1.0f, lastUp = -1.0f;
             for (auto& ev : evs) {
                 const float t = ev.timeMs;
@@ -566,8 +632,8 @@ namespace cw {
                         auto te = tim->classifyOff(t - lastUp);
                         if (te.gap == CHAR_GAP || te.gap == WORD_GAP) {
                             char c = sym->characterBreak();
-                            if (c) { text += c; }
-                            if (te.gap == WORD_GAP) { text += ' '; }
+                            if (c) { outText += c; }
+                            if (te.gap == WORD_GAP) { outText += ' '; }
                         }
                     }
                     lastDown = t;
@@ -585,8 +651,8 @@ namespace cw {
                 }
             }
             char c = sym->characterBreak();
-            if (c) { text += c; }
-            return { text, confN > 0 ? confSum / (float)confN : 0.0f, confN, tim->getWPM() };
+            if (c) { outText += c; }
+            return { confN > 0 ? confSum / (float)confN : 0.0f, confN, tim->getWPM() };
         }
 
         // DR-4 post-step: buffer the detection-input envelope + live events, then
@@ -620,34 +686,148 @@ namespace cw {
             }
         }
 
+        static float envF(const char* key, float def) {
+            const char* e = getenv(key); return e ? (float)atof(e) : def;
+        }
+
+        // Robust, event-INDEPENDENT dit estimate from the envelope autocorrelation:
+        // dit = K * (first zero-crossing lag). Calibrated K~0.41, stable across
+        // speed / keying-style / noise ([dit-cal], stderr ~0.00-0.02). Fade-robust
+        // (integrates over the window), so it does NOT collapse on the fragmented
+        // short marks that poison a duration-quantile seed. Research direction: the
+        // "robust speed estimate" for soft sequence decoding (docs §54, CW Skimmer).
+        // Subsampled by 2 to bound cost. Returns 0 if no crossing (unusable).
+        float robustDitMs(const float* env, int n) const {
+            const int step = 2, m = n / step;
+            if (m < 300) { return 0.0f; }
+            double mean = 0; for (int i = 0; i < n; i += step) { mean += env[i]; }
+            mean /= m;
+            double r0 = 0; for (int i = 0; i < n; i += step) { double d = env[i]-mean; r0 += d*d; }
+            if (r0 < 1e-12) { return 0.0f; }
+            const int maxLag = std::min(m/2, (int)(0.6f * _internalRate / step));
+            const float dtMs = 1000.0f / _internalRate * step;
+            float prev = 1.0f;
+            for (int lag = 1; lag < maxLag; lag++) {
+                double s = 0; const int hi = n - lag*step;
+                for (int i = 0; i < hi; i += step) { s += (double)(env[i]-mean)*(env[i+lag*step]-mean); }
+                float r = (float)(s / r0);
+                if (prev >= 0 && r < 0) {
+                    float frac = prev / (prev - r);
+                    return (lag - 1 + frac) * dtMs * ROBUST_DIT_K;
+                }
+                prev = r;
+            }
+            return 0.0f;
+        }
+        static constexpr float ROBUST_DIT_K = 0.41f;   // [dit-cal] calibrated
+
+        // Mean envelope over [a,b).
+        float meanEnv(int a, int b) const {
+            if (b <= a) { return 0.0f; }
+            double s = 0.0;
+            for (int k = a; k < b; k++) { s += (double)_reEnv[k]; }
+            return (float)(s / (double)(b - a));
+        }
+        // Fill-ratio of a gap RELATIVE TO ITS BRACKETING MARKS (fade-robust, local).
+        // fill = (gapLevel - floor) / (localMark - floor), localMark = mean of the two
+        // adjacent marks. ~0 => the gap dropped to the floor between two live marks (a
+        // real key-up); ~1 => the gap stayed at the marks' own (faded) level (a notch
+        // inside one element). A GLOBAL mark level would overestimate faded sections
+        // and wash the discrimination out — the neighbours are the right reference.
+        float gapFillLocal(int prevMarkA, int gA, int gB, int nextMarkB, float floor) const {
+            const float gap  = meanEnv(gA, gB) - floor;
+            const float mk   = 0.5f * ((meanEnv(prevMarkA, gA) - floor) + (meanEnv(gB, nextMarkB) - floor));
+            if (mk <= 1e-9f) { return 0.0f; }
+            return gap / mk;
+        }
+
+        // Option A — matched-filter element RE-GLUING (docs matched-filter-element-
+        // integrity.md §3). Merge mark-gap-mark in the re-detected stream when the gap
+        // is (1) sub-dit AND (2) never returned to the noise floor (high fill = a fade
+        // notch inside a mark, not a real key-up). Condition 2 is the new physics: a
+        // real gap reaches the floor (fill ~ 0) and is NEVER merged, so clean/handkeyed
+        // stay byte-identical by construction; only weak-signal fade splits are glued.
+        // Dit-relative window adapts to speed. DEFAULT OFF (MF_REGLUE unset) -> no-op.
+        void applyReGlue() {
+            static const bool  enable  = getenv("MF_REGLUE") != nullptr;
+            if (!enable || _reEvents.size() < 4) { return; }
+            static const float fillMin = envF("MF_FILL", 0.25f);
+            static const float ditFrac = envF("MF_DITFRAC", 2.0f);
+
+            const float floor = detector->noiseLevel();
+
+            _reMarks.clear();
+            for (size_t i = 1; i < _reEvents.size(); i++) {
+                if (_reEvents[i-1].keyDown && !_reEvents[i].keyDown) {
+                    _reMarks.push_back((float)(_reEvents[i].sampleOffset - _reEvents[i-1].sampleOffset));
+                }
+            }
+            if (_reMarks.size() < 2) { return; }
+            _reMarkSort = _reMarks; std::sort(_reMarkSort.begin(), _reMarkSort.end());
+            const float ditSamp = std::max(5.0f, _reMarkSort[_reMarkSort.size() / 4]);
+            const float maxGap  = ditFrac * ditSamp;
+
+            _reKeep.assign(_reEvents.size(), 1);
+            for (size_t i = 1; i + 2 < _reEvents.size(); i++) {
+                // gap = up(i)..down(i+1), bracketed by mark down(i-1)..up(i) and
+                // mark down(i+1)..up(i+2). Need both neighbours for the local ref.
+                if (_reEvents[i].keyDown || !_reEvents[i+1].keyDown) { continue; }
+                if (!_reEvents[i-1].keyDown || !_reEvents[i+2].keyDown) { continue; }
+                const int gA = _reEvents[i].sampleOffset, gB = _reEvents[i+1].sampleOffset;
+                const int pA = _reEvents[i-1].sampleOffset, nB = _reEvents[i+2].sampleOffset;
+                if ((float)(gB - gA) >= maxGap) { continue; }        // real gap: never merge
+                if (gapFillLocal(pA, gA, gB, nB, floor) <= fillMin) { continue; } // dropped to floor: real key-up
+                _reKeep[i] = 0; _reKeep[i+1] = 0;                    // fade notch: glue the marks
+            }
+            size_t w = 0;
+            for (size_t i = 0; i < _reEvents.size(); i++) {
+                if (_reKeep[i]) { _reEvents[w++] = _reEvents[i]; }
+            }
+            static const bool dbg = getenv("MF_DBG") != nullptr;
+            if (dbg) { fprintf(stderr, "[REGLUE] ev=%zu->%zu ditSamp=%.0f maxGap=%.0f floor=%.5f\n",
+                               _reEvents.size(), w, ditSamp, maxGap, floor); }
+            _reEvents.resize(w);
+        }
+
         // Decide the winning decode of the CURRENT window: the re-detected stream vs the
         // live event stream, scored comparably (both via decodeStream), with a margin so
         // the re-decode only overrides when CLEARLY better — keeps Farnsworth / heavy
         // noise at the live decode while holding the stationary wins. Returns its text.
-        std::string winnerText(float& outConf, float& outWpm) {
-            auto reEvents = detector->reDetect(_reEnv.data(), _reFill);
-            std::vector<SavedEvent> reSaved;
-            reSaved.reserve(reEvents.size());
-            for (auto& ev : reEvents) {
-                reSaved.push_back({ ev.keyDown, (float)ev.sampleOffset / _internalRate * 1000.0f });
+        const std::string& winnerText(float& outConf, float& outWpm) {
+            detector->reDetect(_reEnv.data(), _reFill, _reEvents);
+            applyReGlue();                       // Option A: matched-filter element re-gluing
+            _robustDitMs = robustDitMs(_reEnv.data(), _reFill);   // envelope-autocorr speed
+            _reSaved.clear();
+            for (auto& ev : _reEvents) {
+                _reSaved.push_back({ ev.keyDown, (float)ev.sampleOffset / _internalRate * 1000.0f });
             }
-            const Candidate live = decodeStream(_liveSaved);
-            const Candidate cont = decodeStream(reSaved);
+            const Candidate live = decodeStream(_liveSaved, _reTimLive.get(), _reSymLive.get(), _reTextLive);
+            const Candidate cont = decodeStream(_reSaved,   _reTimCont.get(), _reSymCont.get(), _reTextCont);
+            // §7b: replace the cont candidate's TEXT with the soft-segmentation decode
+            // (same events + the same dit estimate); the ratchet still uses the hard
+            // cont confidence/count, but a winning cont emits the un-fragmented text.
+            if (_softDecode) {
+                _softEvents.clear();
+                for (auto& e : _reSaved) { _softEvents.push_back({e.keyDown, e.timeMs}); }
+                _reTextCont = _soft.decode(_softEvents, _reTimCont->getDitDuration());
+            }
             // Override live only when the re-decode is CLEARLY more confident (margin) —
             // at the noise floor both score ~equal on garbage, so a hair-thin lead is a
             // coin flip; the margin keeps live there while real wins (cont.conf ≫ live.conf)
             // are unaffected.
             constexpr float MARGIN = 0.04f;
-            const Candidate& best =
-                (cont.n >= 3 && cont.conf > live.conf + MARGIN && cont.n >= (int)(0.6f * live.n))
-                ? cont : live;
+            const bool useCont =
+                (cont.n >= 3 && cont.conf > live.conf + MARGIN && cont.n >= (int)(0.6f * live.n));
+            const Candidate& best = useCont ? cont : live;
             outConf = best.conf; outWpm = best.wpm;
-            return best.n >= 3 ? best.text : std::string();
+            if (best.n < 3) { _reWinner.clear(); return _reWinner; }
+            _reWinner = useCont ? _reTextCont : _reTextLive;
+            return _reWinner;
         }
 
         void reDecodeBuffer(CharSink& sink) {
             float conf, wpm;
-            const std::string win = winnerText(conf, wpm);
+            const std::string& win = winnerText(conf, wpm);
             if (win.empty() && _reCommittedText.empty()) { return; }
             _committedConf = conf; _reWpm = wpm;
             sink.clearEmitted();
@@ -659,12 +839,68 @@ namespace cw {
             }
         }
 
+        // A+B (all-dah acquisition fix): joint element+gap batch estimate of dit over the
+        // buffered acquisition window, with a confidence. Elements cluster at {1,3}*dit,
+        // gaps at {1,3,7}*dit; fitting a dit-multiple "comb" to BOTH breaks the harmonic
+        // ambiguity a mark-only seed cannot -- the element gaps (~1 dit) anchor dit even
+        // when every mark is a DAH (openings O/MM/0). Confidence = fit quality * evidence.
+        void computeJointDit(const std::vector<SavedEvent>& events,
+                             float& outDit, float& outConf) const {
+            float lastDown = -1, lastUp = -1;
+            float el[64]; int nEl = 0;
+            float gp[64]; int nGp = 0;
+            for (auto& e : events) {
+                if (e.keyDown) {
+                    if (lastUp >= 0 && nGp < 64) { gp[nGp++] = e.timeMs - lastUp; }
+                    lastDown = e.timeMs;
+                } else {
+                    if (lastDown >= 0 && nEl < 64) { el[nEl++] = e.timeMs - lastDown; }
+                    lastUp = e.timeMs;
+                }
+            }
+            outDit = 0; outConf = 0;
+            if (nEl < 2) { return; }
+            const float EM[2] = { 1.0f, 3.0f };
+            const float GM[3] = { 1.0f, 3.0f, 7.0f };
+            float bestD = 0, bestErr = 1e30f;
+            for (float D = 15.0f; D <= 240.0f; D += 1.0f) {
+                float err = 0; int n = 0;
+                for (int i = 0; i < nEl; i++) {
+                    float be = 1e30f;
+                    for (float m : EM) { float r = (el[i] - m*D)/(m*D); r*=r; if (r < be) be = r; }
+                    err += be; n++;
+                }
+                for (int i = 0; i < nGp; i++) {
+                    float bg = 1e30f;
+                    for (float m : GM) { float r = (gp[i] - m*D)/(m*D); r*=r; if (r < bg) bg = r; }
+                    err += bg; n++;
+                }
+                err /= (float)std::max(1, n);
+                if (err < bestErr) { bestErr = err; bestD = D; }
+            }
+            outDit = bestD;
+            const float fit = expf(-bestErr / (0.10f * 0.10f));   // ~10% rms jitter -> ~0.37
+            const float eviN = (float)(nEl + nGp);
+            outConf = fit * (eviN / (eviN + 6.0f));
+        }
+
         void retroDecode(CharSink& sink) {
             if (preLockEvents.empty()) { return; }
 
+            // A+B: prefer the joint gap-anchored dit over the streaming estimate, but only
+            // when it is CONFIDENT (B) and MATERIALLY disagrees with the streaming dit --
+            // i.e. the streaming seed is wrong (all-dah 3x error). When they agree, keep
+            // the streaming dit so normal signals are byte-identical (no ladder regression).
             float lockedDit = timing->getDitDuration();
-            if (debugLog) fprintf(stderr, "[CW ch%d] RETRO events=%d dit=%.1f\n",
-                                  id, (int)preLockEvents.size(), lockedDit);
+            float jointDit, jointConf;
+            computeJointDit(preLockEvents, jointDit, jointConf);
+            if (jointConf >= JOINT_CONF_MIN && jointDit > 1.0f && lockedDit > 1.0f) {
+                const float ratio = jointDit / lockedDit;
+                if (ratio < 0.6f || ratio > 1.6f) { lockedDit = jointDit; }
+            }
+            if (debugLog) fprintf(stderr, "[CW ch%d] RETRO events=%d dit=%.1f (stream=%.1f joint=%.1f conf=%.2f)\n",
+                                  id, (int)preLockEvents.size(), lockedDit,
+                                  timing->getDitDuration(), jointDit, jointConf);
 
             auto retroTiming = timing->makeFresh();
             retroTiming->init(_internalRate);
@@ -701,6 +937,8 @@ namespace cw {
                     if (retroLastKeyUp >= 0) {
                         float gapMs = evt.timeMs - retroLastKeyUp;
                         auto te = retroTiming->classifyOff(gapMs);
+                        if (debugLog) fprintf(stderr, "[CW ch%d]   gap=%.0fms -> %s (conf=%.2f)\n", id, gapMs,
+                            te.gap==ELEMENT_GAP?"ELEM":te.gap==CHAR_GAP?"CHAR":"WORD", te.confidence);
                         if (te.gap == CHAR_GAP || te.gap == WORD_GAP) {
                             char c = retroSymbols->characterBreak();
                             if (c) { retroStr += c; }
@@ -714,6 +952,8 @@ namespace cw {
                         float retroMinElem = std::max(5.0f, lockedDit * 0.3f);
                         if (elemMs >= retroMinElem) {
                             auto te = retroTiming->classifyOn(elemMs);
+                            if (debugLog) fprintf(stderr, "[CW ch%d] mark=%.0fms -> %s (conf=%.2f dit=%.0f)\n", id, elemMs,
+                                te.element==DIT?"DIT":"DAH", te.confidence, retroTiming->getDitDuration());
                             retroSymbols->addElement(te.element, te.confidence);
                         }
                     }
@@ -767,6 +1007,7 @@ namespace cw {
         long long _unrealWpmRejections = 0;
         static constexpr float DIT_MIN_MS = 20.0f;   // 60 WPM
         static constexpr float DIT_MAX_MS = 240.0f;  //  5 WPM
+        static constexpr float JOINT_CONF_MIN = 0.5f;  // A+B: min joint-fit confidence to override dit
         bool ditUnreal(float ditMs) const { return ditMs < DIT_MIN_MS || ditMs > DIT_MAX_MS; }
 
         // DR-4: continuous confidence-ratcheted re-decode. Buffers the detection-input
@@ -778,6 +1019,9 @@ namespace cw {
         // blob); the ratchet makes it regression-safe (never commits a worse decode).
         // Off by default so every existing core is byte-identical.
         bool _contRedecode = false;
+        bool _softDecode = false;                   // §7b: soft-segmentation cont decode
+        SoftSeqDecoder _soft;
+        std::vector<std::pair<bool, float>> _softEvents;   // (keyDown, ms) scratch
         std::vector<float> _reEnv;          // linear envelope history (detection input)
         int _reFill = 0;
         int _reCap = 60000;                 // 60 s window at 1 kHz; slides on overflow
@@ -785,6 +1029,21 @@ namespace cw {
         float _committedConf = -1.0f;       // ratchet: best committed mean element conf
         float _reWpm = 0.0f;
         std::string _reCommittedText;       // DR-4: text from windows that have slid out
+
+        // D (RT-safety): pre-allocated scratch for the per-0.5 s re-decode so
+        // process() never allocates ([[rt-thread-no-alloc-validate-live]]). Two
+        // PERSISTENT decode chains (live + re-detected) built once and reset() per
+        // cycle instead of makeFresh(); reusable event/mark/text buffers cleared
+        // (capacity kept) per cycle. All reserved in init() under _contRedecode.
+        std::unique_ptr<ITiming> _reTimLive, _reTimCont;
+        std::unique_ptr<ISymbolDecoder> _reSymLive, _reSymCont;
+        std::vector<KeyEvent> _reEvents;     // reDetect output
+        std::vector<SavedEvent> _reSaved;    // reDetect events as SavedEvent (ms)
+        std::vector<float> _reMarks, _reMarkSort;   // decodeStream mark scratch
+        std::vector<char>  _reKeep;                 // applyReGlue keep-mask scratch
+        float _robustDitMs = 0.0f;                  // envelope-autocorr dit (this window)
+        std::string _reTextLive, _reTextCont;       // per-candidate decode text
+        std::string _reWinner;                      // winnerText return buffer
         bool _fbDecided = false;  // fb geometry committed (decide-once, no hunting)
         float _fbCurBpf = 1e9f;   // last applied fb bpf cutoff (init "unset")
         bool bpfGaveUp = false;
@@ -798,6 +1057,7 @@ namespace cw {
         long long lastEvalSample = 0;
 
         std::vector<SavedEvent> preLockEvents;
+        float _plMinElem = 1e9f, _plMaxElem = 0.0f;  // pre-lock element min/max for flush bimodality gate
         std::vector<SavedEvent> _liveSaved;  // DR-4: live key events for live-vs-re-decode
 
         bool timingWasLocked = false;

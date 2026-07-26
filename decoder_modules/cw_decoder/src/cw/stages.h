@@ -164,7 +164,12 @@ namespace cw {
         std::vector<KeyEvent> reDetect(const float* env, int count) override {
             return det.reDetect(env, count);
         }
+        void reDetect(const float* env, int count, std::vector<KeyEvent>& out) override {
+            det.reDetect(env, count, out);
+        }
         bool paramsReady() const override { return det.haveParams(); }
+        float noiseLevel() const override { return det.muLo(); }
+        float markLevel()  const override { return det.muHi(); }
         const char* name() const override { return "fb"; }
 
     private:

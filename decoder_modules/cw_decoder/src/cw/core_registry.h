@@ -40,7 +40,8 @@ namespace cw {
                 TimingStrategy timing, bool fbBpf = true,
                 float bpfCutoff = 140.0f, float bpfTrans = 140.0f,
                 float smoothCutoff = 88.0f, float smoothTrans = 100.0f,
-                bool unrealWpmGuard = false, bool contRedecode = false) {
+                bool unrealWpmGuard = false, bool contRedecode = false,
+                bool softDecode = false) {
             // Start WIDE: the forward-only detector no longer runs away on a wide
             // warmup (§52 step 4), so starting wide avoids the narrow->wide switch
             // transient on clean AND keeps high-SNR non-AWGN (hand-keyed) wide. The fb
@@ -54,7 +55,7 @@ namespace cw {
                 std::make_unique<BeamSymbolDecoder>(),
                 MF_RESET, 1.0f, /*adaptiveBpf=*/false, false, false,
                 /*matchedFilter=*/false, /*fbBpf=*/fbBpf, /*unrealWpmGuard=*/unrealWpmGuard,
-                /*contRedecode=*/contRedecode);
+                /*contRedecode=*/contRedecode, /*softDecode=*/softDecode);
         }
 
         // Likelihood-ratio detector (docs §24). Its own factory: the CUSUM
@@ -180,12 +181,29 @@ namespace cw {
             {"legacy+fb+sel+cont", "fb + SELECT timing + continuous re-decode (DR-4)",
              []{ return detail::makeFB(TIMING_SELECT, /*fbBpf=*/true, 140.0f, 140.0f, 88.0f, 100.0f, /*unrealWpmGuard=*/false, /*contRedecode=*/true); }},
 
+            // §7b: fb+sel+cont with SOFT-SEGMENTATION cont decode — the trellis forks
+            // merge/split at each marginal gap so a fade-split dah is recovered by the
+            // valid-Morse prior instead of frozen as dit-gap-dit. Structural, no vocab.
+            {"legacy+fb+soft", "fb + SELECT timing + soft-segmentation continuous re-decode (§7b)",
+             []{ return detail::makeFB(TIMING_SELECT, /*fbBpf=*/true, 140.0f, 140.0f, 88.0f, 100.0f, /*unrealWpmGuard=*/false, /*contRedecode=*/true, /*softDecode=*/true); }},
+
             // Regime router (§52 step 4B): select by default, fb in heavy broadband
             // noise. Captures fb's fast+heavy-AWGN wins without its weak-regime harm.
             {"legacy+route", "Regime router: select, or fb when buried in broadband noise",
              []{ return std::make_unique<RegimeRouteCore>(
                      detail::makeStaged(TIMING_SELECT),
                      detail::makeFB(TIMING_KALMAN, /*fbBpf=*/true)); }},
+
+            // §7c: router with the CONT fb sub-core + the select-confidence correctness
+            // discriminator. Routes to fb when select is confidently WRONG (selConf<gate)
+            // — the valid-but-wrong regimes the token ratio misses (real fading signal:
+            // 0.79->0.53). Candidate for DEFAULT pending the promotion gate.
+            {"legacy+route+cont", "Regime router + cont fb + select-confidence gate (§7c)",
+             []{ return std::make_unique<RegimeRouteCore>(
+                     detail::makeStaged(TIMING_SELECT),
+                     detail::makeFB(TIMING_SELECT, /*fbBpf=*/true, 140.0f, 140.0f, 88.0f, 100.0f,
+                                    /*unrealWpmGuard=*/false, /*contRedecode=*/true),
+                     /*selConfGate=*/0.15f); }},
 
             {"legacy+fb+wide", "Forward-backward soft detector, fixed wide BPF (no adaptation)",
              []{ return detail::makeFB(TIMING_KALMAN, /*fbBpf=*/false, 140.0f, 140.0f, 88.0f, 100.0f); }},
@@ -352,5 +370,5 @@ namespace cw {
     // taps in place, skip no-op changes). Router+arbitration: src/cw/regime_route.h;
     // fb detector: src/cw/fb_detector.h. Revert to "legacy+select" is one line if the
     // live test still regresses.
-    inline constexpr const char* DEFAULT_CORE = "legacy+route";
+    inline constexpr const char* DEFAULT_CORE = "legacy+route+cont";
 }

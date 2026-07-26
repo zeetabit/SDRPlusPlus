@@ -1,8 +1,10 @@
 #pragma once
 #include <imgui.h>
+#include <imgui/imgui_internal.h>
 #include <gui/style.h>
 #include <gui/widgets/snr_meter.h>
 #include <string>
+#include <vector>
 #include <algorithm>
 #include "channel_manager.h"
 
@@ -77,59 +79,26 @@ namespace cw {
         ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
         ImGui::SNRMeter(ch->snr);
 
-        // Decoded text — per-char confidence coloring + corrected highlight.
-        // High confidence (>0.8): full white. Medium (0.4-0.8): dimmed.
-        // Low (<0.4): gray. Corrected chars: light blue tint.
-        auto entries = ch->text.getEntries();
+        // Decoded text — read-only, mouse-selectable + Ctrl+C copyable. A plain
+        // ImGui text box is the only widget with native text selection, so the
+        // per-char confidence coloring/tooltips are traded for selectability.
+        // Buffer is a reused UI-thread scratch (menu is single-threaded).
         float textHeight = 50.0f * style::uiScale;
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.05f, 0.05f, 0.05f, 1.0f));
-        ImGui::BeginChild("##decoded", ImVec2(ImGui::GetContentRegionAvail().x, textHeight), true);
-        if (entries.empty()) {
-            ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 0.6f), "(listening...)");
-        }
-        else {
-            float wrapWidth = ImGui::GetContentRegionAvail().x;
-            float x = ImGui::GetCursorPosX();
-            for (auto& e : entries) {
-                // Compute color from confidence + corrected flag
-                float alpha;
-                if (e.confidence > 0.8f) alpha = 1.0f;
-                else if (e.confidence > 0.4f) alpha = 0.6f;
-                else alpha = 0.35f;
-
-                ImVec4 color;
-                if (e.corrected) {
-                    // Light blue tint for corrected characters
-                    color = ImVec4(0.5f, 0.8f, 1.0f, alpha);
-                } else {
-                    color = ImVec4(1.0f, 1.0f, 1.0f, alpha);
-                }
-
-                // Word wrap: track x position, only SameLine when staying on same row
-                char buf[2] = {e.character, 0};
-                float charWidth = ImGui::CalcTextSize(buf).x;
-                bool wrap = (x + charWidth > wrapWidth && e.character != ' ');
-
-                if (!wrap && x > ImGui::GetCursorPosX() + 0.1f) {
-                    ImGui::SameLine(0, 0);
-                }
-                if (wrap) {
-                    x = ImGui::GetCursorPosX();
-                }
-
-                ImGui::TextColored(color, "%c", e.character);
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("'%c' conf=%.0f%%%s",
-                        e.character, e.confidence * 100.0f,
-                        e.corrected ? " (corrected)" : "");
-                }
-                x += charWidth;
+        std::string txt = ch->text.getText();
+        static std::vector<char> textBuf;
+        textBuf.assign(txt.begin(), txt.end());
+        textBuf.push_back('\0');
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.05f, 0.05f, 0.05f, 1.0f));
+        ImGui::InputTextMultiline("##decoded", textBuf.data(), textBuf.size(),
+            ImVec2(ImGui::GetContentRegionAvail().x, textHeight),
+            ImGuiInputTextFlags_ReadOnly);
+        // Auto-scroll to the newest text (streaming decode) UNLESS the user is
+        // interacting (selecting/scrolling), so selection is never yanked away.
+        if (!ImGui::IsItemActive()) {
+            if (ImGuiWindow* cw = ImGui::FindWindowByID(ImGui::GetID("##decoded"))) {
+                cw->Scroll.y = cw->ScrollMax.y;
             }
         }
-        if (ImGui::GetScrollY() < ImGui::GetScrollMaxY()) {
-            ImGui::SetScrollHereY(1.0f);
-        }
-        ImGui::EndChild();
         ImGui::PopStyleColor();
 
         // Action buttons
@@ -171,11 +140,13 @@ namespace cw {
         float zeroSnr = 0;
         ImGui::SNRMeter(zeroSnr);
 
-        // Text area (matches active channel height)
+        // Text area (matches active channel height + selectable-box styling)
         float textHeight = 50.0f * style::uiScale;
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.05f, 0.05f, 0.05f, 1.0f));
-        ImGui::BeginChild("##decoded", ImVec2(ImGui::GetContentRegionAvail().x, textHeight), true);
-        ImGui::EndChild();
+        static char emptyBuf[1] = {0};
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.05f, 0.05f, 0.05f, 1.0f));
+        ImGui::InputTextMultiline("##decoded", emptyBuf, sizeof(emptyBuf),
+            ImVec2(ImGui::GetContentRegionAvail().x, textHeight),
+            ImGuiInputTextFlags_ReadOnly);
         ImGui::PopStyleColor();
 
         // Buttons

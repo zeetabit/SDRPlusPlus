@@ -5,6 +5,7 @@
 #include <utility>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 namespace cw {
 
@@ -41,7 +42,7 @@ namespace cw {
             _rEnv.assign(R, 0.0f); _rMuLo.assign(R, 0.0f); _rMuHi.assign(R, 0.0f);
             _rVLo.assign(R, 1.0f); _rVHi.assign(R, 1.0f);
             _rA0.assign(R, 0.5); _rA1.assign(R, 0.5);
-            _emitState = 0; _rawRun = 0; _rawState = 0;
+            _emitState = 0; _rawRun = 0; _rawState = 0; _spaceMin = 1e30f;
             _wLo = _wXLo = _wXXLo = _wHi = _wXHi = _wXXHi = 0.0;
         }
 
@@ -61,7 +62,7 @@ namespace cw {
 
                 forwardStep(x);                       // updates _a0,_a1 + lag ring
                 if (_haveParams) { updateEmission(x); }
-                if (_fwdOnly) { fwdDecide(blockStart, out); }
+                if (_fwdOnly) { fwdDecide(x, blockStart, out); }
                 else if (_abs >= LAG) { finalize(_abs - LAG, blockStart, out); }
                 _abs++;
             }
@@ -71,6 +72,10 @@ namespace cw {
         float getSNR() const { return _snrDb; }
         bool isKeyDown() const { return _keyDown; }
         void preseed(float level, int count) { (void)level; (void)count; }
+        // Emission model levels (online-EM). Used by the re-decode matched-filter
+        // element-integrity pass to normalise gap/element energy vs the noise floor.
+        float muLo() const { return _muLo; }
+        float muHi() const { return _muHi; }
 
     private:
         static constexpr int LAG         = 48;    // fixed smoothing lag (samples)
@@ -80,6 +85,75 @@ namespace cw {
         static constexpr float SWITCH_P  = 0.01f; // HMM transition prior
         static constexpr float FIT_LLR_MIN = 0.02f; // min bimodality to adopt a refit
         static constexpr double ONLINE_LAM = 0.003;  // online-EM forgetting (~0.33s eff)
+
+        // FB_STICK (A/B, read once): asymmetric transition prior. A mark is a
+        // CONTIGUOUS key-down, so an envelope dip inside a mark is a fade/noise
+        // artifact, not a real key-up — while a genuine gap accumulates sustained
+        // space-evidence and still crosses. Making mark->space stickier than
+        // space->mark rejects fade-SPLITTING by evidence duration (§20.8) with no
+        // magnitude gate. FB_STICK sets the mark->space cross prob; clamped to
+        // (0, SWITCH_P] so it can only ADD stickiness. Unset -> == SWITCH_P ->
+        // byte-identical to the symmetric legacy prior.
+        static double markCross() {
+            static const double v = []() {
+                const char* e = std::getenv("FB_STICK");
+                double d = e ? atof(e) : (double)SWITCH_P;
+                return (d > 0.0 && d <= (double)SWITCH_P) ? d : (double)SWITCH_P;
+            }();
+            return v;
+        }
+
+        // Debounce-floor experiment (2026-07-25, weak-signal element-splitting).
+        // The false split is a mark chopped by a spurious SPACE, and the flood of
+        // sub-dit fragment MARKS, both 12-20 ms ([replay-events] histogram) clearing
+        // the 12 ms MIN_RUN floor; a real element/mark is >=1 dit (>=40 ms even at
+        // 30 wpm). A SYMMETRIC raise to ~18 ms fixes the real fading recording
+        // (fb+sel CER 0.74->0.50, recovers OUT/COME/ONE) but regresses handkeyed/
+        // contest on [cont] — the extra debounce reshapes edges under keying jitter,
+        // and contrast/asymmetry gating cannot separate the two (weak-fading and
+        // handkeyed keying statistics overlap). FINDING, not shipped: both floors
+        // default to MIN_RUN -> BYTE-IDENTICAL to legacy. FB_MARKFLOOR / FB_SPACEFLOOR
+        // raise each independently for further A/B on the weak-signal axis.
+        static int markFloor() {
+            static const int v = []() {
+                const char* e = std::getenv("FB_MARKFLOOR");
+                int d = e ? atoi(e) : MIN_RUN;
+                return (d >= MIN_RUN && d <= 60) ? d : MIN_RUN;
+            }();
+            return v;
+        }
+        static int spaceFloor() {
+            static const int v = []() {
+                const char* e = std::getenv("FB_SPACEFLOOR");
+                int d = e ? atoi(e) : MIN_RUN;
+                return (d >= MIN_RUN && d <= 60) ? d : MIN_RUN;
+            }();
+            return v;
+        }
+        // pendingState==1 -> committing to MARK; ==0 -> committing to SPACE.
+        static int effMinRun(uint8_t pendingState) {
+            return pendingState == 1 ? markFloor() : spaceFloor();
+        }
+
+        // Depth-gated key-up (2026-07-25, the matched-filter element-integrity fix).
+        // [replay-events] dip-depth: a REAL inter-element gap returns to the noise
+        // floor (depth ~0); a fade notch INSIDE a mark dips only PARTWAY (depth
+        // 0.1-0.5) and never reaches the floor — it is not a real key-up. So commit
+        // a mark->space transition ONLY if the envelope minimum over the pending
+        // space run dropped near the floor: min < muLo + DEPTH_FRAC*(muHi-muLo).
+        // A fade-dip that stays high is rejected (the mark stays contiguous). This
+        // is orthogonal to duration/contrast and should be zero-regression: clean/
+        // handkeyed real gaps reach the floor (depth ~0) and pass unchanged; only
+        // weak-signal fade-dips are rejected. DEFAULT OFF (FRAC>=1 -> always pass)
+        // -> byte-identical. FB_DEPTH sets the fraction in [0,1].
+        static float depthFrac() {
+            static const float v = []() {
+                const char* e = std::getenv("FB_DEPTH");
+                float f = e ? (float)atof(e) : 1.0f;   // >=1 => gate never blocks
+                return (f >= 0.0f && f <= 1.0f) ? f : 1.0f;
+            }();
+            return v;
+        }
 
         void refit() {
             _sinceRefit = 0;
@@ -145,10 +219,12 @@ namespace cw {
         }
 
         void forwardStep(float x) {
-            const double stay = 1.0 - SWITCH_P, cross = SWITCH_P;
+            const double mc = markCross();               // mark->space (<= SWITCH_P)
+            const double staySpace = 1.0 - SWITCH_P, toMark = SWITCH_P;   // space row
+            const double stayMark = 1.0 - mc, toSpace = mc;               // mark row
             double e0, e1; emitLL(x, _muLo, _muHi, _vLo, _vHi, e0, e1);
-            double x0 = (_a0*stay + _a1*cross) * e0;
-            double x1 = (_a1*stay + _a0*cross) * e1;
+            double x0 = (_a0*staySpace + _a1*toSpace) * e0;
+            double x1 = (_a1*stayMark + _a0*toMark) * e1;
             double s = 1.0 / (x0 + x1 + 1e-300);
             _a0 = x0*s; _a1 = x1*s;
             _keyDown = _a1 > _a0;
@@ -163,11 +239,17 @@ namespace cw {
         // min-run debounce adds a small CONSTANT detection delay (cancels in timing).
         // No backward => none of the fixed-lag/windowed-emission boundary drift that
         // char-splits high-SNR signals under narrow smoothing (§52 step 4, user).
-        void fwdDecide(long long blockStart, std::vector<KeyEvent>& out) {
+        void fwdDecide(float x, long long blockStart, std::vector<KeyEvent>& out) {
             uint8_t raw = (_a1 > _a0) ? 1 : 0;
-            if (raw == _rawState) { _rawRun++; }
-            else { _rawState = raw; _rawRun = 1; }
-            if (_rawState != _emitState && _rawRun >= MIN_RUN) {
+            if (raw == _rawState) { _rawRun++; _spaceMin = std::min(_spaceMin, x); }
+            else { _rawState = raw; _rawRun = 1; _spaceMin = x; }
+            if (_rawState != _emitState && _rawRun >= effMinRun(_rawState)) {
+                // Depth gate: reject a mark->space commit whose envelope never
+                // reached near the noise floor (a fade dip, not a real key-up).
+                if (_rawState == 0 && depthFrac() < 1.0f) {
+                    const float thr = _muLo + depthFrac() * (_muHi - _muLo);
+                    if (_spaceMin > thr) { return; }   // hold the mark; re-check next sample
+                }
                 _emitState = _rawState;
                 KeyEvent ev; ev.keyDown = (_emitState == 1);
                 ev.sampleOffset = (int)(_abs - blockStart);
@@ -194,7 +276,7 @@ namespace cw {
             // commit a flip only after MIN_RUN consecutive raw samples agree.
             if (map == _rawState) { _rawRun++; }
             else { _rawState = map; _rawRun = 1; }
-            if (_rawState != _emitState && _rawRun >= MIN_RUN) {
+            if (_rawState != _emitState && _rawRun >= effMinRun(_rawState)) {
                 _emitState = _rawState;
                 KeyEvent ev; ev.keyDown = (_emitState == 1);
                 // Report at the current head (offset in [0,count)); this shifts every
@@ -215,25 +297,65 @@ namespace cw {
         // call repeatedly for the continuous confidence-ratcheted re-decode.
         std::vector<KeyEvent> reDetect(const float* env, int count) const {
             std::vector<KeyEvent> out;
-            if (!_haveParams || count <= 0) { return out; }
-            const float muLo = _muLo, muHi = _muHi, vLo = _vLo, vHi = _vHi;
-            const double stay = 1.0 - SWITCH_P, cross = SWITCH_P;
+            reDetect(env, count, out);
+            return out;
+        }
+        // D (RT-safety): alloc-free overload — writes into a caller-owned vector
+        // (pre-reserved by the continuous re-decode) so process() never allocates.
+        //
+        // B (first-char, 2026-07-25): θ-REFIT re-detection. WARM-START from the matured
+        // live θ + online-EM sufficient stats, then adapt LOCALLY down the window with
+        // the SAME recursive EM the live pass uses (updateEmission). Rationale from the
+        // [onset-env] trace: the first char's intra-element gaps ARE present in the
+        // envelope, so the merge is not a front-end defect — it is that a single frozen
+        // θ cannot fit a NON-STATIONARY onset (the fbBpf fast-gate switches wide→narrow
+        // across the first char, so the onset gaps sit higher than the narrow-tail muLo
+        // the live θ converged to → the forward filter holds key-down through them →
+        // merge). A warm start makes the pass well-conditioned from sample 0 (unlike the
+        // COLD live pass, which is exactly what mangles the onset live), and local EM
+        // tracks the scale change so muLo rises over the onset and the gaps segment.
+        void reDetect(const float* env, int count, std::vector<KeyEvent>& out) const {
+            out.clear();
+            if (!_haveParams || count <= 0) { return; }
+            float muLo = _muLo, muHi = _muHi, vLo = _vLo, vHi = _vHi;
+            double wHi = _wHi, wXHi = _wXHi, wXXHi = _wXXHi;
+            double wLo = _wLo, wXLo = _wXLo, wXXLo = _wXXLo;
+            const double mc = markCross();
+            const double staySpace = 1.0 - SWITCH_P, toMark = SWITCH_P;
+            const double stayMark = 1.0 - mc, toSpace = mc;
             double la0 = 0.5, la1 = 0.5;
-            uint8_t lraw = 0, lemit = 0; int lrun = 0;
+            uint8_t lraw = 0, lemit = 0; int lrun = 0; float lSpaceMin = 1e30f;
             for (int k = 0; k < count; k++) {
-                double e0, e1; emitLL(env[k], muLo, muHi, vLo, vHi, e0, e1);
-                double x0 = (la0*stay + la1*cross) * e0;
-                double x1 = (la1*stay + la0*cross) * e1;
+                const float x = env[k];
+                double e0, e1; emitLL(x, muLo, muHi, vLo, vHi, e0, e1);
+                double x0 = (la0*staySpace + la1*toSpace) * e0;
+                double x1 = (la1*stayMark + la0*toMark) * e1;
                 double s = 1.0 / (x0 + x1 + 1e-300); la0 = x0*s; la1 = x1*s;
+                // Local online-EM (mirror of updateEmission) on window-local copies.
+                const double lam = ONLINE_LAM, keep = 1.0 - lam, rHi = la1, rLo = la0;
+                wHi  = keep*wHi  + lam*rHi;      wLo  = keep*wLo  + lam*rLo;
+                wXHi = keep*wXHi + lam*rHi*x;    wXLo = keep*wXLo + lam*rLo*x;
+                wXXHi= keep*wXXHi+ lam*rHi*x*x;  wXXLo= keep*wXXLo+ lam*rLo*x*x;
+                if (wHi > 1e-4 && wLo > 1e-4) {
+                    double mH = wXHi/wHi, mL = wXLo/wLo;
+                    if (mH > mL + 1e-6) {
+                        double vf = 0.2*(mH-mL); vf *= vf;
+                        muHi = (float)mH; muLo = (float)mL;
+                        vHi = (float)std::max(wXXHi/wHi - mH*mH, vf);
+                        vLo = (float)std::max(wXXLo/wLo - mL*mL, vf);
+                    }
+                }
                 uint8_t raw = (la1 > la0) ? 1 : 0;
-                if (raw == lraw) { lrun++; } else { lraw = raw; lrun = 1; }
-                if (lraw != lemit && lrun >= MIN_RUN) {
+                if (raw == lraw) { lrun++; lSpaceMin = std::min(lSpaceMin, x); }
+                else { lraw = raw; lrun = 1; lSpaceMin = x; }
+                if (lraw != lemit && lrun >= effMinRun(lraw)) {
+                    if (lraw == 0 && depthFrac() < 1.0f
+                        && lSpaceMin > muLo + depthFrac() * (muHi - muLo)) { continue; }
                     lemit = lraw;
                     KeyEvent ev; ev.keyDown = (lemit == 1); ev.sampleOffset = k;
                     out.push_back(ev);
                 }
             }
-            return out;
         }
         bool haveParams() const { return _haveParams; }
 
@@ -255,6 +377,7 @@ namespace cw {
         std::vector<double> _rA0, _rA1;
 
         uint8_t _emitState = 0, _rawState = 0; int _rawRun = 0;
+        float _spaceMin = 1e30f;   // min envelope over the pending space run (depth gate)
         // Recursive online-EM sufficient statistics (posterior-weighted, forgetting).
         double _wLo = 0, _wXLo = 0, _wXXLo = 0, _wHi = 0, _wXHi = 0, _wXXHi = 0;
     };

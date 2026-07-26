@@ -236,13 +236,13 @@ TEST_CASE("Replay: core A/B on the extracted real signal", "[cw][.][replay-cores
     printf("\n=== Core A/B on tone %+.0f Hz  (%s) ===\n\n", tone, wav);
 
     const char* cores[] = { "legacy", "legacy+select", "legacy+fb",
-                            "legacy+fb+sel", "legacy+route", "legacy+lr+log" };
-    printf("  %-16s | sngl/tot | run | text\n", "core");
-    printf("  -----------------+----------+-----+-----\n");
+                            "legacy+fb+sel", "legacy+fb+sel+cont", "legacy+route" };
+    printf("  %-18s | conf | mfit | sngl/tot | run | text\n", "core");
+    printf("  -------------------+------+------+----------+-----+-----\n");
     for (const char* core : cores) {
         cw::Channel ch;
         ch.init(0, tone, core);
-        if (ch.coreName() != core) { printf("  %-16s | (unavailable)\n", core); continue; }
+        if (ch.coreName() != core) { printf("  %-18s | (unavailable)\n", core); continue; }
         for (int off = 0; off + 1 <= (int)s3.size(); off += 512) {
             int n = std::min(512, (int)s3.size() - off);
             ch.process(n, &s3[off]);
@@ -250,7 +250,10 @@ TEST_CASE("Replay: core A/B on the extracted real signal", "[cw][.][replay-cores
         std::string txt = ch.text.getText();
         int single, run, total;
         garbageStats(txt, single, run, total);
-        printf("  %-16s | %4d/%-3d | %3d | \"%s\"\n", core, single, total, run, txt.c_str());
+        // conf = decode confidence, mfit = envelope model-fit — candidate router
+        // correctness discriminators: does the RIGHT core report higher?
+        printf("  %-18s | %.2f | %.2f | %4d/%-3d | %3d | \"%s\"\n",
+               core, ch.confidence, ch.modelFit, single, total, run, txt.c_str());
     }
     printf("\n  sngl/tot = single-element (E/T) chars over total; run = longest E/T run.\n"
            "  A cleaner decoder shows a SHORTER longest-run at similar length.\n\n");
@@ -335,15 +338,190 @@ TEST_CASE("Replay: router arbitration on the real signal", "[cw][.][route-why]")
     auto s3 = loadDecimated8k(wav, offset, fs);
     REQUIRE(fs == Approx(8000.0));
 
+    const char* rcore = std::getenv("CW_ROUTE_CORE"); if (!rcore) rcore = "legacy+route";
     cw::RegimeRouteCore::debug = true;
-    printf("\n=== router arbitration @ %+.0f Hz  (gate: fbGood>=3, selRatio<0.6, "
-           "fbRatio>selRatio+0.25, fbContrast<5.5, inputSnr<8) ===\n", tone);
+    printf("\n=== router arbitration (%s) @ %+.0f Hz  (gate: fbGood>=3, selRatio<0.6, "
+           "fbRatio>selRatio+0.25, fbContrast<5.5, inputSnr<8) ===\n", rcore, tone);
     cw::Channel ch;
-    ch.init(0, tone, "legacy+route");
+    ch.init(0, tone, rcore);
     for (int off = 0; off + 1 <= (int)s3.size(); off += 512) {
         int n = std::min(512, (int)s3.size() - off);
         ch.process(n, &s3[off]);
     }
     cw::RegimeRouteCore::debug = false;
     printf("  route text: \"%s\"\n\n", ch.text.getText().c_str());
+}
+
+// Characterize the fb fragmentation to a MECHANISM: run the real front end + fb
+// detector directly and dump the mark/space DURATION stream (1 kHz internal ->
+// 1 sample = 1 ms). A healthy dah is one contiguous ~3-dit mark; a SPLIT dah is
+// mark / short-gap / mark. Seeing the durations tells split-vs-merge, and where.
+#include <cw/stages.h>
+TEST_CASE("Replay: fb element/gap durations on the real signal", "[cw][.][replay-events]") {
+    const char* wav = std::getenv("CW_REPLAY_WAV");
+    if (!wav) { WARN("set CW_REPLAY_WAV to run"); return; }
+    double offset = envd("CW_REPLAY_OFFSET_HZ", 36545.0);
+    float tone = (float)envd("CW_REPLAY_TONE", 1000.0);
+    double t0 = envd("CW_EV_T0", 0.0), t1 = envd("CW_EV_T1", 1e9);
+    double fs = 0;
+    auto s3 = loadDecimated8k(wav, offset, fs);
+    REQUIRE(fs == Approx(8000.0));
+
+    // Match the fb CORE's front end (core_registry makeFB: 140/140/88/100), NOT
+    // the EnvelopeFrontEnd default — the earlier 100/100 mismatch gave contrast/
+    // dip numbers that did not represent what the core's fb actually sees.
+    cw::EnvelopeFrontEnd fe(140.0f, 140.0f, 88.0f, 100.0f);
+    fe.init(tone, (float)fs, 1000.0f);
+    cw::FBDetector det;
+    det.init(1000.0f);
+
+    std::vector<float> env(1024);
+    std::vector<float> allEnv;                       // full envelope, for dip-depth
+    std::vector<std::pair<bool,long long>> edges;   // (keyDown, absEnvSample)
+    long long envAbs = 0;
+    int snrBins[16] = {0}; int snrN = 0; double snrSum = 0;
+    for (int off = 0; off + 1 <= (int)s3.size(); off += 512) {
+        int n = std::min(512, (int)s3.size() - off);
+        int m = fe.process(n, &s3[off], env.data());
+        auto evs = det.process(env.data(), m);
+        for (auto& e : evs) { edges.push_back({ e.keyDown, envAbs + e.sampleOffset }); }
+        allEnv.insert(allEnv.end(), env.data(), env.data() + m);
+        envAbs += m;
+        float sn = det.getSNR();
+        if (sn > 0) { snrBins[std::min(15, (int)sn)]++; snrN++; snrSum += sn; }
+    }
+    // CLOCK-RECOVERY test (synchronous-detection direction): can a dit-grid be
+    // recovered from the FADING envelope? Two standard measures over the window
+    // (and, to test QSB robustness, over its strong first third vs faded regions).
+    auto clockProbe = [](const std::vector<float>& e, int lo, int hi, const char* tag) {
+        const int N = hi - lo;
+        if (N < 600) { return; }
+        double mean = 0; for (int i = lo; i < hi; i++) { mean += e[i]; } mean /= N;
+        // (1) Normalised autocorrelation of the mean-removed envelope, 0..280 ms.
+        double r0 = 0; for (int i = lo; i < hi; i++) { double d = e[i]-mean; r0 += d*d; }
+        r0 = std::max(r0, 1e-12);
+        printf("  [%s] envelope autocorr R(tau)/R(0), tau=0..280ms (step 10):\n   ", tag);
+        float acf[29];
+        for (int L = 0; L <= 28; L++) {
+            int lag = L*10; double s = 0;
+            for (int i = lo; i < hi-lag; i++) { s += (double)(e[i]-mean)*(e[i+lag]-mean); }
+            acf[L] = (float)(s / r0);
+            printf("%+.2f ", acf[L]);
+        }
+        printf("\n");
+        // first local MAX after the zero-lag lobe dips below 0.2 -> keying scale
+        int firstMax = -1; bool dipped = false;
+        for (int L = 1; L <= 27; L++) {
+            if (acf[L] < 0.2f) dipped = true;
+            if (dipped && acf[L] > acf[L-1] && acf[L] >= acf[L+1] && acf[L] > 0.1f) { firstMax = L*10; break; }
+        }
+        // (2) Grid-fold clock search: for trial dit T (+best phase), fraction of
+        // dit-cells that are UNAMBIGUOUS (mean near floor or near peak). Peaks at
+        // the true dit if the keying aligns to a recoverable grid.
+        std::vector<float> se(e.begin()+lo, e.begin()+hi); std::sort(se.begin(), se.end());
+        float fl = se[se.size()/20], pk = se[se.size()*19/20], sp = std::max(1e-6f, pk-fl);
+        float bestT = 0, bestScore = 0;
+        for (float T = 35; T <= 120; T += 1.0f) {
+            float tBest = 0;
+            for (int ph = 0; ph < (int)T; ph += std::max(1,(int)T/6)) {
+                int nc = (N-ph)/(int)T, unamb = 0;
+                for (int c = 0; c < nc; c++) {
+                    int a = lo+ph+c*(int)T; double m=0; for (int k=0;k<(int)T;k++) m+=e[a+k]; m/=(int)T;
+                    float nz=((float)m-fl)/sp; if (nz<0.30f||nz>0.70f) unamb++;
+                }
+                float s = nc? (float)unamb/nc : 0; if (s>tBest) tBest=s;
+            }
+            if (tBest > bestScore) { bestScore = tBest; bestT = T; }
+        }
+        printf("  [%s] autocorr firstPeak=%dms   grid-fold best dit=%.0fms (unamb %.2f)\n",
+               tag, firstMax, bestT, bestScore);
+    };
+    clockProbe(allEnv, 0, (int)allEnv.size(), "ALL");
+    clockProbe(allEnv, 0, (int)allEnv.size()/3, "1st-3rd");
+    clockProbe(allEnv, (int)allEnv.size()*2/3, (int)allEnv.size(), "last-3rd");
+
+    // Dip-depth test: for each GAP, the envelope minimum during it, normalised
+    // between the global noise floor (5th pct) and mark peak (95th pct). A real
+    // inter-element gap reaches the FLOOR (~0); a fade notch inside a mark dips
+    // only PARTWAY (>0). If short gaps sit high and long gaps sit at floor, then
+    // dip-depth discriminates splits from real gaps — a zero-regression fix.
+    {
+        std::vector<float> sortedEnv = allEnv;
+        std::sort(sortedEnv.begin(), sortedEnv.end());
+        float floorLvl = sortedEnv[sortedEnv.size()/20];
+        float peakLvl  = sortedEnv[sortedEnv.size()*19/20];
+        float span = std::max(1e-6f, peakLvl - floorLvl);
+        // Bucket gap dip-depth by gap-duration class (short <40ms vs long >=40ms).
+        int shortN = 0, longN = 0; double shortDepth = 0, longDepth = 0;
+        int sBins[11] = {0}, lBins[11] = {0};
+        for (size_t i = 1; i < edges.size(); i++) {
+            if (edges[i-1].first) continue;          // want SPACE intervals
+            long long a = edges[i-1].second, b = edges[i].second;
+            if (a < 0 || b > (long long)allEnv.size()) continue;
+            float mn = 1e30f;
+            for (long long k = a; k < b; k++) { mn = std::min(mn, allEnv[k]); }
+            float depth = (mn - floorLvl) / span;    // 0 = at floor, 1 = at peak
+            int dur = (int)(b - a);
+            int bin = std::max(0, std::min(10, (int)(depth * 10)));
+            if (dur < 40) { shortN++; shortDepth += depth; sBins[bin]++; }
+            else          { longN++;  longDepth  += depth; lBins[bin]++; }
+        }
+        printf("\n=== gap DIP-DEPTH (0=noise floor, 1=mark peak) ===\n");
+        printf("  SHORT gaps (<40ms, n=%d) mean depth %.2f  hist[.0..1.0]:",
+               shortN, shortN ? shortDepth/shortN : 0.0);
+        for (int b = 0; b <= 10; b++) printf(" %d", sBins[b]);
+        printf("\n  LONG  gaps (>=40ms, n=%d) mean depth %.2f  hist[.0..1.0]:",
+               longN, longN ? longDepth/longN : 0.0);
+        for (int b = 0; b <= 10; b++) printf(" %d", lBins[b]);
+        printf("\n");
+    }
+    printf("\n=== fb keying-contrast SNR (dB): mean=%.2f  hist[1dB bins 0..11]:",
+           snrN ? snrSum/snrN : 0.0);
+    for (int b = 0; b < 12; b++) { printf(" %d:%d", b, snrBins[b]); }
+    printf(" ===\n");
+
+    // Durations between consecutive edges = element (mark) / gap (space) lengths.
+    // At 1 kHz, sample count == ms. Estimate dit as the 20th-pct of mark lengths.
+    // A key-DOWN edge opens a MARK interval; a key-UP edge opens a SPACE interval.
+    std::vector<int> markDur;
+    for (size_t i = 1; i < edges.size(); i++) {
+        if (edges[i-1].first) markDur.push_back((int)(edges[i].second - edges[i-1].second));
+    }
+    int dit = 60;
+    if (!markDur.empty()) {
+        std::vector<int> s = markDur; std::sort(s.begin(), s.end());
+        dit = std::max(20, s[s.size()/5]);            // 20th percentile mark ~ dit
+    }
+    // Duration histograms (20 ms bins) expose the populations: fragments vs dit
+    // vs dah for marks; false-split vs element vs char vs word for gaps.
+    auto hist = [](const char* lbl, std::vector<int>& v) {
+        int bins[16] = {0};
+        for (int d : v) { int b = std::min(15, d / 20); bins[b]++; }
+        printf("  %s (20ms bins):", lbl);
+        for (int b = 0; b < 12; b++) { printf(" %d:%d", b*20, bins[b]); }
+        printf("\n");
+    };
+    std::vector<int> gapDur;
+    for (size_t i = 1; i < edges.size(); i++) {
+        if (!edges[i-1].first) gapDur.push_back((int)(edges[i].second - edges[i-1].second));
+    }
+    hist("MARK", markDur);
+    hist("GAP ", gapDur);
+
+    printf("\n=== fb events @ %+.0f Hz  dit~%dms  (M=mark S=space, [t0=%.1f t1=%.1f]) ===\n",
+           tone, dit, t0, t1);
+    auto cls = [&](bool mark, int d) -> const char* {
+        if (mark) return d < 2*dit ? "." : "-";
+        if (d < 2*dit) return "|";                    // element gap (~1 dit)
+        if (d < 5*dit) return " / ";                  // char gap (~3 dit)
+        return " // ";                                // word gap (~7 dit)
+    };
+    for (size_t i = 1; i < edges.size(); i++) {
+        bool mark = edges[i-1].first;                 // interval prev..cur
+        int d = (int)(edges[i].second - edges[i-1].second);
+        double ts = edges[i-1].second / 1000.0;
+        if (ts < t0 || ts > t1) continue;
+        printf("  %6.2fs %s%-4d %s\n", ts, mark ? "M" : "S", d, cls(mark, d));
+    }
+    printf("\n");
 }

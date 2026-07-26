@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <mutex>
+#include <atomic>
 
 #define CW_MAX_CHANNELS_HARD  20
 #define CW_MAX_CHANNELS_DEFAULT 10
@@ -86,6 +87,13 @@ namespace cw {
         // Called from DSP thread: feed IQ to scanner + existing channels.
         // Does NOT modify the entries vector.
         void process(dsp::complex_t* data, int count) {
+            // Frequency switch (UI thread) requests a decode-state reset; honor it here
+            // on the DSP thread so core->reset() never races process(). Text is frozen
+            // (kept), timing/detector re-acquire on the new signal.
+            if (resetDecodeReq.exchange(false)) {
+                std::lock_guard<std::mutex> lck(mtx);
+                for (auto& e : entries) { e.channel->resetDecodeState(); }
+            }
             bool scanned = scanner.feed(data, count);
             if (scanned && autoDetect) {
                 std::lock_guard<std::mutex> lck(detectedMtx);
@@ -260,6 +268,11 @@ namespace cw {
             stableTones.clear();
         }
 
+        // UI thread: the operator retuned — request a decode-state reset (honored on
+        // the DSP thread in process()). Decoded text is kept (frozen); timing/detector
+        // re-acquire on the new signal instead of dragging the old estimates.
+        void requestResetDecode() { resetDecodeReq = true; }
+
         void rebuildPinnedList() {
             pinnedTones.clear();
             for (auto& e : entries) {
@@ -349,6 +362,7 @@ namespace cw {
         ToneScanner scanner;
         int nextId = 0;
 
+        std::atomic<bool> resetDecodeReq{false};  // UI->DSP freq-switch reset request
         std::mutex mtx;         // protects entries vector
         std::mutex detectedMtx; // protects lastDetected + scanReady
         bool scanReady = false;
